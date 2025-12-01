@@ -24,3 +24,9 @@ Thumbs.db
 
 # Test artifacts
 *.profraw
+
+# Fuzz testing
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/Cargo.lock
