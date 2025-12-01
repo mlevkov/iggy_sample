@@ -1,0 +1,218 @@
+# Pull Request specific checks
+#
+# Additional validation that runs only on pull requests.
+# Includes: PR size, conventional commits, documentation, and review checklist.
+
+name: PR Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ==========================================================================
+  # PR size check
+  # ==========================================================================
+  pr-size:
+    name: PR Size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check PR size
+        run: |
+          # Get the number of changed lines
+          ADDITIONS=$(gh pr view ${{ github.event.pull_request.number }} --json additions -q '.additions')
+          DELETIONS=$(gh pr view ${{ github.event.pull_request.number }} --json deletions -q '.deletions')
+          TOTAL=$((ADDITIONS + DELETIONS))
+
+          echo "PR changes: +$ADDITIONS -$DELETIONS (total: $TOTAL lines)"
+
+          # Warn if PR is large (>500 lines)
+          if [ "$TOTAL" -gt 500 ]; then
+            echo "::warning::Large PR detected ($TOTAL lines). Consider breaking into smaller PRs."
+          fi
+
+          # Fail if PR is very large (>1000 lines)
+          if [ "$TOTAL" -gt 1000 ]; then
+            echo "::error::PR is too large ($TOTAL lines). Please break into smaller PRs."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # ==========================================================================
+  # Conventional commits check
+  # ==========================================================================
+  conventional-commits:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages
+        run: |
+          # Get all commits in this PR
+          COMMITS=$(git log --format="%s" origin/${{ github.base_ref }}..HEAD)
+
+          # Regex for conventional commits
+          PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?: .+"
+
+          FAILED=0
+          while IFS= read -r commit; do
+            if [[ ! "$commit" =~ $PATTERN ]]; then
+              echo "::error::Non-conventional commit: '$commit'"
+              echo "Expected format: type(scope): description"
+              echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+              FAILED=1
+            fi
+          done <<< "$COMMITS"
+
+          if [ "$FAILED" -eq 1 ]; then
+            exit 1
+          fi
+
+          echo "All commits follow conventional commit format!"
+
+  # ==========================================================================
+  # Documentation check
+  # ==========================================================================
+  docs-check:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check for missing documentation
+        run: |
+          # Check if public items have documentation
+          cargo doc --no-deps 2>&1 | grep -i "missing documentation" && {
+            echo "::warning::Some public items are missing documentation"
+          } || true
+
+      - name: Check CLAUDE.md is updated
+        run: |
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}..HEAD)
+
+          # Check if src files changed but CLAUDE.md didn't
+          if echo "$CHANGED_FILES" | grep -q "^src/" && ! echo "$CHANGED_FILES" | grep -q "CLAUDE.md"; then
+            echo "::notice::Source files changed but CLAUDE.md was not updated. Consider updating project documentation."
+          fi
+
+  # ==========================================================================
+  # API breaking changes check (semver)
+  # ==========================================================================
+  semver:
+    name: Semver Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@cargo-semver-checks
+
+      - name: Check for breaking changes
+        run: cargo semver-checks check-release
+        continue-on-error: true  # Don't fail, just warn
+
+  # ==========================================================================
+  # Complexity analysis
+  # ==========================================================================
+  complexity:
+    name: Complexity Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Count lines per file
+        run: |
+          echo "Files with >500 lines (consider splitting):"
+          find src -name "*.rs" -exec wc -l {} \; | awk '$1 > 500 {print}' | sort -rn || true
+
+      - name: Check for large functions
+        run: |
+          # Simple heuristic: count fn definitions and their approximate sizes
+          echo "Checking for potentially complex functions..."
+          for file in $(find src -name "*.rs"); do
+            awk '
+              /^[[:space:]]*(pub )?fn / { fn_name=$0; fn_start=NR }
+              fn_start && /^[[:space:]]*}[[:space:]]*$/ {
+                fn_size = NR - fn_start
+                if (fn_size > 50) {
+                  print FILENAME ":" fn_start " - Function is " fn_size " lines (consider refactoring)"
+                }
+                fn_start = 0
+              }
+            ' "$file"
+          done
+
+  # ==========================================================================
+  # Test coverage diff
+  # ==========================================================================
+  coverage-diff:
+    name: Coverage Diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage summary
+        run: |
+          cargo llvm-cov --all-features --workspace --summary-only 2>&1 | tee coverage-summary.txt
+
+          # Extract coverage percentage
+          COVERAGE=$(grep -oP 'Total coverage: \K[\d.]+' coverage-summary.txt || echo "unknown")
+          echo "Current test coverage: $COVERAGE%"
+
+          # Warn if coverage is below threshold
+          if [[ "$COVERAGE" != "unknown" ]] && (( $(echo "$COVERAGE < 60" | bc -l) )); then
+            echo "::warning::Test coverage is below 60% ($COVERAGE%)"
+          fi
+
+  # ==========================================================================
+  # PR checklist reminder
+  # ==========================================================================
+  checklist:
+    name: PR Checklist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR description
+        run: |
+          BODY="${{ github.event.pull_request.body }}"
+
+          # Check if PR has a description
+          if [ -z "$BODY" ] || [ ${#BODY} -lt 50 ]; then
+            echo "::warning::PR description is missing or too short. Please describe your changes."
+          fi
+
+          # Check for unchecked items in checklist
+          if echo "$BODY" | grep -q "\[ \]"; then
+            echo "::notice::PR has unchecked items in the checklist. Please review before merging."
+          fi

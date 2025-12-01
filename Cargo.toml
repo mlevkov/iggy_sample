@@ -1,0 +1,89 @@
+[package]
+name = "iggy_sample"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90.0"
+description = "A comprehensive demonstration of Apache Iggy message streaming with Axum"
+license = "MIT"
+repository = "https://github.com/mlevkov/iggy_sample"
+homepage = "https://github.com/mlevkov/iggy_sample"
+documentation = "https://docs.rs/iggy_sample"
+authors = ["Maxim Levkov"]
+keywords = ["iggy", "message-streaming", "axum", "async", "event-driven"]
+categories = ["web-programming", "asynchronous", "network-programming"]
+readme = "README.md"
+
+[dependencies]
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "request-id", "propagate-header"] }
+
+# Async runtime
+tokio = { version = "1.48", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Message streaming (edge SDK for the latest server features - io_uring, shared-nothing architecture)
+iggy = "0.8.0-edge.6"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Configuration
+dotenvy = "0.15"
+
+# Logging/Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities
+uuid = { version = "1.18", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Decimal arithmetic for monetary values (avoids floating-point precision issues)
+rust_decimal = { version = "1.39", features = ["serde", "serde-with-str"] }
+
+# Random number generation (for jitter in backoff)
+rand = "0.9"
+
+# Rate limiting
+governor = "0.10"
+
+# Security - password hashing for API key validation (constant-time comparison)
+subtle = "2.6"
+
+# Exit codes (BSD sysexits compatible)
+exitcode = "1.1"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+testcontainers = "0.26"
+
+# =============================================================================
+# Lints Configuration
+# =============================================================================
+# Deny panicking methods in production code to ensure proper error handling.
+# Use `#[allow(clippy::unwrap_used)]` in tests where panics are acceptable.
+
+[lints.clippy]
+# Deny methods that can panic - forces proper error handling
+unwrap_used = "deny"
+expect_used = "deny"
+# Also deny panicking index operations
+indexing_slicing = "warn"
+
+[lints.rust]
+# Ensure unsafe code is explicitly allowed where needed
+unsafe_code = "warn"
+
+# release building
+[profile.release]
+debug = true
+codegen-units = 1
+lto = true
+panic = "abort"

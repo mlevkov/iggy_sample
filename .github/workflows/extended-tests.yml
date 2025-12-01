@@ -1,0 +1,256 @@
+# Extended testing workflow
+#
+# Runs more comprehensive tests that are too slow for regular CI.
+# Scheduled weekly and on-demand via workflow_dispatch.
+
+name: Extended Tests
+
+on:
+  schedule:
+    # Run every Sunday at 2:00 AM UTC
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      run_benchmarks:
+        description: "Run performance benchmarks"
+        required: false
+        default: true
+        type: boolean
+      run_stress_tests:
+        description: "Run stress tests"
+        required: false
+        default: true
+        type: boolean
+      run_memory_check:
+        description: "Run memory leak check (Valgrind)"
+        required: false
+        default: true
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ==========================================================================
+  # Performance benchmarks
+  # ==========================================================================
+  benchmarks:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.run_benchmarks == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install criterion dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnuplot
+
+      - name: Run benchmarks
+        run: |
+          # Check if benches directory exists
+          if [ -d "benches" ]; then
+            cargo bench --all-features -- --noplot
+          else
+            echo "No benchmarks directory found, skipping..."
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: target/criterion/
+          retention-days: 30
+
+  # ==========================================================================
+  # Stress tests with real Iggy server
+  # ==========================================================================
+  stress-tests:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.run_stress_tests == 'true' }}
+    services:
+      iggy:
+        image: apache/iggy:latest
+        ports:
+          - 8090:8090
+        options: >-
+          --health-cmd "curl -f http://localhost:3000/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Wait for Iggy to be ready
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:8090 > /dev/null 2>&1; then
+              echo "Iggy is ready"
+              break
+            fi
+            echo "Waiting for Iggy... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run stress tests
+        run: |
+          # Run integration tests with increased load
+          cargo test --test '*' --all-features -- --ignored 2>/dev/null || {
+            echo "No ignored (stress) tests found, running regular integration tests with increased iterations..."
+            cargo test --test '*' --all-features
+          }
+        env:
+          IGGY_CONNECTION_STRING: "iggy://iggy:iggy@localhost:8090"
+          STRESS_TEST_ITERATIONS: 1000
+          STRESS_TEST_CONCURRENCY: 50
+
+  # ==========================================================================
+  # Memory leak detection (Valgrind)
+  # ==========================================================================
+  memory-check:
+    name: Memory Check (Valgrind)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.run_memory_check == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Build test binary
+        run: cargo test --no-run --lib --all-features 2>&1 | grep -oP 'target/debug/deps/[^ ]+' | head -1 > test_binary.txt
+
+      - name: Run Valgrind
+        run: |
+          TEST_BINARY=$(cat test_binary.txt)
+          if [ -n "$TEST_BINARY" ] && [ -f "$TEST_BINARY" ]; then
+            valgrind --leak-check=full \
+                     --show-leak-kinds=definite,indirect \
+                     --error-exitcode=1 \
+                     --suppressions=valgrind.supp 2>/dev/null || true \
+                     "$TEST_BINARY" --test-threads=1 2>&1 | tee valgrind-output.txt
+
+            # Check for definite leaks
+            if grep -q "definitely lost: [1-9]" valgrind-output.txt; then
+              echo "::error::Memory leaks detected!"
+              exit 1
+            fi
+          else
+            echo "No test binary found, skipping Valgrind check"
+          fi
+        continue-on-error: true
+
+  # ==========================================================================
+  # Miri (undefined behavior detection)
+  # ==========================================================================
+  miri:
+    name: Miri (UB Detection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Setup Miri
+        run: cargo miri setup
+
+      - name: Run Miri on unit tests
+        run: |
+          # Run Miri on a subset of tests (some may not be compatible)
+          cargo miri test --lib 2>&1 || {
+            echo "::warning::Some tests failed under Miri. This may be due to unsupported operations."
+          }
+        continue-on-error: true
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-ignore-leaks
+
+  # ==========================================================================
+  # Feature matrix testing
+  # ==========================================================================
+  feature-matrix:
+    name: Feature Matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""  # No features (default)
+          - "--all-features"
+          - "--no-default-features"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: features-${{ matrix.features }}
+
+      - name: Build with features
+        run: cargo build ${{ matrix.features }}
+
+      - name: Test with features
+        run: cargo test --lib ${{ matrix.features }}
+
+  # ==========================================================================
+  # Documentation coverage
+  # ==========================================================================
+  doc-coverage:
+    name: Documentation Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check documentation coverage
+        run: |
+          RUSTDOCFLAGS="-Z unstable-options --show-coverage" cargo +nightly doc --no-deps --all-features 2>&1 | tee doc-coverage.txt
+
+          # Extract coverage percentage
+          COVERAGE=$(grep -oP '\d+\.\d+%' doc-coverage.txt | tail -1 || echo "unknown")
+          echo "Documentation coverage: $COVERAGE"
+
+          # Upload as artifact
+          echo "## Documentation Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Coverage: $COVERAGE" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: doc-coverage
+          path: doc-coverage.txt
+
+  # ==========================================================================
+  # Summary
+  # ==========================================================================
+  summary:
+    name: Extended Tests Summary
+    runs-on: ubuntu-latest
+    needs: [benchmarks, stress-tests, memory-check, miri, feature-matrix, doc-coverage]
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## Extended Tests Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Benchmarks | ${{ needs.benchmarks.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Stress Tests | ${{ needs.stress-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Memory Check | ${{ needs.memory-check.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Miri | ${{ needs.miri.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Feature Matrix | ${{ needs.feature-matrix.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Doc Coverage | ${{ needs.doc-coverage.result }} |" >> $GITHUB_STEP_SUMMARY

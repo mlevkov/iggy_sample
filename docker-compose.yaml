@@ -1,0 +1,58 @@
+services:
+  # Apache Iggy message streaming server (edge with io_uring shared-nothing architecture)
+  iggy:
+    image: apache/iggy:latest
+    privileged: true
+    container_name: iggy-server
+    ports:
+      # TCP transport (default)
+      - "8090:8090"
+      # QUIC transport
+      - "8080:8080"
+      # HTTP transport
+      - "3000:3000"
+    volumes:
+      - iggy_data:/iggy/data
+    environment:
+      # Root user credentials
+      - IGGY_ROOT_USERNAME=iggy
+      - IGGY_ROOT_PASSWORD=iggy
+      # Server configuration
+      - IGGY_HTTP_ENABLED=true
+      - IGGY_HTTP_ADDRESS=0.0.0.0:3000
+      - IGGY_TCP_ENABLED=true
+      - IGGY_TCP_ADDRESS=0.0.0.0:8090
+      - IGGY_QUIC_ENABLED=true
+      - IGGY_QUIC_ADDRESS=0.0.0.0:8080
+    healthcheck:
+      test: ["CMD", "iggy", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Sample application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: iggy-sample-app
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - IGGY_CONNECTION_STRING=iggy://iggy:iggy@iggy:8090
+      - IGGY_STREAM=sample-stream
+      - IGGY_TOPIC=events
+      - IGGY_PARTITIONS=3
+      - RUST_LOG=info,iggy_sample=debug
+    depends_on:
+      iggy:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  iggy_data:
+    driver: local

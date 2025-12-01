@@ -1,0 +1,244 @@
+# Release workflow
+#
+# Triggered when a version tag is pushed (e.g., v0.1.0).
+# Builds release binaries for multiple platforms and creates a GitHub release.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"  # Pre-releases like v0.1.0-beta.1
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: iggy-sample
+
+permissions:
+  contents: write
+
+jobs:
+  # ==========================================================================
+  # Validate release
+  # ==========================================================================
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version info
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Check if this is a pre-release
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "Version: $VERSION"
+
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          TAG_VERSION=${{ steps.version.outputs.version }}
+
+          # Strip pre-release suffix for comparison
+          TAG_VERSION_BASE=${TAG_VERSION%%-*}
+
+          if [[ "$CARGO_VERSION" != "$TAG_VERSION_BASE" ]]; then
+            echo "::error::Version mismatch: Cargo.toml has $CARGO_VERSION, tag is $TAG_VERSION_BASE"
+            exit 1
+          fi
+
+          echo "Version verified: $CARGO_VERSION"
+
+  # ==========================================================================
+  # Build release binaries
+  # ==========================================================================
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: [validate]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          # Linux ARM64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          # macOS x86_64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          # macOS ARM64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # Install cross for cross-compilation
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # Build with cross or cargo
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      # Package the binary
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} dist/
+          cp README.md LICENSE* dist/ 2>/dev/null || true
+          cd dist
+          tar -czvf ../${{ env.BINARY_NAME }}-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz *
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe" -Destination dist/
+          Copy-Item README.md -Destination dist/ -ErrorAction SilentlyContinue
+          Copy-Item LICENSE* -Destination dist/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/* -DestinationPath "${{ env.BINARY_NAME }}-${{ needs.validate.outputs.version }}-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: ${{ env.BINARY_NAME }}-${{ needs.validate.outputs.version }}-${{ matrix.target }}.*
+
+  # ==========================================================================
+  # Create GitHub Release
+  # ==========================================================================
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "Generating changelog since $PREV_TAG"
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
+          else
+            echo "No previous tag found, using all commits"
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" HEAD~20..HEAD)
+          fi
+
+          # Save to file for release body
+          echo "$CHANGELOG" > CHANGELOG.md
+          echo "Generated changelog with $(wc -l < CHANGELOG.md) entries"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release v${{ needs.validate.outputs.version }}
+          body_path: CHANGELOG.md
+          prerelease: ${{ needs.validate.outputs.is_prerelease == 'true' }}
+          files: artifacts/**/*
+          generate_release_notes: true
+
+  # ==========================================================================
+  # Publish to crates.io (optional)
+  # ==========================================================================
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [validate, release]
+    # Only publish stable releases
+    if: needs.validate.outputs.is_prerelease == 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true  # Don't fail if already published
+
+  # ==========================================================================
+  # Deploy documentation
+  # ==========================================================================
+  docs:
+    name: Deploy Documentation
+    runs-on: ubuntu-latest
+    needs: [validate, release]
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+
+      - name: Add redirect to index
+        run: echo '<meta http-equiv="refresh" content="0; url=iggy_sample/index.html">' > target/doc/index.html
+
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
