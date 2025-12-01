@@ -33,6 +33,12 @@ jobs:
 
           echo "PR changes: +$ADDITIONS -$DELETIONS (total: $TOTAL lines)"
 
+          # For cleanup PRs (mostly deletions), use additions only
+          if [ "$DELETIONS" -gt "$ADDITIONS" ]; then
+            echo "Cleanup PR detected (more deletions than additions). Using additions for size check."
+            TOTAL=$ADDITIONS
+          fi
+
           # Warn if PR is large (>500 lines)
           if [ "$TOTAL" -gt 500 ]; then
             echo "::warning::Large PR detected ($TOTAL lines). Consider breaking into smaller PRs."
@@ -59,14 +65,17 @@ jobs:
 
       - name: Check commit messages
         run: |
-          # Get all commits in this PR
-          COMMITS=$(git log --format="%s" origin/${{ github.base_ref }}..HEAD)
+          # Get all commits in this PR (exclude merge commits)
+          COMMITS=$(git log --format="%s" --no-merges origin/${{ github.base_ref }}..HEAD)
 
           # Regex for conventional commits
           PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?: .+"
 
           FAILED=0
           while IFS= read -r commit; do
+            # Skip empty lines
+            [ -z "$commit" ] && continue
+
             if [[ ! "$commit" =~ $PATTERN ]]; then
               echo "::error::Non-conventional commit: '$commit'"
               echo "Expected format: type(scope): description"
