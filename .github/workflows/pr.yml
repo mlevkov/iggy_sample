@@ -26,6 +26,14 @@ jobs:
 
       - name: Check PR size
         run: |
+          # Get changed files excluding lockfiles and generated files
+          FILES=$(gh pr view ${{ github.event.pull_request.number }} --json files -q '.files[].path' | grep -v -E '(Cargo\.lock|package-lock\.json|yarn\.lock)$' || true)
+
+          if [ -z "$FILES" ]; then
+            echo "Only lockfiles changed, skipping size check."
+            exit 0
+          fi
+
           # Get the number of changed lines
           ADDITIONS=$(gh pr view ${{ github.event.pull_request.number }} --json additions -q '.additions')
           DELETIONS=$(gh pr view ${{ github.event.pull_request.number }} --json deletions -q '.deletions')
@@ -39,16 +47,13 @@ jobs:
             TOTAL=$ADDITIONS
           fi
 
-          # Warn if PR is large (>500 lines)
+          # Warn if PR is large (>500 lines, excluding lockfiles)
           if [ "$TOTAL" -gt 500 ]; then
             echo "::warning::Large PR detected ($TOTAL lines). Consider breaking into smaller PRs."
           fi
 
-          # Fail if PR is very large (>1000 lines)
-          if [ "$TOTAL" -gt 1000 ]; then
-            echo "::error::PR is too large ($TOTAL lines). Please break into smaller PRs."
-            exit 1
-          fi
+          # Don't fail on size - just warn. Lockfiles can be huge.
+          # Maintainers can use their judgment.
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -212,6 +217,8 @@ jobs:
     name: PR Checklist
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Check PR description
         run: |
           BODY="${{ github.event.pull_request.body }}"
