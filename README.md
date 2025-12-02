@@ -538,7 +538,7 @@ This application implements multiple security layers suitable for production dep
 | RBAC/ABAC | Single-purpose demonstration application, not a multi-tenant system |
 | Encrypted cache | Stats cache is internal, read-only, and contains no sensitive data |
 
-For deployment security guidelines, see the [Deployment Security](#deployment-security) section in the configuration documentation.
+For deployment guidelines (reverse proxy configuration, trusted proxies), see [CLAUDE.md](CLAUDE.md#deployment-security).
 
 ## Performance Considerations
 
