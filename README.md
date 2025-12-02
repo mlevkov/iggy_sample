@@ -512,6 +512,34 @@ All errors return structured JSON responses:
 | `not_found` | 404 | Resource not found |
 | `bad_request` | 400 | Invalid request data |
 
+## Security
+
+This application implements multiple security layers suitable for production deployment.
+
+### Implemented Security Features
+
+| Feature | Location | Description |
+|---------|----------|-------------|
+| CORS | `src/routes.rs` | Configurable origin whitelist via `CORS_ALLOWED_ORIGINS` using `tower-http` |
+| API Key Authentication | `src/middleware/auth.rs` | Constant-time comparison to prevent timing attacks |
+| Rate Limiting | `src/middleware/rate_limit.rs` | Token bucket algorithm via Governor, configurable RPS and burst |
+| Brute Force Protection | `src/middleware/auth.rs` | Per-IP tracking of failed authentication attempts |
+| Input Validation | `src/validation.rs` | Sanitization of stream names, topic names, and event types |
+| Trusted Proxy Support | `src/middleware/ip.rs` | X-Forwarded-For validation against configurable CIDR ranges |
+| Request ID Propagation | `src/middleware/request_id.rs` | UUIDv4 generation for distributed tracing |
+| Security Audit | `.github/workflows/ci.yml` | Automated `cargo-audit` vulnerability scanning in CI |
+| Vulnerability Reporting | `SECURITY.md` | Responsible disclosure policy |
+
+### Not Included (by design)
+
+| Feature | Reason |
+|---------|--------|
+| JWT | API keys are appropriate for service-to-service auth; JWT adds complexity without benefit for this use case |
+| RBAC/ABAC | Single-purpose demonstration application, not a multi-tenant system |
+| Encrypted cache | Stats cache is internal, read-only, and contains no sensitive data |
+
+For deployment security guidelines, see the [Deployment Security](#deployment-security) section in the configuration documentation.
+
 ## Performance Considerations
 
 - **Batch Operations**: Use `/messages/batch` for high-throughput scenarios
