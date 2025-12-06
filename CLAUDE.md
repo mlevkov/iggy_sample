@@ -267,6 +267,7 @@ The project includes a complete Grafana-based observability stack for monitoring
 | Service | Port | Description |
 |---------|------|-------------|
 | **Iggy** | 3000 | Message streaming server (also serves `/metrics`) |
+| **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, and users |
 | **Prometheus** | 9090 | Metrics collection and storage |
 | **Grafana** | 3001 | Visualization and dashboards |
 
@@ -278,9 +279,21 @@ docker-compose up -d
 
 # Access the services:
 # - Iggy HTTP API: http://localhost:3000
+# - Iggy Web UI: http://localhost:3050 (iggy/iggy)
 # - Prometheus: http://localhost:9090
 # - Grafana: http://localhost:3001 (admin/admin)
 ```
+
+### Iggy Web UI
+
+The Iggy Web UI provides a comprehensive dashboard for managing the Iggy server:
+
+- **Streams & Topics**: Create, browse, and delete streams and topics
+- **Messages**: Browse and inspect messages in topics
+- **Users**: Manage users and permissions
+- **Server Health**: Monitor server status and connections
+
+Access at http://localhost:3050 with credentials `iggy/iggy`.
 
 ### Grafana Dashboards
 

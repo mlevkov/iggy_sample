@@ -109,6 +109,22 @@ services:
         networks:
             - iggy-network
 
+    # Iggy Web UI - Dashboard for managing streams, topics, and messages
+    iggy-web-ui:
+        image: apache/iggy-web-ui:latest
+        container_name: iggy-web-ui
+        ports:
+            - "3050:3050"
+        environment:
+            # Connect to Iggy server HTTP API
+            - PUBLIC_IGGY_API_URL=http://iggy:3000
+        depends_on:
+            iggy:
+                condition: service_healthy
+        restart: unless-stopped
+        networks:
+            - iggy-network
+
 volumes:
     iggy_data:
         driver: local
