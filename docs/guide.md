@@ -476,24 +476,119 @@ async fn process_with_dlq(
 
 Design consumers to handle duplicate messages safely.
 
+**Why idempotency matters:** In at-least-once delivery, the same message may be processed multiple times (network retries, consumer restarts). Your processing logic must handle this gracefully.
+
+**The Pattern:** Store processed event IDs in a database. Before processing, check if the event was already handled.
+
 ```rust
+/// Database represents your application's persistent storage.
+/// This could be PostgreSQL, MySQL, MongoDB, Redis, or any database.
+/// 
+/// The key requirement: it must support atomic transactions so we can
+/// record the event ID and apply changes together.
+/// 
+/// Example implementations:
+/// - PostgreSQL with sqlx: `sqlx::PgPool`
+/// - MongoDB: `mongodb::Client`
+/// - Redis: `redis::Client` (for simple cases)
+struct Database {
+    pool: sqlx::PgPool,  // Example: PostgreSQL connection pool
+}
+
+impl Database {
+    /// Check if we've already processed this event.
+    /// This prevents duplicate processing in at-least-once delivery.
+    async fn event_exists(&self, event_id: Uuid) -> Result<bool, Error> {
+        let result = sqlx::query!(
+            "SELECT 1 FROM processed_events WHERE event_id = $1",
+            event_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        
+        Ok(result.is_some())
+    }
+    
+    /// Execute multiple operations atomically.
+    /// Either all succeed or all fail - no partial updates.
+    async fn transaction<F, T>(&self, f: F) -> Result<T, Error>
+    where
+        F: FnOnce(&mut Transaction) -> Future<Output = Result<T, Error>>,
+    {
+        let mut tx = self.pool.begin().await?;
+        let result = f(&mut tx).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+}
+
+/// Idempotent event processing: safe to call multiple times with same event.
 async fn process_order_idempotently(
     event: &OrderEvent,
     db: &Database,
 ) -> Result<(), Error> {
-    // Check if already processed using event ID
+    // Step 1: Check if already processed using event ID
+    // This is the idempotency check - critical for at-least-once delivery
     if db.event_exists(event.id).await? {
         log::info!("Event {} already processed, skipping", event.id);
-        return Ok(());
+        return Ok(());  // Safe to return - we already handled this
     }
     
-    // Process and record the event ID atomically
+    // Step 2: Process and record the event ID atomically
+    // The transaction ensures: either BOTH happen or NEITHER happens
+    // This prevents the bug where we process but don't record (causing reprocess)
     db.transaction(|tx| async {
+        // Apply the business logic (update order status, send email, etc.)
         apply_order_event(tx, event).await?;
+        
+        // Record that we processed this event ID
         tx.record_event_id(event.id).await?;
+        
         Ok(())
     }).await
 }
+
+/// Apply the actual business logic for an order event.
+/// This is where you update your domain models.
+async fn apply_order_event(tx: &mut Transaction, event: &OrderEvent) -> Result<(), Error> {
+    match &event.data {
+        OrderData::Created { items, total } => {
+            // Insert new order into database
+            sqlx::query!(
+                "INSERT INTO orders (id, items, total, status) VALUES ($1, $2, $3, 'pending')",
+                event.order_id, items, total
+            ).execute(tx).await?;
+        }
+        OrderData::Paid { amount } => {
+            // Update order status to paid
+            sqlx::query!(
+                "UPDATE orders SET status = 'paid', paid_amount = $1 WHERE id = $2",
+                amount, event.order_id
+            ).execute(tx).await?;
+        }
+        // ... handle other event types
+    }
+    Ok(())
+}
+```
+
+**Database Schema for Idempotency:**
+
+```sql
+-- Table to track processed events (for idempotency)
+CREATE TABLE processed_events (
+    event_id UUID PRIMARY KEY,
+    processed_at TIMESTAMP DEFAULT NOW(),
+    -- Optional: store event type for debugging
+    event_type VARCHAR(100)
+);
+
+-- Index for fast lookups
+CREATE INDEX idx_processed_events_id ON processed_events(event_id);
+
+-- Optional: clean up old records (events older than retention period)
+-- Run periodically via cron or scheduled job
+DELETE FROM processed_events WHERE processed_at < NOW() - INTERVAL '30 days';
 ```
 
 ---
@@ -502,32 +597,125 @@ async fn process_order_idempotently(
 
 ### Pattern: Outbox for Reliable Publishing
 
-Ensure database changes and event publishing are atomic.
+**The Problem:** How do you ensure a database change and an event publication happen together? If you do them separately, you risk inconsistency.
 
 ```rust
-// Instead of:
-db.save_order(&order).await?;
-producer.send(order_event).await?;  // What if this fails?
+// THE PROBLEM: Two separate operations that can partially fail
 
-// Use outbox pattern:
-db.transaction(|tx| async {
-    tx.save_order(&order).await?;
-    tx.insert_outbox_event(order_event).await?;  // Same transaction
+async fn create_order_naive(order: &Order, producer: &IggyProducer) -> Result<(), Error> {
+    // Step 1: Save to database
+    db.save_order(&order).await?;
+    
+    // Step 2: Publish event
+    producer.send(order_created_event).await?;  // What if this fails?
+    
+    // If Step 1 succeeds but Step 2 fails:
+    // - Order exists in database
+    // - But no event was published
+    // - Other services never learn about the order
+    // - System is now INCONSISTENT
+    
     Ok(())
-}).await?;
+}
+```
 
-// Separate process polls outbox and publishes
+**The Solution: Outbox Pattern**
+
+Instead of publishing directly, write the event to an "outbox" table in the SAME database transaction as your business data. A separate process reads the outbox and publishes to the message broker.
+
+```rust
+/// The Outbox Pattern: Atomic database + event publishing
+/// 
+/// How it works:
+/// 1. Business operation + event insert in ONE transaction
+/// 2. Separate "publisher" process reads outbox table
+/// 3. Publisher sends events to message broker
+/// 4. Publisher marks events as published
+/// 
+/// Benefits:
+/// - Atomicity: If transaction fails, neither data nor event is saved
+/// - Reliability: Events are persisted; can retry publishing
+/// - Ordering: Events published in order they were created
+
+// Step 1: Write business data AND event in same transaction
+async fn create_order_with_outbox(
+    db: &Database,
+    order: &Order,
+) -> Result<(), Error> {
+    db.transaction(|tx| async {
+        // Save the order (your business data)
+        tx.save_order(&order).await?;
+        
+        // Insert event into outbox table (same transaction!)
+        let event = OrderCreatedEvent {
+            order_id: order.id,
+            user_id: order.user_id,
+            total: order.total,
+            created_at: Utc::now(),
+        };
+        tx.insert_outbox_event("order.created", &event).await?;
+        
+        // Both succeed or both fail - atomic!
+        Ok(())
+    }).await
+}
+
+// Step 2: Separate background process that publishes events
 async fn outbox_publisher(db: &Database, producer: &IggyProducer) {
     loop {
+        // Fetch unpublished events from outbox table
         let events = db.fetch_unpublished_events(100).await?;
+        
         for event in events {
-            producer.send(event.payload).await?;
-            db.mark_event_published(event.id).await?;
+            // Publish to Iggy
+            match producer.send(event.payload.clone()).await {
+                Ok(_) => {
+                    // Mark as published so we don't send again
+                    db.mark_event_published(event.id).await?;
+                }
+                Err(e) => {
+                    // Log error, will retry on next iteration
+                    log::error!("Failed to publish event {}: {}", event.id, e);
+                }
+            }
         }
+        
+        // Small delay to avoid busy-looping
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 ```
+
+**Outbox Database Schema:**
+
+```sql
+-- Outbox table: stores events to be published
+CREATE TABLE outbox (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_type VARCHAR(100) NOT NULL,      -- e.g., "order.created"
+    payload JSONB NOT NULL,                 -- The event data
+    created_at TIMESTAMP DEFAULT NOW(),
+    published_at TIMESTAMP NULL,            -- NULL = not yet published
+    
+    -- Optional: for ordering and debugging
+    aggregate_type VARCHAR(100),            -- e.g., "Order"
+    aggregate_id UUID                       -- e.g., the order ID
+);
+
+-- Index for the publisher query (find unpublished events)
+CREATE INDEX idx_outbox_unpublished ON outbox(created_at) 
+    WHERE published_at IS NULL;
+
+-- Publisher query
+SELECT * FROM outbox 
+WHERE published_at IS NULL 
+ORDER BY created_at 
+LIMIT 100;
+```
+
+**Further Reading:**
+- [Microservices Patterns: Transactional Outbox](https://microservices.io/patterns/data/transactional-outbox.html)
+- [Debezium CDC](https://debezium.io/) - Alternative approach using Change Data Capture
 
 ### Pattern: Saga for Distributed Transactions
 
