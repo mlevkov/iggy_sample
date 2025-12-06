@@ -75,6 +75,17 @@ This application showcases how to build a production-ready message streaming ser
 
 .commitlintrc.json            # Conventional commits configuration
 
+observability/
+├── prometheus/
+│   └── prometheus.yml      # Prometheus scrape configuration
+└── grafana/
+    └── provisioning/
+        ├── datasources/
+        │   └── datasources.yml    # Prometheus datasource
+        └── dashboards/
+            ├── dashboards.yml     # Dashboard provisioning
+            └── iggy-overview.json # Pre-built Iggy dashboard
+
 src/
 ├── main.rs           # Application entry point
 ├── lib.rs            # Library exports
@@ -247,6 +258,68 @@ RUST_LOG=debug
 RUST_LOG=trace
 ```
 
+## Observability Stack
+
+The project includes a complete Grafana-based observability stack for monitoring Iggy and the sample application.
+
+### Components
+
+| Service | Port | Description |
+|---------|------|-------------|
+| **Iggy** | 3000 | Message streaming server (also serves `/metrics`) |
+| **Prometheus** | 9090 | Metrics collection and storage |
+| **Grafana** | 3001 | Visualization and dashboards |
+
+### Quick Start with Observability
+
+```bash
+# Start the full stack (Iggy + Prometheus + Grafana)
+docker-compose up -d
+
+# Access the services:
+# - Iggy HTTP API: http://localhost:3000
+# - Prometheus: http://localhost:9090
+# - Grafana: http://localhost:3001 (admin/admin)
+```
+
+### Grafana Dashboards
+
+Pre-configured dashboards are automatically provisioned:
+
+- **Iggy Overview**: Server status, request rates, message throughput, latency percentiles
+
+### Prometheus Metrics
+
+Iggy exposes Prometheus-compatible metrics at `/metrics`:
+
+```bash
+# View raw metrics
+curl http://localhost:3000/metrics
+```
+
+### Customizing Dashboards
+
+1. Log into Grafana at http://localhost:3001
+2. Navigate to Dashboards → Iggy folder
+3. Edit existing dashboards or create new ones
+4. Export JSON and save to `observability/grafana/provisioning/dashboards/`
+
+### Adding OpenTelemetry (Optional)
+
+Iggy supports OpenTelemetry for distributed tracing. Add to docker-compose:
+
+```yaml
+environment:
+  - IGGY_TELEMETRY_ENABLED=true
+  - IGGY_TELEMETRY_SERVICE_NAME=iggy
+  - IGGY_TELEMETRY_LOGS_TRANSPORT=grpc
+  - IGGY_TELEMETRY_LOGS_ENDPOINT=http://otel-collector:4317
+  - IGGY_TELEMETRY_TRACES_TRANSPORT=grpc
+  - IGGY_TELEMETRY_TRACES_ENDPOINT=http://otel-collector:4317
+```
+
+---
+
 ## Development
 
 ### Prerequisites
@@ -255,9 +328,9 @@ RUST_LOG=trace
 
 ### Quick Start
 
-1. Start Iggy server:
+1. Start Iggy server (with observability):
    ```bash
-   docker-compose up -d iggy
+   docker-compose up -d iggy prometheus grafana
    ```
 
 2. Run the application:
