@@ -1,6 +1,6 @@
 # Understanding Partitions in Message Streaming
 
-A deep-dive guide into partitioning strategies, partition keys, and ordering guarantees in event-driven systems.
+A deep-dive guide into partitioning strategies, partition keys, and ordering guarantees in event-driven systems, with specific focus on Apache Iggy.
 
 ---
 
@@ -10,13 +10,17 @@ A deep-dive guide into partitioning strategies, partition keys, and ordering gua
 2. [Why Partitions Exist](#why-partitions-exist)
 3. [The Ordering Problem](#the-ordering-problem)
 4. [Partition Keys Explained](#partition-keys-explained)
-5. [Choosing Partition Keys](#choosing-partition-keys)
-6. [Common Partitioning Mistakes](#common-partitioning-mistakes)
-7. [Partition Count Guidelines](#partition-count-guidelines)
-8. [Rebalancing and Consumer Groups](#rebalancing-and-consumer-groups)
-9. [Real-World Scenarios](#real-world-scenarios)
-10. [Code Examples](#code-examples)
-11. [Troubleshooting](#troubleshooting)
+5. [Iggy Partitioning Strategies](#iggy-partitioning-strategies)
+6. [Choosing Partition Keys](#choosing-partition-keys)
+7. [Common Partitioning Mistakes](#common-partitioning-mistakes)
+8. [Partition Count Guidelines](#partition-count-guidelines)
+9. [Iggy Partition Storage Architecture](#iggy-partition-storage-architecture)
+10. [Iggy Server Configuration](#iggy-server-configuration)
+11. [Rebalancing and Consumer Groups](#rebalancing-and-consumer-groups)
+12. [Custom Partitioners](#custom-partitioners)
+13. [Real-World Scenarios](#real-world-scenarios)
+14. [Code Examples](#code-examples)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -214,6 +218,109 @@ hash("order-456") % 3 = 2  ← Always 2
 | **Distribution** | Even spread across values | Skewed (hot keys) |
 | **Stability** | Doesn't change for entity | Changes over time |
 | **Business meaning** | Represents ordering boundary | Arbitrary |
+
+---
+
+## Iggy Partitioning Strategies
+
+Apache Iggy provides three built-in partitioning strategies through the `Partitioning` struct and `PartitioningKind` enum.
+
+### Strategy 1: Balanced (Round-Robin)
+
+The server automatically distributes messages across partitions using round-robin:
+
+```rust
+use iggy::prelude::*;
+
+// Messages distributed: P0 → P1 → P2 → P0 → P1 → P2 → ...
+let partitioning = Partitioning::balanced();
+```
+
+**When to use:**
+- Order of events doesn't matter
+- Maximum throughput distribution
+- Stateless event processing (logs, metrics)
+
+**Trade-off:** No ordering guarantees across messages.
+
+### Strategy 2: Partition ID (Direct Assignment)
+
+Explicitly specify the target partition:
+
+```rust
+use iggy::prelude::*;
+
+// Always send to partition 2
+let partitioning = Partitioning::partition_id(2);
+```
+
+**When to use:**
+- Priority queues (partition 0 = high priority)
+- Manual load balancing
+- Testing specific partitions
+- Sticky routing based on external logic
+
+**Trade-off:** You manage distribution manually.
+
+### Strategy 3: Messages Key (Hash-Based)
+
+The server calculates partition using **MurmurHash3** of your key:
+
+```rust
+use iggy::prelude::*;
+
+// All messages with same key go to same partition
+// partition = murmur3(key) % partition_count
+
+// String keys
+let partitioning = Partitioning::messages_key_str("order-123")?;
+
+// Byte slice keys
+let partitioning = Partitioning::messages_key(b"order-123")?;
+
+// Numeric keys (efficient - no string conversion)
+let partitioning = Partitioning::messages_key_u64(order_id);
+let partitioning = Partitioning::messages_key_u128(uuid_as_u128);
+```
+
+**Key constraints:**
+- Maximum key length: **255 bytes**
+- Supports: `&[u8]`, `&str`, `u32`, `u64`, `u128`
+
+**When to use:**
+- Ordering required for related events
+- Entity-based processing (orders, users, accounts)
+- Session affinity
+
+### Partitioning Strategy Comparison
+
+| Strategy | Ordering | Distribution | Use Case |
+|----------|----------|--------------|----------|
+| `balanced()` | None | Even (round-robin) | Logs, metrics, stateless |
+| `partition_id(n)` | Per-partition | Manual | Priority queues, testing |
+| `messages_key(k)` | Per-key | Hash-based | Entity workflows, sessions |
+
+### Understanding MurmurHash3
+
+Iggy uses MurmurHash3 for key-based partitioning:
+
+```
+partition_id = murmur3_hash(key_bytes) % partition_count
+```
+
+**Properties of MurmurHash3:**
+- Non-cryptographic (fast, not secure)
+- Excellent distribution (minimal collisions)
+- Deterministic (same key = same hash)
+- Used by Kafka, Cassandra, and other distributed systems
+
+**Why it matters:**
+```
+murmur3("order-123") = 0x8A3F2B1C  (example)
+murmur3("order-124") = 0x2D7E9F8A  (completely different)
+
+Even sequential keys distribute evenly across partitions.
+```
 
 ---
 
@@ -472,6 +579,196 @@ Example:
 
 ---
 
+## Iggy Partition Storage Architecture
+
+Understanding how Iggy stores partition data helps you make better configuration decisions.
+
+### Physical Storage Layout
+
+```
+data/                           # Base data directory
+└── streams/
+    └── {stream_id}/
+        └── topics/
+            └── {topic_id}/
+                └── partitions/
+                    ├── 0/                    # Partition 0
+                    │   ├── 00000000000000000001/  # Segment 1
+                    │   │   ├── .log              # Message data
+                    │   │   ├── .index            # Offset index
+                    │   │   └── .timeindex        # Timestamp index
+                    │   └── 00000000000000001001/  # Segment 2
+                    │       ├── .log
+                    │       ├── .index
+                    │       └── .timeindex
+                    ├── 1/                    # Partition 1
+                    └── 2/                    # Partition 2
+```
+
+### Segments
+
+Each partition is divided into **segments** - fixed-size files that make up the append-only log:
+
+```
+Partition 0:
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│  Segment 1  │ → │  Segment 2  │ → │  Segment 3  │ → (active)
+│  (closed)   │   │  (closed)   │   │  (writing)  │
+│  1 GiB      │   │  1 GiB      │   │  0.3 GiB    │
+└─────────────┘   └─────────────┘   └─────────────┘
+    offset          offset            offset
+    0-999K          1M-1.99M          2M-current
+```
+
+**Segment benefits:**
+- Efficient deletion (drop entire segment files)
+- Parallel reads from different segments
+- Memory-mapped I/O for performance
+- Archival/backup at segment granularity
+
+### Indexes
+
+Each segment has two indexes for fast lookups:
+
+**Offset Index (`.index`):**
+```
+Maps message offset → file position
+┌────────────┬───────────────┐
+│ Offset     │ File Position │
+├────────────┼───────────────┤
+│ 1000000    │ 0             │
+│ 1000100    │ 52480         │  ← Sparse index (every N messages)
+│ 1000200    │ 104960        │
+└────────────┴───────────────┘
+
+Lookup: offset 1000150 → scan from 52480
+```
+
+**Time Index (`.timeindex`):**
+```
+Maps timestamp → offset
+┌─────────────────────┬────────────┐
+│ Timestamp           │ Offset     │
+├─────────────────────┼────────────┤
+│ 2024-01-15T10:00:00 │ 1000000    │
+│ 2024-01-15T10:01:00 │ 1000500    │
+│ 2024-01-15T10:02:00 │ 1001000    │
+└─────────────────────┴────────────┘
+
+Lookup: "messages after 10:01:30" → start at offset 1000500
+```
+
+### Memory and Caching
+
+Iggy provides configurable index caching:
+
+| Cache Mode | Behavior | Memory Usage | Read Performance |
+|------------|----------|--------------|------------------|
+| `all` | All indexes in memory | High | Fastest |
+| `open_segment` | Only active segment | Medium | Fast for recent |
+| `none` | Read from disk | Low | Slower |
+
+---
+
+## Iggy Server Configuration
+
+These settings in `server.toml` affect partition behavior.
+
+### Partition Settings
+
+```toml
+[system.partition]
+# Directory for partition data (relative to topic.path)
+path = "partitions"
+
+# Force fsync after every write (durability vs performance)
+# true = data safe on disk immediately (slower)
+# false = OS manages write buffering (faster, small data loss risk on crash)
+enforce_fsync = false
+
+# Validate CRC checksums when loading data
+# true = detect corruption on startup (slower startup)
+# false = trust data integrity (faster startup)
+validate_checksum = false
+
+# Buffered messages before forced disk write
+# Higher = better throughput, more memory, larger data loss window
+messages_required_to_save = 1024  # default, minimum: 32
+
+# Buffered bytes before forced disk write
+# Triggers save when either this OR messages_required_to_save is reached
+size_of_messages_required_to_save = "1 MiB"  # minimum: 512 B
+```
+
+### Segment Settings
+
+```toml
+[system.segment]
+# Maximum segment file size before rolling to new segment
+# Smaller = more files, faster deletion; Larger = fewer files, better sequential I/O
+size = "1 GiB"  # maximum: 1 GiB
+
+# Message expiration time (retention policy)
+# "none" = keep forever
+# Time format: "7 days", "24 hours", "30 minutes"
+message_expiry = "none"
+
+# What happens when segments expire
+# true = move to archive directory
+# false = delete permanently
+archive_expired = false
+
+# Index caching strategy
+# "all" = cache all indexes (fastest reads, most memory)
+# "open_segment" = cache only active segment (balanced)
+# "none" = no caching (lowest memory, slowest reads)
+cache_indexes = "open_segment"
+
+# File system confirmation behavior
+# "wait" = block until OS confirms write
+# "no_wait" = return immediately (faster, less safe)
+server_confirmation = "wait"
+```
+
+### Topic Settings (Affects All Partitions)
+
+```toml
+[system.topic]
+# Maximum total size for all partitions in a topic
+# "unlimited" or size like "100 GiB"
+max_size = "unlimited"
+
+# Auto-delete oldest segments when max_size is reached
+# Only takes effect if max_size is set
+delete_oldest_segments = false
+```
+
+### Message Deduplication
+
+```toml
+[system.message_deduplication]
+# Enable server-side duplicate detection by message ID
+enabled = false
+
+# Maximum message IDs to track
+max_entries = 10000
+
+# How long to remember message IDs
+expiry = "1 m"
+```
+
+### Configuration Trade-offs
+
+| Goal | Configuration |
+|------|---------------|
+| **Maximum durability** | `enforce_fsync = true`, `validate_checksum = true` |
+| **Maximum throughput** | `enforce_fsync = false`, `messages_required_to_save = 5000` |
+| **Low memory** | `cache_indexes = "none"`, smaller `messages_required_to_save` |
+| **Fast reads** | `cache_indexes = "all"` |
+| **Auto-cleanup** | `message_expiry = "7 days"`, `delete_oldest_segments = true` |
+
+---
+
 ## Rebalancing and Consumer Groups
 
 ### How Consumer Groups Use Partitions
@@ -553,6 +850,175 @@ for message in batch {
 }
 consumer.commit().await?;  // One commit per batch
 ```
+
+---
+
+## Custom Partitioners
+
+Iggy supports custom partitioning logic through the `Partitioner` trait. This is useful when built-in strategies don't meet your needs.
+
+### The Partitioner Trait
+
+```rust
+use iggy::prelude::*;
+
+/// Custom partitioner must implement this trait
+pub trait Partitioner: Send + Sync + Debug {
+    /// Calculate which partition a message should go to
+    fn calculate_partition_id(
+        &self,
+        stream_id: &Identifier,
+        topic_id: &Identifier,
+        messages: &[IggyMessage],
+    ) -> Result<u32, IggyError>;
+}
+```
+
+### Example: Weighted Partitioner
+
+Route more traffic to specific partitions (e.g., for heterogeneous hardware):
+
+```rust
+use iggy::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Routes 70% to partitions 0-1, 30% to partitions 2-4
+#[derive(Debug)]
+struct WeightedPartitioner {
+    counter: AtomicU64,
+    high_capacity_partitions: Vec<u32>,  // [0, 1] - faster machines
+    low_capacity_partitions: Vec<u32>,   // [2, 3, 4] - slower machines
+    high_capacity_weight: u64,           // 70
+}
+
+impl Partitioner for WeightedPartitioner {
+    fn calculate_partition_id(
+        &self,
+        _stream_id: &Identifier,
+        _topic_id: &Identifier,
+        _messages: &[IggyMessage],
+    ) -> Result<u32, IggyError> {
+        let count = self.counter.fetch_add(1, Ordering::Relaxed);
+        
+        // 70% to high capacity, 30% to low capacity
+        if count % 100 < self.high_capacity_weight {
+            let idx = (count as usize) % self.high_capacity_partitions.len();
+            Ok(self.high_capacity_partitions[idx])
+        } else {
+            let idx = (count as usize) % self.low_capacity_partitions.len();
+            Ok(self.low_capacity_partitions[idx])
+        }
+    }
+}
+```
+
+### Example: Time-Based Partitioner
+
+Route messages to partitions based on time windows:
+
+```rust
+use iggy::prelude::*;
+use chrono::{Timelike, Utc};
+
+/// Routes to different partitions by hour of day
+/// Useful for time-bucketed analytics
+#[derive(Debug)]
+struct HourlyPartitioner {
+    partitions_count: u32,
+}
+
+impl Partitioner for HourlyPartitioner {
+    fn calculate_partition_id(
+        &self,
+        _stream_id: &Identifier,
+        _topic_id: &Identifier,
+        _messages: &[IggyMessage],
+    ) -> Result<u32, IggyError> {
+        let hour = Utc::now().hour();
+        Ok(hour % self.partitions_count)
+    }
+}
+```
+
+### Example: Content-Based Partitioner
+
+Route based on message content:
+
+```rust
+use iggy::prelude::*;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct EventEnvelope {
+    priority: String,
+    // ... other fields
+}
+
+/// Routes high-priority messages to partition 0
+#[derive(Debug)]
+struct PriorityPartitioner {
+    high_priority_partition: u32,
+    normal_partitions: Vec<u32>,
+    counter: AtomicU64,
+}
+
+impl Partitioner for PriorityPartitioner {
+    fn calculate_partition_id(
+        &self,
+        _stream_id: &Identifier,
+        _topic_id: &Identifier,
+        messages: &[IggyMessage],
+    ) -> Result<u32, IggyError> {
+        // Check first message for priority (batch typically has same priority)
+        if let Some(msg) = messages.first() {
+            if let Ok(envelope) = serde_json::from_slice::<EventEnvelope>(&msg.payload) {
+                if envelope.priority == "high" {
+                    return Ok(self.high_priority_partition);
+                }
+            }
+        }
+        
+        // Round-robin for normal priority
+        let count = self.counter.fetch_add(1, Ordering::Relaxed);
+        let idx = (count as usize) % self.normal_partitions.len();
+        Ok(self.normal_partitions[idx])
+    }
+}
+```
+
+### Using a Custom Partitioner
+
+```rust
+use iggy::prelude::*;
+use std::sync::Arc;
+
+// Create your custom partitioner
+let partitioner = Arc::new(WeightedPartitioner {
+    counter: AtomicU64::new(0),
+    high_capacity_partitions: vec![0, 1],
+    low_capacity_partitions: vec![2, 3, 4],
+    high_capacity_weight: 70,
+});
+
+// Use with IggyClient
+let client = IggyClient::builder()
+    .with_tcp()
+    .with_server_address("127.0.0.1:8090")
+    .with_partitioner(partitioner)  // Inject custom partitioner
+    .build()?;
+```
+
+### When to Use Custom Partitioners
+
+| Use Case | Built-in Strategy | Custom Partitioner |
+|----------|-------------------|-------------------|
+| Simple key-based | `messages_key()` | Not needed |
+| Round-robin | `balanced()` | Not needed |
+| Weighted distribution | - | Yes |
+| Time-bucketed | - | Yes |
+| Content-based routing | - | Yes |
+| A/B testing | - | Yes |
+| Geographic routing | - | Yes |
 
 ---
 
@@ -956,10 +1422,25 @@ What should my partition key be?
 
 ## Further Reading
 
-- [Kafka Partitioning](https://kafka.apache.org/documentation/#intro_concepts_and_terms) - Similar concepts apply
-- [Designing Data-Intensive Applications](https://dataintensive.net/) - Chapter 6: Partitioning
-- [Martin Kleppmann's Blog](https://martin.kleppmann.com/) - Distributed systems fundamentals
+### Apache Iggy Resources
+- [Apache Iggy Documentation](https://iggy.apache.org/docs/) - Official documentation
+- [Iggy Getting Started Guide](https://iggy.apache.org/docs/introduction/getting-started) - Partitioning strategies explained
+- [Iggy Server Configuration](https://iggy.apache.org/docs/server/configuration) - Partition and segment settings
+- [Iggy Rust SDK](https://docs.rs/iggy/latest/iggy/) - API reference for `Partitioning`, `Partitioner` trait
+
+### Distributed Systems Fundamentals
+- [Designing Data-Intensive Applications](https://dataintensive.net/) - Chapter 6: Partitioning (Martin Kleppmann)
 - [Jay Kreps: The Log](https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying) - Foundational paper on log-based systems
+- [Martin Kleppmann's Blog](https://martin.kleppmann.com/) - Distributed systems deep dives
+
+### Related Technologies
+- [Kafka Partitioning](https://kafka.apache.org/documentation/#intro_concepts_and_terms) - Similar concepts (Iggy inspired by Kafka)
+- [MurmurHash](https://en.wikipedia.org/wiki/MurmurHash) - Hash algorithm used for partition key routing
+- [Cassandra Murmur3Partitioner](https://docs.datastax.com/en/cassandra-oss/3.x/cassandra/architecture/archPartitionerM3P.html) - Another system using murmur3
+
+### Performance and Benchmarking
+- [Iggy Benchmarks](https://benchmarks.iggy.apache.org) - Official performance metrics
+- [Transparent Benchmarking Blog Post](https://iggy.apache.org/blogs) - Iggy's approach to benchmarking
 
 ---
 
