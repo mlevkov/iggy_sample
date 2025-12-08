@@ -688,9 +688,7 @@ Automatically creates PRs for:
 
 ## Documentation
 
-- [docs/guide.md](docs/guide.md) - Comprehensive event-driven architecture guide
-- [architecture.md](architecture.md) - Detailed architecture documentation
-- [CLAUDE.md](CLAUDE.md) - Project documentation for AI assistants
+See the [docs/](docs/) directory for comprehensive guides covering event-driven architecture, partitioning strategies, durable storage configuration, and more.
 
 ## Resources
 

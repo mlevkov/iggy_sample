@@ -128,7 +128,18 @@ fuzz/
     └── fuzz_validation.rs # Validation function fuzz tests
 
 deny.toml                 # License and security policy for cargo-deny
+
+docs/                     # Documentation and guides
+├── README.md             # Guide index and navigation
+├── guide.md              # Event-driven architecture guide
+├── partitioning-guide.md # Partitioning strategies
+├── durable-storage-guide.md # Storage and durability configuration
+└── structured-concurrency.md # Task lifecycle management
 ```
+
+## Documentation
+
+See the [docs/](docs/) directory for comprehensive guides covering event-driven architecture, partitioning strategies, durable storage configuration, and more.
 
 ## API Endpoints
 
