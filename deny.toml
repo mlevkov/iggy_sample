@@ -80,8 +80,17 @@ unmaintained = "warn"
 # Lint level for yanked crates
 yanked = "warn"
 
-# Ignore specific advisories (add IDs if needed)
-ignore = []
+# Ignore specific advisories
+# These are transitive dependencies we cannot directly update
+ignore = [
+    # instant is unmaintained, but comes from iggy -> reqwest-retry -> parking_lot v0.11.2
+    # Upstream needs to update parking_lot to v0.12+
+    "RUSTSEC-2024-0384",
+
+    # rustls-pemfile is unmaintained, but comes from testcontainers -> bollard (dev-dependency only)
+    # Upstream needs to migrate to rustls-pki-types
+    "RUSTSEC-2025-0134",
+]
 
 # =============================================================================
 # Sources
