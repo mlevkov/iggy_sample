@@ -31,3 +31,6 @@ fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
 fuzz/Cargo.lock
+
+# local settings
+.claude/settings.local.json

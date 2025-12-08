@@ -50,7 +50,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Axum HTTP Server                       │
-│                        (Port 3000)                          │
+│                        (Port 8000)                          │
 ├─────────────────────────────────────────────────────────────┤
 │  Middleware Stack                                           │
 │  Rate Limit → Auth → Request ID → Tracing → CORS            │
@@ -68,8 +68,11 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 │  IggyClientWrapper (with auto-reconnection)                 │
 │  High-level wrapper around Iggy SDK                         │
 ├─────────────────────────────────────────────────────────────┤
+│  Observability Stack                                        │
+│  Prometheus (9090) → Grafana (3001) + Iggy Web UI (3050)    │
+├─────────────────────────────────────────────────────────────┤
 │  Apache Iggy Server                                         │
-│  TCP (8090) / QUIC (8080) / HTTP (3000)                     │
+│  TCP (8090) / QUIC (8080) / HTTP (3000) / Metrics (/metrics)│
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -88,11 +91,18 @@ cd iggy_sample
 cp .env.example .env
 ```
 
-### 2. Start Iggy Server
+### 2. Start the Full Stack
 
 ```bash
-docker-compose up -d iggy
+# Start Iggy server with observability stack
+docker-compose up -d
 ```
+
+This starts:
+- **Iggy Server** - Message streaming (ports 8090, 8080, 3000)
+- **Iggy Web UI** - Dashboard for managing streams/topics (port 3050)
+- **Prometheus** - Metrics collection (port 9090)
+- **Grafana** - Visualization dashboards (port 3001)
 
 ### 3. Run the Application
 
@@ -100,12 +110,12 @@ docker-compose up -d iggy
 cargo run
 ```
 
-The server will start on `http://localhost:3000` (or the port specified in `.env`).
+The server will start on `http://localhost:8000` (or the port specified in `.env`).
 
 ### 4. Verify It's Working
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:8000/health
 ```
 
 Expected response:
@@ -117,6 +127,16 @@ Expected response:
   "timestamp": "2024-01-15T10:30:00Z"
 }
 ```
+
+### 5. Access the Dashboards
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Sample App API | http://localhost:8000 | - |
+| Iggy HTTP API | http://localhost:3000 | - |
+| Iggy Web UI | http://localhost:3050 | iggy / iggy |
+| Prometheus | http://localhost:9090 | - |
+| Grafana | http://localhost:3001 | admin / admin |
 
 ## API Reference
 
@@ -455,6 +475,80 @@ docker build -t iggy-sample .
 docker run -p 8000:8000 -e IGGY_CONNECTION_STRING=iggy://iggy:iggy@host.docker.internal:8090 iggy-sample
 ```
 
+## Observability Stack
+
+The project includes a complete observability stack for monitoring and managing Iggy.
+
+### Components
+
+| Component | Port | Description |
+|-----------|------|-------------|
+| **Iggy Server** | 3000 | HTTP API + Prometheus metrics at `/metrics` |
+| **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, users |
+| **Prometheus** | 9090 | Metrics collection with 15-day retention |
+| **Grafana** | 3001 | Pre-configured dashboards for visualization |
+
+### Iggy Web UI
+
+The Iggy Web UI provides a comprehensive dashboard:
+
+- **Streams & Topics**: Create, browse, and delete streams and topics
+- **Messages**: Browse and inspect messages in real-time
+- **Users**: Manage users and permissions
+- **Server Health**: Monitor connections and server status
+
+Access at http://localhost:3050 with credentials `iggy/iggy`.
+
+### Grafana Dashboards
+
+Pre-configured dashboards are automatically provisioned:
+
+- **Iggy Overview**: Server status, request rates, message throughput, latency percentiles
+
+Access at http://localhost:3001 with credentials `admin/admin`.
+
+### Prometheus Metrics
+
+Iggy exposes Prometheus-compatible metrics:
+
+```bash
+# View raw metrics from Iggy
+curl http://localhost:3000/metrics
+
+# Query via Prometheus
+curl 'http://localhost:9090/api/v1/query?query=up{job="iggy"}'
+```
+
+### Configuration Files
+
+```
+observability/
+├── prometheus/
+│   └── prometheus.yml           # Scrape configuration
+└── grafana/
+    └── provisioning/
+        ├── datasources/
+        │   └── datasources.yml  # Prometheus datasource
+        └── dashboards/
+            ├── dashboards.yml   # Dashboard provisioning
+            └── iggy-overview.json
+```
+
+### Adding OpenTelemetry (Optional)
+
+Iggy supports OpenTelemetry for distributed tracing:
+
+```yaml
+# Add to iggy service in docker-compose.yaml
+environment:
+  - IGGY_TELEMETRY_ENABLED=true
+  - IGGY_TELEMETRY_SERVICE_NAME=iggy
+  - IGGY_TELEMETRY_LOGS_TRANSPORT=grpc
+  - IGGY_TELEMETRY_LOGS_ENDPOINT=http://otel-collector:4317
+  - IGGY_TELEMETRY_TRACES_TRANSPORT=grpc
+  - IGGY_TELEMETRY_TRACES_ENDPOINT=http://otel-collector:4317
+```
+
 ## Event Schema
 
 Events follow a structured format with type-safe payloads:
@@ -594,8 +688,7 @@ Automatically creates PRs for:
 
 ## Documentation
 
-- [architecture.md](architecture.md) - Detailed architecture documentation
-- [CLAUDE.md](CLAUDE.md) - Project documentation for AI assistants
+See the [docs/](docs/) directory for comprehensive guides covering event-driven architecture, partitioning strategies, durable storage configuration, and more.
 
 ## Resources
 

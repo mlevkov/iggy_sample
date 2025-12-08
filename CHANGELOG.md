@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Observability Stack**: Complete Grafana-based monitoring setup
+  - Prometheus metrics collection (port 9090) with 15-day retention
+  - Grafana dashboards (port 3001) with pre-configured Prometheus datasource
+  - Iggy Web UI integration (port 3050) for stream/topic/message management
+  - Pre-built Iggy Overview dashboard (server status, request rates, throughput, latency)
+- **Documentation Guides**:
+  - Event-driven architecture guide (`docs/guide.md`): streams/topics/partitions, consumer groups, error handling patterns, production patterns (outbox, saga, idempotency)
+  - Partitioning guide (`docs/partitioning-guide.md`): partition keys, ordering guarantees, selection strategies
+  - Durable storage guide (`docs/durable-storage-guide.md`): storage architecture, fsync configuration, S3 backup/archiving, recovery procedures
+  - Documentation index (`docs/README.md`) with topic-based navigation
+
+### Changed
+
+- Updated `docker-compose.yaml` with full observability stack configuration
+- Simplified documentation section in README.md to reference `docs/` directory
+
 ## [0.1.0] - 2024-12-01
 
 ### Added

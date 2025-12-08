@@ -1,58 +1,138 @@
 services:
-  # Apache Iggy message streaming server (edge with io_uring shared-nothing architecture)
-  iggy:
-    image: apache/iggy:latest
-    privileged: true
-    container_name: iggy-server
-    ports:
-      # TCP transport (default)
-      - "8090:8090"
-      # QUIC transport
-      - "8080:8080"
-      # HTTP transport
-      - "3000:3000"
-    volumes:
-      - iggy_data:/iggy/data
-    environment:
-      # Root user credentials
-      - IGGY_ROOT_USERNAME=iggy
-      - IGGY_ROOT_PASSWORD=iggy
-      # Server configuration
-      - IGGY_HTTP_ENABLED=true
-      - IGGY_HTTP_ADDRESS=0.0.0.0:3000
-      - IGGY_TCP_ENABLED=true
-      - IGGY_TCP_ADDRESS=0.0.0.0:8090
-      - IGGY_QUIC_ENABLED=true
-      - IGGY_QUIC_ADDRESS=0.0.0.0:8080
-    healthcheck:
-      test: ["CMD", "iggy", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
+    # Apache Iggy message streaming server
+    iggy:
+        image: apache/iggy:latest
+        privileged: true
+        container_name: iggy-server
+        ports:
+            # TCP transport (default)
+            - "8090:8090"
+            # QUIC transport
+            - "8080:8080"
+            # HTTP transport (also serves /metrics for Prometheus)
+            - "3000:3000"
+        volumes:
+            - iggy_data:/iggy/data
+        environment:
+            # Root user credentials
+            - IGGY_ROOT_USERNAME=iggy
+            - IGGY_ROOT_PASSWORD=iggy
+            # Server configuration
+            - IGGY_HTTP_ENABLED=true
+            - IGGY_HTTP_ADDRESS=0.0.0.0:3000
+            - IGGY_TCP_ENABLED=true
+            - IGGY_TCP_ADDRESS=0.0.0.0:8090
+            - IGGY_QUIC_ENABLED=true
+            - IGGY_QUIC_ADDRESS=0.0.0.0:8080
+            # Metrics endpoint (Prometheus-compatible)
+            - IGGY_HTTP_METRICS_ENABLED=true
+            - IGGY_HTTP_METRICS_ENDPOINT=/metrics
+        healthcheck:
+            test: ["CMD", "iggy", "ping"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+        restart: unless-stopped
+        networks:
+            - iggy-network
 
-  # Sample application
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: iggy-sample-app
-    ports:
-      - "8000:8000"
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8000
-      - IGGY_CONNECTION_STRING=iggy://iggy:iggy@iggy:8090
-      - IGGY_STREAM=sample-stream
-      - IGGY_TOPIC=events
-      - IGGY_PARTITIONS=3
-      - RUST_LOG=info,iggy_sample=debug
-    depends_on:
-      iggy:
-        condition: service_healthy
-    restart: unless-stopped
+    # Sample application
+    app:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        container_name: iggy-sample-app
+        ports:
+            - "8000:8000"
+        environment:
+            - HOST=0.0.0.0
+            - PORT=8000
+            - IGGY_CONNECTION_STRING=iggy://iggy:iggy@iggy:8090
+            - IGGY_STREAM=sample-stream
+            - IGGY_TOPIC=events
+            - IGGY_PARTITIONS=3
+            - RUST_LOG=info,iggy_sample=debug
+        depends_on:
+            iggy:
+                condition: service_healthy
+        restart: unless-stopped
+        networks:
+            - iggy-network
+
+    # Prometheus metrics collection
+    prometheus:
+        image: prom/prometheus:latest
+        container_name: iggy-prometheus
+        ports:
+            - "9090:9090"
+        volumes:
+            - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+            - prometheus_data:/prometheus
+        command:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=15d"
+            - "--web.enable-lifecycle"
+            - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+            - "--web.console.templates=/usr/share/prometheus/consoles"
+        depends_on:
+            iggy:
+                condition: service_healthy
+        restart: unless-stopped
+        networks:
+            - iggy-network
+
+    # Grafana visualization
+    grafana:
+        image: grafana/grafana:latest
+        container_name: iggy-grafana
+        ports:
+            - "3001:3000"
+        volumes:
+            - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+            - grafana_data:/var/lib/grafana
+        environment:
+            # Default admin credentials (change in production)
+            - GF_SECURITY_ADMIN_USER=admin
+            - GF_SECURITY_ADMIN_PASSWORD=admin
+            # Allow anonymous access for local development
+            - GF_AUTH_ANONYMOUS_ENABLED=true
+            - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+            # Server settings
+            - GF_SERVER_ROOT_URL=http://localhost:3001
+            # Provisioning
+            - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+        depends_on:
+            - prometheus
+        restart: unless-stopped
+        networks:
+            - iggy-network
+
+    # Iggy Web UI - Dashboard for managing streams, topics, and messages
+    iggy-web-ui:
+        image: apache/iggy-web-ui:latest
+        container_name: iggy-web-ui
+        ports:
+            - "3050:3050"
+        environment:
+            # Connect to Iggy server HTTP API
+            - PUBLIC_IGGY_API_URL=http://iggy:3000
+        depends_on:
+            iggy:
+                condition: service_healthy
+        restart: unless-stopped
+        networks:
+            - iggy-network
 
 volumes:
-  iggy_data:
-    driver: local
+    iggy_data:
+        driver: local
+    prometheus_data:
+        driver: local
+    grafana_data:
+        driver: local
+
+networks:
+    iggy-network:
+        driver: bridge

@@ -1,0 +1,26 @@
+# Prometheus configuration for Iggy observability stack
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Iggy server metrics
+  - job_name: 'iggy'
+    static_configs:
+      - targets: ['iggy:3000']
+    metrics_path: '/metrics'
+    scheme: 'http'
+
+  # Sample application metrics (if exposed)
+  - job_name: 'iggy-sample-app'
+    static_configs:
+      - targets: ['app:8000']
+    metrics_path: '/metrics'
+    scheme: 'http'
+    # Don't fail if app doesn't expose metrics
+    scrape_timeout: 5s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
