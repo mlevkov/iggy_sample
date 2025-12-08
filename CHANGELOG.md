@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated `docker-compose.yaml` with full observability stack configuration
 - Simplified documentation section in README.md to reference `docs/` directory
 
+### Fixed
+
+- Added `issues: write` permission to CI security audit job to allow creating advisory issues
+
+### Security
+
+- Ignored unmaintained transitive dependency advisories in `deny.toml`:
+  - `RUSTSEC-2024-0384` (instant): from iggy -> reqwest-retry -> parking_lot v0.11
+  - `RUSTSEC-2025-0134` (rustls-pemfile): from testcontainers -> bollard (dev-dep only)
+
 ## [0.1.0] - 2024-12-01
 
 ### Added
