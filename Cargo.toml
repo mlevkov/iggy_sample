@@ -24,7 +24,7 @@ tokio = { version = "1.48", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Message streaming (edge SDK for the latest server features - io_uring, shared-nothing architecture)
-iggy = "0.8.0-edge.6"
+iggy = "0.8.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -42,7 +42,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
-uuid = { version = "1.18", features = ["v4", "serde"] }
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Decimal arithmetic for monetary values (avoids floating-point precision issues)
