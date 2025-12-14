@@ -159,6 +159,10 @@ impl TestFixture {
             reconnect_max_delay: Duration::from_secs(1),
             health_check_interval: Duration::from_secs(30),
             operation_timeout: Duration::from_secs(30),
+            // Circuit breaker (default settings for tests)
+            circuit_breaker_failure_threshold: 5,
+            circuit_breaker_success_threshold: 2,
+            circuit_breaker_open_duration: Duration::from_secs(30),
             // Rate limiting (disabled for tests)
             rate_limit_rps: 0,
             rate_limit_burst: 50,
@@ -174,6 +178,7 @@ impl TestFixture {
             // Observability
             log_level: "warn".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
+            metrics_port: 0, // Disabled for tests
         };
 
         let iggy_client = IggyClientWrapper::new(config.clone())
@@ -1060,6 +1065,10 @@ impl SecureTestFixture {
             reconnect_max_delay: Duration::from_secs(1),
             health_check_interval: Duration::from_secs(30),
             operation_timeout: Duration::from_secs(30),
+            // Circuit breaker (default settings for tests)
+            circuit_breaker_failure_threshold: 5,
+            circuit_breaker_success_threshold: 2,
+            circuit_breaker_open_duration: Duration::from_secs(30),
             // Rate limiting enabled - 5 RPS with burst of 2 for testing
             rate_limit_rps: 5,
             rate_limit_burst: 2,
@@ -1073,6 +1082,7 @@ impl SecureTestFixture {
             trusted_proxies: vec![], // Empty = trust all (test mode)
             log_level: "warn".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
+            metrics_port: 0, // Disabled for tests
         };
 
         let iggy_client = IggyClientWrapper::new(config.clone())
