@@ -48,6 +48,7 @@
 //! client.send_event_default(&event, None).await?;
 //! ```
 
+mod circuit_breaker;
 mod connection;
 mod helpers;
 mod params;
@@ -67,6 +68,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::Event;
 
 // Re-exports for public API
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use connection::ConnectionState;
 pub use helpers::{rand_jitter, to_identifier};
 pub use params::PollParams;
@@ -93,8 +95,16 @@ const MIN_RECONNECT_DELAY_MS: u64 = 100;
 
 /// Production-ready wrapper around the Iggy client.
 ///
-/// Provides automatic reconnection, health monitoring, and consistent error handling
-/// for all Iggy operations. Thread-safe and designed for concurrent access.
+/// Provides automatic reconnection, health monitoring, circuit breaker protection,
+/// and consistent error handling for all Iggy operations. Thread-safe and designed
+/// for concurrent access.
+///
+/// # Circuit Breaker
+///
+/// The client includes a circuit breaker that prevents request pile-up during outages:
+/// - **Closed** (normal): All requests pass through
+/// - **Open** (failing): Requests fail fast without attempting the operation
+/// - **Half-Open** (recovery): Limited requests allowed to test if service recovered
 ///
 /// # Performance Considerations
 ///
@@ -127,6 +137,8 @@ pub struct IggyClientWrapper {
     config: Config,
     /// Connection state tracking
     state: Arc<ConnectionState>,
+    /// Circuit breaker for fail-fast during outages
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl IggyClientWrapper {
@@ -148,10 +160,18 @@ impl IggyClientWrapper {
         let client = IggyClient::from_connection_string(&config.iggy_connection_string)
             .map_err(|e| AppError::ConnectionFailed(e.to_string()))?;
 
+        // Initialize circuit breaker from config
+        let circuit_breaker_config = CircuitBreakerConfig::new(
+            config.circuit_breaker_failure_threshold,
+            config.circuit_breaker_success_threshold,
+            config.circuit_breaker_open_duration,
+        );
+
         let wrapper = Self {
             client: Arc::new(RwLock::new(client)),
             config,
             state: Arc::new(ConnectionState::new()),
+            circuit_breaker: Arc::new(CircuitBreaker::new(circuit_breaker_config)),
         };
 
         wrapper.connect().await?;
@@ -292,8 +312,19 @@ impl IggyClientWrapper {
     /// Execute an operation with automatic reconnection on connection failure.
     ///
     /// This is the core resilience mechanism. Features:
+    /// - **Circuit Breaker**: Fail fast when service is known to be unavailable
     /// - **Timeout**: All operations are bounded by `config.operation_timeout`
     /// - **Retry**: On connection failure, attempts reconnect and retries once
+    ///
+    /// # Circuit Breaker Integration
+    ///
+    /// Before attempting the operation, the circuit breaker is checked:
+    /// - If **Open**: Returns `CircuitOpen` error immediately (fail fast)
+    /// - If **Closed** or **HalfOpen**: Proceeds with the operation
+    ///
+    /// After the operation, the circuit breaker is updated:
+    /// - Success: Records success (may close circuit if in HalfOpen)
+    /// - Failure: Records failure (may open circuit if threshold exceeded)
     ///
     /// # Timeout vs Disconnection
     ///
@@ -308,33 +339,62 @@ impl IggyClientWrapper {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = AppResult<T>>,
     {
+        // Check circuit breaker before attempting operation
+        if !self.circuit_breaker.allow_request().await {
+            let state = self.circuit_breaker.state().await;
+            return Err(AppError::CircuitOpen(format!(
+                "Circuit breaker is {} - service temporarily unavailable",
+                state
+            )));
+        }
+
         let timeout_duration = self.config.operation_timeout;
 
         // First attempt with timeout
         let result = tokio::time::timeout(timeout_duration, operation()).await;
 
         match result {
-            Ok(Ok(value)) => Ok(value),
+            Ok(Ok(value)) => {
+                self.circuit_breaker.record_success().await;
+                Ok(value)
+            }
             Ok(Err(e)) if Self::is_connection_error(&e) => {
+                self.circuit_breaker.record_failure().await;
                 warn!(error = %e, "Operation failed due to connection error, attempting reconnect");
                 self.reconnect().await?;
 
                 // Retry with timeout
-                tokio::time::timeout(timeout_duration, operation())
-                    .await
-                    .map_err(|_| {
-                        AppError::OperationTimeout(format!(
+                let retry_result = tokio::time::timeout(timeout_duration, operation()).await;
+                match retry_result {
+                    Ok(Ok(value)) => {
+                        self.circuit_breaker.record_success().await;
+                        Ok(value)
+                    }
+                    Ok(Err(e)) => {
+                        if Self::is_connection_error(&e) {
+                            self.circuit_breaker.record_failure().await;
+                        }
+                        Err(e)
+                    }
+                    Err(_) => {
+                        self.circuit_breaker.record_failure().await;
+                        Err(AppError::OperationTimeout(format!(
                             "Operation timed out after {:?} on retry",
                             timeout_duration
-                        ))
-                    })?
+                        )))
+                    }
+                }
             }
-            Ok(Err(e)) => Err(e),
+            Ok(Err(e)) => {
+                // Non-connection error - don't record as circuit breaker failure
+                Err(e)
+            }
             Err(_) => {
                 // Timeout on first attempt
                 // Only reconnect if we have evidence the connection is actually lost.
                 // A timeout alone doesn't mean disconnection - could just be slow.
                 if !self.state.is_connected() {
+                    self.circuit_breaker.record_failure().await;
                     warn!(
                         timeout = ?timeout_duration,
                         "Operation timed out and connection state is disconnected, attempting reconnect"
@@ -342,16 +402,29 @@ impl IggyClientWrapper {
                     self.reconnect().await?;
 
                     // Retry with timeout
-                    tokio::time::timeout(timeout_duration, operation())
-                        .await
-                        .map_err(|_| {
-                            AppError::OperationTimeout(format!(
+                    let retry_result = tokio::time::timeout(timeout_duration, operation()).await;
+                    match retry_result {
+                        Ok(Ok(value)) => {
+                            self.circuit_breaker.record_success().await;
+                            Ok(value)
+                        }
+                        Ok(Err(e)) => {
+                            if Self::is_connection_error(&e) {
+                                self.circuit_breaker.record_failure().await;
+                            }
+                            Err(e)
+                        }
+                        Err(_) => {
+                            self.circuit_breaker.record_failure().await;
+                            Err(AppError::OperationTimeout(format!(
                                 "Operation timed out after {:?} on retry",
                                 timeout_duration
-                            ))
-                        })?
+                            )))
+                        }
+                    }
                 } else {
                     // Connection appears healthy - this is just a slow operation
+                    // Don't record as circuit breaker failure (not a connection issue)
                     debug!(
                         timeout = ?timeout_duration,
                         "Operation timed out but connection state is healthy, not reconnecting"
@@ -864,6 +937,26 @@ impl IggyClientWrapper {
     pub fn config(&self) -> &Config {
         &self.config
     }
+
+    /// Get the current circuit breaker state.
+    pub async fn circuit_breaker_state(&self) -> CircuitState {
+        self.circuit_breaker.state().await
+    }
+
+    /// Get circuit breaker metrics.
+    ///
+    /// Returns a tuple of (times_opened, requests_rejected).
+    pub fn circuit_breaker_metrics(&self) -> (u32, u64) {
+        (
+            self.circuit_breaker.times_opened(),
+            self.circuit_breaker.requests_rejected(),
+        )
+    }
+
+    /// Force close the circuit breaker (for manual recovery).
+    pub async fn force_close_circuit(&self) {
+        self.circuit_breaker.force_close().await;
+    }
 }
 
 #[cfg(test)]
@@ -901,6 +994,7 @@ mod tests {
             AppError::PollError("poll failed".to_string()),
             AppError::ConfigError("config issue".to_string()),
             AppError::OperationTimeout("timed out".to_string()),
+            AppError::CircuitOpen("circuit open".to_string()),
         ];
 
         for error in test_cases {

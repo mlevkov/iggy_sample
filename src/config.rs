@@ -78,6 +78,18 @@ pub struct Config {
     pub operation_timeout: Duration,
 
     // =========================================================================
+    // Circuit Breaker Configuration
+    // =========================================================================
+    /// Number of consecutive failures before opening the circuit (default: 5)
+    pub circuit_breaker_failure_threshold: u32,
+
+    /// Number of consecutive successes in half-open state to close circuit (default: 2)
+    pub circuit_breaker_success_threshold: u32,
+
+    /// How long the circuit stays open before transitioning to half-open (default: 30s)
+    pub circuit_breaker_open_duration: Duration,
+
+    // =========================================================================
     // Rate Limiting Configuration
     // =========================================================================
     /// Requests per second limit per client (default: 100)
@@ -139,6 +151,9 @@ pub struct Config {
 
     /// Interval for background stats cache refresh (default: 5 seconds)
     pub stats_cache_ttl: Duration,
+
+    /// Port for Prometheus metrics endpoint (default: 9090, 0 = disabled)
+    pub metrics_port: u16,
 }
 
 impl Config {
@@ -180,6 +195,20 @@ impl Config {
             )?),
             operation_timeout: Duration::from_secs(Self::parse_env("OPERATION_TIMEOUT_SECS", 30)?),
 
+            // Circuit breaker
+            circuit_breaker_failure_threshold: Self::parse_env(
+                "CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+                5,
+            )?,
+            circuit_breaker_success_threshold: Self::parse_env(
+                "CIRCUIT_BREAKER_SUCCESS_THRESHOLD",
+                2,
+            )?,
+            circuit_breaker_open_duration: Duration::from_secs(Self::parse_env(
+                "CIRCUIT_BREAKER_OPEN_DURATION_SECS",
+                30,
+            )?),
+
             // Rate limiting
             rate_limit_rps: Self::parse_env("RATE_LIMIT_RPS", 100)?,
             rate_limit_burst: Self::parse_env("RATE_LIMIT_BURST", 50)?,
@@ -198,6 +227,7 @@ impl Config {
             // Observability
             log_level: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             stats_cache_ttl: Duration::from_secs(Self::parse_env("STATS_CACHE_TTL_SECS", 5)?),
+            metrics_port: Self::parse_env("METRICS_PORT", 9090)?,
         };
 
         // Validate configuration before returning
@@ -264,6 +294,25 @@ impl Config {
     /// originates from a configured trusted proxy network.
     pub fn proxy_validation_enabled(&self) -> bool {
         !self.trusted_proxies.is_empty()
+    }
+
+    /// Check if Prometheus metrics export is enabled.
+    pub fn metrics_enabled(&self) -> bool {
+        self.metrics_port > 0
+    }
+
+    /// Get the metrics endpoint address.
+    ///
+    /// Returns `None` if metrics are disabled (port = 0).
+    pub fn metrics_addr(&self) -> Option<std::net::SocketAddr> {
+        if self.metrics_enabled() {
+            Some(std::net::SocketAddr::from((
+                [0, 0, 0, 0],
+                self.metrics_port,
+            )))
+        } else {
+            None
+        }
     }
 
     /// Parse an environment variable into the specified type with a default value.
@@ -344,6 +393,10 @@ impl Default for Config {
             reconnect_max_delay: Duration::from_secs(30),
             health_check_interval: Duration::from_secs(30),
             operation_timeout: Duration::from_secs(30),
+            // Circuit breaker
+            circuit_breaker_failure_threshold: 5,
+            circuit_breaker_success_threshold: 2,
+            circuit_breaker_open_duration: Duration::from_secs(30),
             // Rate limiting
             rate_limit_rps: 100,
             rate_limit_burst: 50,
@@ -359,6 +412,7 @@ impl Default for Config {
             // Observability
             log_level: "info".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
+            metrics_port: 9090,
         }
     }
 }

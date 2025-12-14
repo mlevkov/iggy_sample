@@ -27,6 +27,13 @@ pub const MAX_PARTITIONS: u32 = 1000;
 /// Minimum number of partitions per topic.
 pub const MIN_PARTITIONS: u32 = 1;
 
+/// Maximum consumer ID value.
+///
+/// While Iggy uses u32 for consumer IDs, we set a reasonable upper bound
+/// to detect likely misconfigurations (e.g., passing garbage data).
+/// This value (1 billion) is high enough for any realistic use case.
+pub const MAX_CONSUMER_ID: u32 = 1_000_000_000;
+
 /// Validate a resource name (stream or topic).
 ///
 /// Rules:
@@ -155,13 +162,20 @@ pub fn validate_partition_id(_partition_id: u32) -> AppResult<()> {
 
 /// Validate a consumer ID for polling.
 ///
-/// Consumer IDs must be positive (at least 1).
-/// A consumer_id of 0 is invalid.
+/// Consumer IDs must be between 1 and [`MAX_CONSUMER_ID`] (inclusive).
+/// A consumer_id of 0 is invalid, and values above MAX_CONSUMER_ID
+/// likely indicate a misconfiguration.
 pub fn validate_consumer_id(consumer_id: u32) -> AppResult<()> {
     if consumer_id == 0 {
         return Err(AppError::BadRequest(
             "Consumer ID must be at least 1".to_string(),
         ));
+    }
+    if consumer_id > MAX_CONSUMER_ID {
+        return Err(AppError::BadRequest(format!(
+            "Consumer ID {} exceeds maximum of {}",
+            consumer_id, MAX_CONSUMER_ID
+        )));
     }
     Ok(())
 }
@@ -328,7 +342,8 @@ mod tests {
     fn test_valid_consumer_ids() {
         assert!(validate_consumer_id(1).is_ok());
         assert!(validate_consumer_id(100).is_ok());
-        assert!(validate_consumer_id(u32::MAX).is_ok());
+        assert!(validate_consumer_id(1_000_000).is_ok());
+        assert!(validate_consumer_id(MAX_CONSUMER_ID).is_ok());
     }
 
     #[test]
@@ -336,5 +351,19 @@ mod tests {
         let result = validate_consumer_id(0);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("at least 1"));
+    }
+
+    #[test]
+    fn test_invalid_consumer_id_too_high() {
+        let result = validate_consumer_id(MAX_CONSUMER_ID + 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_invalid_consumer_id_max_u32() {
+        let result = validate_consumer_id(u32::MAX);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
     }
 }
