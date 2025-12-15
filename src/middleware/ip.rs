@@ -132,6 +132,11 @@ enum ExtractedIp<'a> {
 /// - Returns borrowed `&str` slices pointing into the request headers
 /// - No allocations in this function
 /// - Caller is responsible for `.to_string()` if ownership is needed
+///
+/// # Empty Header Handling
+///
+/// Empty or whitespace-only headers are treated as `NotFound` to prevent
+/// creating a separate rate-limit bucket for each empty-header request.
 #[inline]
 fn extract_ip_from_headers<B>(req: &Request<B>) -> ExtractedIp<'_> {
     // Check X-Forwarded-For first (maybe set by reverse proxy)
@@ -140,14 +145,21 @@ fn extract_ip_from_headers<B>(req: &Request<B>) -> ExtractedIp<'_> {
         && let Ok(value) = forwarded.to_str()
         && let Some(first_ip) = value.split(',').next()
     {
-        return ExtractedIp::FromXff(first_ip.trim());
+        let trimmed = first_ip.trim();
+        // Treat empty strings as not found to avoid creating separate rate-limit buckets
+        if !trimmed.is_empty() {
+            return ExtractedIp::FromXff(trimmed);
+        }
     }
 
     // Check X-Real-IP (alternative header used by some proxies)
     if let Some(real_ip) = req.headers().get("x-real-ip")
         && let Ok(value) = real_ip.to_str()
     {
-        return ExtractedIp::FromRealIp(value.trim());
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return ExtractedIp::FromRealIp(trimmed);
+        }
     }
 
     ExtractedIp::NotFound
@@ -368,26 +380,48 @@ mod tests {
 
     #[test]
     fn test_extract_ip_empty_xff_header() {
-        // Empty header value should fall back to unknown
+        // Empty header value should fall back to unknown to prevent
+        // creating separate rate-limit buckets for empty-header requests
         let req = Request::builder()
             .header("x-forwarded-for", "")
             .body(Body::empty())
             .unwrap();
 
-        // Empty string after trim is still returned (split returns one empty element)
-        // This matches real-world behavior where empty headers are sometimes sent
-        assert_eq!(extract_client_ip(&req), "");
+        assert_eq!(extract_client_ip(&req), "unknown");
     }
 
     #[test]
     fn test_extract_ip_whitespace_only_xff() {
-        // Whitespace-only header should return empty string after trim
+        // Whitespace-only header should fall back to unknown
         let req = Request::builder()
             .header("x-forwarded-for", "   ")
             .body(Body::empty())
             .unwrap();
 
-        assert_eq!(extract_client_ip(&req), "");
+        assert_eq!(extract_client_ip(&req), "unknown");
+    }
+
+    #[test]
+    fn test_extract_ip_empty_xff_falls_back_to_real_ip() {
+        // Empty XFF should fall through to X-Real-IP
+        let req = Request::builder()
+            .header("x-forwarded-for", "")
+            .header("x-real-ip", "192.168.1.1")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(extract_client_ip(&req), "192.168.1.1");
+    }
+
+    #[test]
+    fn test_extract_ip_empty_real_ip_header() {
+        // Empty X-Real-IP should fall back to unknown
+        let req = Request::builder()
+            .header("x-real-ip", "")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(extract_client_ip(&req), "unknown");
     }
 
     #[test]

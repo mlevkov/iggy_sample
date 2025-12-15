@@ -17,13 +17,16 @@ This application showcases how to build a production-ready message streaming ser
 - Comprehensive error handling with `Result` types (no `unwrap()`/`expect()` in production code)
 - **Zero clippy warnings** - strict lints enforced, no `#[allow(...)]` in production code
 - **Connection resilience** with automatic reconnection and exponential backoff
+- **Circuit breaker** pattern for fail-fast during outages
 - **Rate limiting** with token bucket algorithm (configurable RPS and burst)
 - **API key authentication** with constant-time comparison (timing attack resistant)
 - **Request ID propagation** for distributed tracing
+- **Request timeout propagation** via `X-Request-Timeout` header
 - **Configurable CORS** with origin whitelist support
 - **Background stats caching** to avoid expensive queries on each request
 - **Structured concurrency** with proper task lifecycle management
 - **Background health checks** for early connection issue detection
+- **Prometheus metrics** export for observability
 
 ## Architecture
 
@@ -35,6 +38,7 @@ This application showcases how to build a production-ready message streaming ser
 │  Middleware Stack (src/middleware/)                         │
 │  - rate_limit.rs: Token bucket rate limiting                │
 │  - auth.rs: API key authentication                          │
+│  - timeout.rs: Request timeout propagation                  │
 │  - request_id.rs: Request ID propagation                    │
 │  + tower_http: Tracing, CORS                                │
 ├─────────────────────────────────────────────────────────────┤
@@ -50,6 +54,7 @@ This application showcases how to build a production-ready message streaming ser
 ├─────────────────────────────────────────────────────────────┤
 │  IggyClientWrapper (src/iggy_client.rs)                     │
 │  High-level wrapper with automatic reconnection             │
+│  + Circuit breaker for fail-fast during outages             │
 │  + PollParams builder for cleaner polling API               │
 ├─────────────────────────────────────────────────────────────┤
 │  Background Tasks (managed by TaskTracker)                  │
@@ -91,15 +96,23 @@ src/
 ├── lib.rs            # Library exports
 ├── config.rs         # Configuration from environment
 ├── error.rs          # Error types with HTTP status codes
+├── metrics.rs        # Prometheus metrics export
 ├── state.rs          # Shared application state with stats caching
 ├── routes.rs         # Route definitions and middleware stack
-├── iggy_client.rs    # Iggy SDK wrapper with auto-reconnection
+├── iggy_client/      # Iggy SDK wrapper module
+│   ├── mod.rs        # Client wrapper with auto-reconnection
+│   ├── circuit_breaker.rs # Circuit breaker pattern implementation
+│   ├── connection.rs # Connection state management
+│   ├── helpers.rs    # Utility functions
+│   ├── params.rs     # PollParams builder
+│   └── scopeguard.rs # Scope guard utilities
 ├── validation.rs     # Input validation utilities
 ├── middleware/
 │   ├── mod.rs        # Middleware exports
 │   ├── ip.rs         # Client IP extraction (shared by rate_limit and auth)
 │   ├── rate_limit.rs # Token bucket rate limiting (Governor)
 │   ├── auth.rs       # API key authentication
+│   ├── timeout.rs    # Request timeout propagation
 │   └── request_id.rs # Request ID propagation
 ├── models/
 │   ├── mod.rs        # Model exports
@@ -197,6 +210,13 @@ Environment variables (see `.env.example`):
 | `HEALTH_CHECK_INTERVAL_SECS` | `30` | Connection health check interval |
 | `OPERATION_TIMEOUT_SECS` | `30` | Timeout for Iggy operations |
 
+### Circuit Breaker
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `5` | Failures before opening circuit |
+| `CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | `2` | Successes in half-open to close |
+| `CIRCUIT_BREAKER_OPEN_DURATION_SECS` | `30` | How long circuit stays open |
+
 ### Rate Limiting
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -246,6 +266,7 @@ When empty (default), all X-Forwarded-For headers are trusted. **This is not rec
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATS_CACHE_TTL_SECS` | `5` | Stats cache refresh interval |
+| `METRICS_PORT` | `9090` | Prometheus metrics port (0 = disabled) |
 
 #### Log Levels
 
@@ -394,7 +415,7 @@ environment:
 ### Running Tests
 
 ```bash
-# Unit tests (93 tests)
+# Unit tests (130 tests)
 cargo test --lib
 
 # Integration tests (24 tests, requires Docker for testcontainers)
@@ -481,6 +502,7 @@ Error types and HTTP status codes:
 - `connection_failed` (503): Initial connection to Iggy server failed
 - `disconnected` (503): Lost connection during operation
 - `connection_reset` (503): Connection was reset by peer
+- `circuit_open` (503): Circuit breaker is open, failing fast
 - `stream_error` (500): Stream operation failed
 - `topic_error` (500): Topic operation failed
 - `send_error` (500): Message send failed
@@ -533,7 +555,7 @@ Iggy uses **0-indexed partitions**:
 ## Dependencies
 
 Key dependencies (see `Cargo.toml`):
-- `iggy 0.8.0-edge.6`: Iggy Rust SDK (edge version for latest server features)
+- `iggy 0.8.0`: Iggy Rust SDK
 - `axum 0.8`: Web framework
 - `tokio 1.48`: Async runtime
 - `tokio-util 0.7`: Task tracking and cancellation tokens
@@ -543,8 +565,10 @@ Key dependencies (see `Cargo.toml`):
 - `governor 0.8`: Rate limiting with token bucket algorithm
 - `subtle 2.6`: Constant-time comparison for security
 - `tower-http 0.6`: HTTP middleware (CORS, tracing, request ID)
-- `rust_decimal 1.37`: Exact decimal arithmetic for monetary values
-- `testcontainers 0.24`: Integration testing with containerized Iggy
+- `rust_decimal 1.39`: Exact decimal arithmetic for monetary values
+- `metrics 0.24`: Application metrics
+- `metrics-exporter-prometheus 0.16`: Prometheus metrics export
+- `testcontainers 0.26`: Integration testing with containerized Iggy
 
 ## Structured Concurrency
 
@@ -625,7 +649,7 @@ let messages = client.poll_with_params("stream", "topic", params).await?;
 
 Request flow (applied in order):
 ```
-Request → Rate Limit → Auth → Request ID → Tracing → CORS → Handler
+Request → Rate Limit → Auth → Timeout → Request ID → Tracing → CORS → Handler
 ```
 
 ### Client IP Extraction (`src/middleware/ip.rs`)
@@ -647,6 +671,12 @@ Request → Rate Limit → Auth → Request ID → Tracing → CORS → Handler
 - Per-IP brute force protection via shared `extract_client_ip()` function
 - Accepts key via `X-API-Key` header or `api_key` query parameter
 - Bypasses `/health` and `/ready` for health checks (exact path matching)
+
+### Request Timeout (`src/middleware/timeout.rs`)
+- Clients can specify `X-Request-Timeout: <milliseconds>` header
+- Bounded: 100ms minimum, 5 minutes maximum
+- Stored in request extensions for handler use
+- `RequestTimeoutExt` trait for easy extraction in handlers
 
 ## Deployment Security
 

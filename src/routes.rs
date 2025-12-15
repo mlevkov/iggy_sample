@@ -43,13 +43,16 @@
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::middleware;
 use axum::routing::{delete, get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::handlers;
-use crate::middleware::{ApiKeyAuth, RateLimitError, RateLimitLayer, RequestIdLayer};
+use crate::middleware::{
+    ApiKeyAuth, RateLimitError, RateLimitLayer, RequestIdLayer, extract_request_timeout,
+};
 use crate::state::AppState;
 
 /// Build the application router with all routes and middleware configured.
@@ -133,10 +136,14 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
     // 3. Tracing
     router = router.layer(TraceLayer::new_for_http());
 
-    // 4. Request ID
+    // 4. Request Timeout propagation
+    // Extracts X-Request-Timeout header and stores in request extensions
+    router = router.layer(middleware::from_fn(extract_request_timeout));
+
+    // 5. Request ID
     router = router.layer(RequestIdLayer::new());
 
-    // 5. Authentication (if enabled)
+    // 6. Authentication (if enabled)
     let auth_layer = ApiKeyAuth::new(config.api_key.clone(), config.auth_bypass_paths.clone());
     if auth_layer.is_enabled() {
         info!("API key authentication enabled");
@@ -145,7 +152,7 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
         info!("API key authentication disabled (no API_KEY set)");
     }
 
-    // 6. Rate Limiting (if enabled) - applied first, runs last in request pipeline
+    // 7. Rate Limiting (if enabled) - applied first, runs last in request pipeline
     if config.rate_limiting_enabled() {
         info!(
             rps = config.rate_limit_rps,

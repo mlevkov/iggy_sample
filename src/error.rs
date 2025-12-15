@@ -53,6 +53,9 @@ pub enum AppError {
 
     #[error("Operation timed out: {0}")]
     OperationTimeout(String),
+
+    #[error("Circuit breaker open: {0}")]
+    CircuitOpen(String),
 }
 
 /// Error response body for API endpoints.
@@ -126,6 +129,13 @@ impl IntoResponse for AppError {
                 StatusCode::GATEWAY_TIMEOUT,
                 "timeout",
                 "Operation timed out. Please try again.",
+            ),
+
+            // Circuit breaker open - service is protecting itself from cascading failures
+            AppError::CircuitOpen(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "circuit_open",
+                "Service is temporarily unavailable due to recent failures. Please retry later.",
             ),
 
             // Client errors - safe to show the message as it's user-facing
