@@ -90,6 +90,10 @@ ignore = [
     # rustls-pemfile is unmaintained, but comes from testcontainers -> bollard (dev-dependency only)
     # Upstream needs to migrate to rustls-pki-types
     "RUSTSEC-2025-0134",
+
+    # paste is unmaintained, but comes from iggy -> iggy_common -> compio-io
+    # Upstream (iggy/compio) needs to migrate to pastey or alternative
+    "RUSTSEC-2024-0436",
 ]
 
 # =============================================================================
