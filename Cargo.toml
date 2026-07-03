@@ -23,8 +23,8 @@ tower-http = { version = "0.7", features = ["cors", "trace", "request-id", "prop
 tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
-# Message streaming (edge SDK for the latest server features - io_uring, shared-nothing architecture)
-iggy = "0.8.0"
+# Message streaming (Apache Iggy Rust SDK; 0.10 pairs with the server-0.8 line)
+iggy = "0.10.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

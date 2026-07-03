@@ -1,7 +1,8 @@
 services:
     # Apache Iggy message streaming server
+    # Pinned to the release paired with the Rust SDK 0.10 line (see Cargo.toml)
     iggy:
-        image: apache/iggy:latest
+        image: apache/iggy:0.8.0
         privileged: true
         container_name: iggy-server
         ports:

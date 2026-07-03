@@ -38,9 +38,9 @@ struct IggyContainer {
 }
 
 impl IggyContainer {
-    // Using latest edge server (0.6.0-edge) with io_uring shared-nothing architecture
+    // Server release paired with the Rust SDK 0.10 line (see Cargo.toml)
     const IMAGE: &'static str = "apache/iggy";
-    const TAG: &'static str = "latest";
+    const TAG: &'static str = "0.8.0";
     const TCP_PORT: u16 = 8090;
 
     /// Start an Iggy container and return the mapped TCP port
