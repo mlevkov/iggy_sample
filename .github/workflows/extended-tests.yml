@@ -75,7 +75,8 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event.inputs.run_stress_tests == 'true' }}
     services:
       iggy:
-        image: apache/iggy:latest
+        # Keep in lockstep with docker-compose.yaml and tests/integration_tests.rs
+        image: apache/iggy:0.8.0
         ports:
           - 8090:8090
         options: >-

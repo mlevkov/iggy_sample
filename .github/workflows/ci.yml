@@ -168,10 +168,10 @@ jobs:
                   token: ${{ secrets.GITHUB_TOKEN }}
 
     # ==========================================================================
-    # Dependency license check
+    # Dependency policy check (advisories + licenses, gated by deny.toml)
     # ==========================================================================
     licenses:
-        name: License Check
+        name: Dependency Policy (cargo-deny)
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
@@ -181,9 +181,8 @@ jobs:
             - name: Install cargo-deny
               uses: taiki-e/install-action@cargo-deny
 
-            - name: Check licenses
-              run: cargo deny check licenses
-              continue-on-error: true # Don't fail CI on license issues, just warn
+            - name: Check advisories and licenses
+              run: cargo deny check advisories licenses
 
     # ==========================================================================
     # Final status check (for branch protection)
@@ -191,7 +190,7 @@ jobs:
     ci-success:
         name: CI Success
         runs-on: ubuntu-latest
-        needs: [fmt, clippy, test, integration, docs, audit]
+        needs: [fmt, clippy, test, integration, docs, audit, licenses]
         if: always()
         steps:
             - name: Check all jobs passed
@@ -201,7 +200,8 @@ jobs:
                      [[ "${{ needs.test.result }}" != "success" ]] || \
                      [[ "${{ needs.integration.result }}" != "success" ]] || \
                      [[ "${{ needs.docs.result }}" != "success" ]] || \
-                     [[ "${{ needs.audit.result }}" != "success" ]]; then
+                     [[ "${{ needs.audit.result }}" != "success" ]] || \
+                     [[ "${{ needs.licenses.result }}" != "success" ]]; then
                     echo "One or more jobs failed"
                     exit 1
                   fi
