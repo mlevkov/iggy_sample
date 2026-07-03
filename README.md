@@ -41,7 +41,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (93 unit tests, 24 integration tests, 20 model tests)
+- Comprehensive test suite (130 unit tests, 24 integration tests, 20 model tests)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
@@ -186,7 +186,7 @@ Expected response:
 ### Send a User Event
 
 ```bash
-curl -X POST http://localhost:3000/messages \
+curl -X POST http://localhost:8000/messages \
   -H "Content-Type: application/json" \
   -d '{
     "event": {
@@ -209,7 +209,7 @@ curl -X POST http://localhost:3000/messages \
 ### Send an Order Event
 
 ```bash
-curl -X POST http://localhost:3000/messages \
+curl -X POST http://localhost:8000/messages \
   -H "Content-Type: application/json" \
   -d '{
     "event": {
@@ -240,7 +240,7 @@ curl -X POST http://localhost:3000/messages \
 ### Send a Generic Event
 
 ```bash
-curl -X POST http://localhost:3000/messages \
+curl -X POST http://localhost:8000/messages \
   -H "Content-Type: application/json" \
   -d '{
     "event": {
@@ -262,16 +262,16 @@ curl -X POST http://localhost:3000/messages \
 
 ```bash
 # Poll from partition 1, starting at offset 0
-curl "http://localhost:3000/messages?partition_id=1&count=10&offset=0"
+curl "http://localhost:8000/messages?partition_id=1&count=10&offset=0"
 
 # Poll with auto-commit
-curl "http://localhost:3000/messages?partition_id=1&count=10&auto_commit=true"
+curl "http://localhost:8000/messages?partition_id=1&count=10&auto_commit=true"
 ```
 
 ### Send Batch Messages
 
 ```bash
-curl -X POST http://localhost:3000/messages/batch \
+curl -X POST http://localhost:8000/messages/batch \
   -H "Content-Type: application/json" \
   -d '{
     "events": [
@@ -294,7 +294,7 @@ curl -X POST http://localhost:3000/messages/batch \
 ### Create a Stream
 
 ```bash
-curl -X POST http://localhost:3000/streams \
+curl -X POST http://localhost:8000/streams \
   -H "Content-Type: application/json" \
   -d '{"name": "my-stream"}'
 ```
@@ -302,7 +302,7 @@ curl -X POST http://localhost:3000/streams \
 ### Create a Topic
 
 ```bash
-curl -X POST http://localhost:3000/streams/my-stream/topics \
+curl -X POST http://localhost:8000/streams/my-stream/topics \
   -H "Content-Type: application/json" \
   -d '{"name": "my-topic", "partitions": 3}'
 ```
@@ -310,13 +310,13 @@ curl -X POST http://localhost:3000/streams/my-stream/topics \
 ### List Streams
 
 ```bash
-curl http://localhost:3000/streams
+curl http://localhost:8000/streams
 ```
 
 ### Get Statistics
 
 ```bash
-curl http://localhost:3000/stats
+curl http://localhost:8000/stats
 ```
 
 ## Configuration
@@ -395,7 +395,7 @@ iggy_sample/
 │   ├── error.rs            # Error types with HTTP status codes
 │   ├── state.rs            # Shared application state
 │   ├── routes.rs           # Route definitions
-│   ├── iggy_client.rs      # Iggy SDK wrapper
+│   ├── iggy_client/        # Iggy SDK wrapper module
 │   ├── validation.rs       # Input validation utilities
 │   ├── middleware/
 │   │   ├── mod.rs          # Middleware exports
@@ -435,15 +435,11 @@ cargo test
 
 ### Run Integration Tests
 
-Integration tests require a running server:
+Integration tests use [testcontainers](https://rust.testcontainers.org) and
+spin up their own Iggy server automatically — only Docker needs to be running:
 
 ```bash
-# Terminal 1: Start services
-docker-compose up -d iggy
-cargo run &
-
-# Terminal 2: Run integration tests
-cargo test --test integration_tests -- --ignored
+cargo test --test integration_tests
 ```
 
 ### Run with Coverage
@@ -658,9 +654,9 @@ Key dependencies (see `Cargo.toml` for full list):
 | `subtle` | 2.6 | Constant-time comparison |
 | `tower-http` | 0.7 | HTTP middleware (CORS, tracing) |
 | `rust_decimal` | 1.42 | Exact decimal arithmetic for money |
-| `uuid` | 1.18 | UUID generation |
+| `uuid` | 1.23 | UUID generation |
 | `chrono` | 0.4 | Date/time handling |
-| `testcontainers` | 0.24 | Integration testing |
+| `testcontainers` | 0.27 | Integration testing |
 
 ## CI/CD
 

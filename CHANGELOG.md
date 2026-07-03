@@ -12,10 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refreshed `Cargo.lock` to patch 10 RUSTSEC advisories in transitive
   dependencies: `bytes` (RUSTSEC-2026-0007), `time` (RUSTSEC-2026-0009),
   `quinn-proto` (RUSTSEC-2026-0037), `rustls-webpki` (RUSTSEC-2026-0049),
-  `aws-lc-rs`/`aws-lc-sys` (RUSTSEC-2026-0044 through 0048), and `rkyv`
+  `aws-lc-sys` (RUSTSEC-2026-0044 through 0048), and `rkyv`
   (RUSTSEC-2026-0001)
-- `testcontainers` 0.27 bump removes vulnerable `astral-tokio-tar` 0.5.x
-  and unmaintained `rustls-pemfile` from the dev-dependency tree
+- `testcontainers` 0.27 bump upgrades `astral-tokio-tar` to patched 0.6.x
+  and removes unmaintained `rustls-pemfile` from the dev-dependency tree
 - `cargo audit` now reports zero vulnerabilities
 
 ### Changed
@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CDLA-Permissive-2.0` licenses required by new transitive deps
 - Documented why the service integrates at the SDK `Client` trait level
   instead of the high-level `IggyProducer`/`IggyConsumer` clients
+- **Breaking**: default app port changed from 3000 to 8000 — the old
+  default collided with the Iggy server's HTTP API port under the
+  documented docker-compose quick start; all docs, `.env.example`, and
+  compose now agree on 8000
+- CI now fails on `cargo deny check advisories licenses` (previously
+  licenses-only and non-blocking); weekly stress tests pin
+  `apache/iggy:0.8.0` instead of `latest`
 
 ### Added
 

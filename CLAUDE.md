@@ -52,7 +52,7 @@ This application showcases how to build a production-ready message streaming ser
 │  - producer.rs: Message publishing logic                    │
 │  - consumer.rs: Message consumption logic                   │
 ├─────────────────────────────────────────────────────────────┤
-│  IggyClientWrapper (src/iggy_client.rs)                     │
+│  IggyClientWrapper (src/iggy_client/)                       │
 │  High-level wrapper with automatic reconnection             │
 │  + Circuit breaker for fail-fast during outages             │
 │  + PollParams builder for cleaner polling API               │
@@ -386,10 +386,10 @@ environment:
 3. Test the API:
    ```bash
    # Health check
-   curl http://localhost:3000/health
+   curl http://localhost:8000/health
 
    # Send a message
-   curl -X POST http://localhost:3000/messages \
+   curl -X POST http://localhost:8000/messages \
      -H "Content-Type: application/json" \
      -d '{
        "event": {
@@ -409,7 +409,7 @@ environment:
      }'
 
    # Poll messages (partition_id is 0-indexed, 0 = first partition)
-   curl "http://localhost:3000/messages?partition_id=0&count=10"
+   curl "http://localhost:8000/messages?partition_id=0&count=10"
    ```
 
 ### Running Tests
@@ -626,7 +626,7 @@ impl AppState {
 Uses `tokio::sync::Notify` instead of busy-wait for efficient reconnection:
 
 ```rust
-// In src/iggy_client.rs - ConnectionState
+// In src/iggy_client/connection.rs - ConnectionState
 struct ConnectionState {
     reconnect_complete: Notify,  // Efficient wake-up
     // ...
@@ -654,14 +654,14 @@ let params = PollParams::new(1, 1)  // partition_id, consumer_id
     .with_auto_commit(true);
 
 // Use with the cleaner API
-let messages = client.poll_with_params("stream", "topic", params).await?;
+let messages = client.poll_messages("stream", "topic", params).await?;
 ```
 
 ## Middleware Stack
 
 Request flow (applied in order):
 ```
-Request → Rate Limit → Auth → Timeout → Request ID → Tracing → CORS → Handler
+Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS → Handler
 ```
 
 ### Client IP Extraction (`src/middleware/ip.rs`)

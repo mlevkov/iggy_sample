@@ -241,7 +241,7 @@ Client                Handler              Consumer             IggyClient      
   │─────────────────────▶│                    │                     │                 │
   │                      │ build poll params  │                     │                 │
   │                      │───────────────────▶│                     │                 │
-  │                      │                    │ poll_with_params()  │                 │
+  │                      │                    │ poll_messages()     │                 │
   │                      │                    │────────────────────▶│                 │
   │                      │                    │                     │ poll_messages() │
   │                      │                    │                     │────────────────▶│

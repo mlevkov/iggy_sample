@@ -7,7 +7,7 @@
 //!
 //! # Reconnection Testing
 //!
-//! Reconnection logic is tested via unit tests in `src/iggy_client.rs`.
+//! Reconnection logic is tested via unit tests in `src/iggy_client/`.
 //! Full integration reconnection testing (container stop/start) is complex
 //! and may result in flaky tests. The reconnection implementation uses:
 //!
@@ -50,7 +50,7 @@ impl IggyContainer {
         let container = GenericImage::new(Self::IMAGE, Self::TAG)
             .with_exposed_port(Self::TCP_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Iggy server is running"))
-            // Root credentials (edge server generates random password by default)
+            // Root credentials (the server generates a random password by default)
             .with_env_var("IGGY_ROOT_USERNAME", "iggy")
             .with_env_var("IGGY_ROOT_PASSWORD", "iggy")
             // Configure server to bind to 0.0.0.0 (accessible from host)

@@ -152,7 +152,8 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
         info!("API key authentication disabled (no API_KEY set)");
     }
 
-    // 7. Rate Limiting (if enabled) - applied first, runs last in request pipeline
+    // 7. Rate Limiting (if enabled) - applied last, so it runs FIRST on
+    //    incoming requests (outermost layer), before auth ever sees them
     if config.rate_limiting_enabled() {
         info!(
             rps = config.rate_limit_rps,

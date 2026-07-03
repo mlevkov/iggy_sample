@@ -704,10 +704,11 @@ impl IggyClientWrapper {
     /// let messages = client.poll_messages("stream", "topic", params).await?;
     /// ```
     ///
-    /// # Consumer Groups
+    /// # Consumer Offsets
     ///
-    /// Each unique `consumer_id` maintains its own offset. Use the same ID
-    /// across restarts to resume from the last committed position.
+    /// Polling uses a standalone consumer (not a consumer group). Each unique
+    /// `consumer_id` maintains its own offset. Use the same ID across restarts
+    /// to resume from the last committed position.
     #[instrument(skip(self, params), fields(partition_id = params.partition_id, consumer_id = params.consumer_id))]
     pub async fn poll_messages(
         &self,

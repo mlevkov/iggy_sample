@@ -155,7 +155,7 @@ fn default_count() -> u32 {
 ///
 /// # Query Parameters
 ///
-/// - `partition_id` - Partition to poll from (default: 1)
+/// - `partition_id` - Partition to poll from, 0-indexed (default: 0)
 /// - `consumer_id` - Consumer ID for offset tracking (default: 1)
 /// - `offset` - Starting offset (optional)
 /// - `count` - Number of messages to return (default: 10, max: POLL_MAX_COUNT)

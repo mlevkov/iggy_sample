@@ -26,8 +26,6 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Zlib",
-    "MPL-2.0",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     # CA certificate bundle data (webpki-roots, via iggy TLS support)
     "CDLA-Permissive-2.0",
@@ -67,8 +65,10 @@ skip = []
 # =============================================================================
 # Advisories
 # =============================================================================
-# Uses the cargo-deny >=0.14 advisories schema: vulnerabilities and yanked
-# crates are errors by default; unmaintained warnings apply to all deps.
+# Requires cargo-deny >= 0.18.2 (for the `unmaintained` scope field).
+# Under the current schema, vulnerability and unmaintained advisories are
+# errors by default; yanked crates only warn. Enforced in CI by the
+# "Dependency Policy" job (cargo deny check advisories licenses).
 [advisories]
 # Path to the advisory database
 db-path = "~/.cargo/advisory-db"
