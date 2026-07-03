@@ -32,8 +32,7 @@ pub fn to_identifier(name: &str, resource_type: &str) -> Result<Identifier, AppE
 /// This prevents predictable backoff patterns that could lead to
 /// thundering herd problems when multiple clients reconnect simultaneously.
 pub fn rand_jitter() -> f64 {
-    use rand::Rng;
-    rand::rng().random::<f64>()
+    rand::random::<f64>()
 }
 
 #[cfg(test)]
