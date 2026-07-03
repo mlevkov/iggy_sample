@@ -1,8 +1,30 @@
 //! Helper functions for the Iggy client.
 
-use iggy::prelude::Identifier;
+use iggy::prelude::{Identifier, IggyError};
 
 use crate::error::AppError;
+
+/// Classify an SDK error into a connection-aware `AppError`.
+///
+/// Connection-flavored `IggyError` variants map to the dedicated connection
+/// variants so `IggyClientWrapper::with_reconnect` can trigger reconnection
+/// and record circuit-breaker failures; everything else maps through
+/// `fallback` (e.g. `AppError::SendError`). Without this classification the
+/// reconnect path could never fire: stringifying every SDK error into an
+/// operation error hides the connection failures from `is_connection_error`.
+pub fn classify_iggy_error(error: IggyError, fallback: fn(String) -> AppError) -> AppError {
+    match error {
+        IggyError::Disconnected
+        | IggyError::NotConnected
+        | IggyError::StaleClient
+        | IggyError::ClientShutdown => AppError::Disconnected(error.to_string()),
+        IggyError::ConnectionClosed | IggyError::TcpError => {
+            AppError::ConnectionReset(error.to_string())
+        }
+        IggyError::CannotEstablishConnection => AppError::ConnectionFailed(error.to_string()),
+        other => fallback(other.to_string()),
+    }
+}
 
 /// Convert a string to an Identifier, returning an appropriate error on failure.
 ///
@@ -66,6 +88,54 @@ mod tests {
         let long_name = "a".repeat(300);
         let result = to_identifier(&long_name, "topic");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_classify_disconnected_variants() {
+        for error in [
+            IggyError::Disconnected,
+            IggyError::NotConnected,
+            IggyError::StaleClient,
+            IggyError::ClientShutdown,
+        ] {
+            let classified = classify_iggy_error(error, AppError::SendError);
+            assert!(
+                matches!(classified, AppError::Disconnected(_)),
+                "expected Disconnected, got {:?}",
+                classified
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_connection_reset_variants() {
+        for error in [IggyError::ConnectionClosed, IggyError::TcpError] {
+            let classified = classify_iggy_error(error, AppError::SendError);
+            assert!(
+                matches!(classified, AppError::ConnectionReset(_)),
+                "expected ConnectionReset, got {:?}",
+                classified
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_cannot_establish_connection() {
+        let classified =
+            classify_iggy_error(IggyError::CannotEstablishConnection, AppError::SendError);
+        assert!(matches!(classified, AppError::ConnectionFailed(_)));
+    }
+
+    #[test]
+    fn test_classify_non_connection_error_uses_fallback() {
+        let classified = classify_iggy_error(
+            IggyError::StreamNameAlreadyExists("test".to_string()),
+            AppError::StreamError,
+        );
+        assert!(matches!(classified, AppError::StreamError(_)));
+
+        let classified = classify_iggy_error(IggyError::InvalidMessagesCount, AppError::PollError);
+        assert!(matches!(classified, AppError::PollError(_)));
     }
 
     #[test]

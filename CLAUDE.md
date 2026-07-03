@@ -582,6 +582,14 @@ subscription iterator — neither maps onto stateless request/response
 semantics. The high-level clients are the right choice for dedicated
 pipeline workers; a protocol gateway belongs on the trait API.
 
+Resilience is layered: the SDK's connection-string clients ship with
+transport-level auto-reconnection (default on, unlimited retries), which
+swallows most mid-operation connection failures into blocking retries. The
+wrapper therefore treats **timeouts** as circuit-breaker failures, classifies
+the SDK error variants that do escape (`classify_iggy_error`), and runs live
+`ping` health probes so `/health` and `/ready` reflect reality during an
+outage rather than a latched startup flag.
+
 ## Structured Concurrency
 
 The application uses structured concurrency patterns for proper task lifecycle management.

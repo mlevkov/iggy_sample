@@ -52,6 +52,12 @@ impl ConnectionState {
         self.reconnect_attempts.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    /// Reset the attempt counter at the start of a reconnection session so a
+    /// previously exhausted session cannot make new sessions fail immediately.
+    pub fn reset_attempts(&self) {
+        self.reconnect_attempts.store(0, Ordering::SeqCst);
+    }
+
     pub fn start_reconnecting(&self) -> bool {
         // Returns true if we successfully started reconnecting (wasn't already in progress)
         !self.reconnecting.swap(true, Ordering::SeqCst)

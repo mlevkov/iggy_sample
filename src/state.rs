@@ -232,7 +232,11 @@ impl AppState {
                         break;
                     }
                     _ = ticker.tick() => {
-                        let connected = iggy_client.is_connected();
+                        // Live ping (not just a flag read): the SDK's internal
+                        // transport reconnection hides most mid-operation
+                        // failures, so this probe is what keeps the connection
+                        // state - and therefore /health and /ready - truthful.
+                        let connected = iggy_client.health_check().await;
                         if !connected {
                             warn!("Health check: Iggy connection is down");
                         } else {
