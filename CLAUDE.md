@@ -5,8 +5,8 @@ A comprehensive demonstration of Apache Iggy message streaming with Axum.
 ## Project Overview
 
 This application showcases how to build a production-ready message streaming service using:
-- **Apache Iggy 0.6.0-edge**: High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy SDK 0.8.0-edge.6**: Latest edge SDK for compatibility with edge server features
+- **Apache Iggy server 0.8.0**: High-performance message streaming with io_uring shared-nothing architecture
+- **Iggy Rust SDK 0.10.0**: Latest stable SDK, paired with the server 0.8 release line
 - **Axum 0.8**: Ergonomic and modular Rust web framework
 - **Tokio**: Async runtime for Rust
 
@@ -555,20 +555,32 @@ Iggy uses **0-indexed partitions**:
 ## Dependencies
 
 Key dependencies (see `Cargo.toml`):
-- `iggy 0.8.0`: Iggy Rust SDK
+- `iggy 0.10.0`: Iggy Rust SDK (paired with server 0.8.0, pinned in `docker-compose.yaml`)
 - `axum 0.8`: Web framework
-- `tokio 1.48`: Async runtime
+- `tokio 1.52`: Async runtime
 - `tokio-util 0.7`: Task tracking and cancellation tokens
 - `serde 1.0`: Serialization
 - `tracing 0.1`: Structured logging
 - `thiserror 2.0`: Error handling
-- `governor 0.8`: Rate limiting with token bucket algorithm
+- `governor 0.10`: Rate limiting with token bucket algorithm
 - `subtle 2.6`: Constant-time comparison for security
-- `tower-http 0.6`: HTTP middleware (CORS, tracing, request ID)
-- `rust_decimal 1.39`: Exact decimal arithmetic for monetary values
+- `tower-http 0.7`: HTTP middleware (CORS, tracing, request ID)
+- `rust_decimal 1.42`: Exact decimal arithmetic for monetary values
 - `metrics 0.24`: Application metrics
-- `metrics-exporter-prometheus 0.16`: Prometheus metrics export
-- `testcontainers 0.26`: Integration testing with containerized Iggy
+- `metrics-exporter-prometheus 0.18`: Prometheus metrics export
+- `testcontainers 0.27`: Integration testing with containerized Iggy
+
+### Iggy SDK Integration
+
+This service integrates with the SDK at the `Client` trait level (via
+`IggyClientWrapper`) rather than through the higher-level `IggyProducer`/
+`IggyConsumer` clients. This is deliberate: the HTTP gateway serves
+*arbitrary* stream/topic routes with per-request partition, offset, and
+consumer parameters. `IggyProducer` binds to a single stream/topic at build
+time and batches in the background, and `IggyConsumer` is a long-lived
+subscription iterator — neither maps onto stateless request/response
+semantics. The high-level clients are the right choice for dedicated
+pipeline workers; a protocol gateway belongs on the trait API.
 
 ## Structured Concurrency
 

@@ -10,8 +10,8 @@ A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) m
 
 This project showcases how to build a production-ready message streaming service using:
 
-- **Apache Iggy 0.6.0-edge** - High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy SDK 0.8.0-edge.6** - Latest edge SDK for compatibility with edge server features
+- **Apache Iggy server 0.8.0** - High-performance message streaming with io_uring shared-nothing architecture
+- **Iggy Rust SDK 0.10.0** - Latest stable SDK, paired with the server 0.8 release line
 - **Axum 0.8** - Ergonomic and modular Rust web framework
 - **Tokio** - Async runtime for Rust
 
@@ -648,16 +648,16 @@ Key dependencies (see `Cargo.toml` for full list):
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `iggy` | 0.8.0-edge.6 | Iggy Rust SDK (edge) |
+| `iggy` | 0.10.0 | Iggy Rust SDK |
 | `axum` | 0.8 | Web framework |
-| `tokio` | 1.48 | Async runtime |
+| `tokio` | 1.52 | Async runtime |
 | `serde` | 1.0 | Serialization |
 | `tracing` | 0.1 | Structured logging |
 | `thiserror` | 2.0 | Error handling |
-| `governor` | 0.8 | Rate limiting (token bucket) |
+| `governor` | 0.10 | Rate limiting (token bucket) |
 | `subtle` | 2.6 | Constant-time comparison |
-| `tower-http` | 0.6 | HTTP middleware (CORS, tracing) |
-| `rust_decimal` | 1.37 | Exact decimal arithmetic for money |
+| `tower-http` | 0.7 | HTTP middleware (CORS, tracing) |
+| `rust_decimal` | 1.42 | Exact decimal arithmetic for money |
 | `uuid` | 1.18 | UUID generation |
 | `chrono` | 0.4 | Date/time handling |
 | `testcontainers` | 0.24 | Integration testing |

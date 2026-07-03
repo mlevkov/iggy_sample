@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Refreshed `Cargo.lock` to patch 10 RUSTSEC advisories in transitive
+  dependencies: `bytes` (RUSTSEC-2026-0007), `time` (RUSTSEC-2026-0009),
+  `quinn-proto` (RUSTSEC-2026-0037), `rustls-webpki` (RUSTSEC-2026-0049),
+  `aws-lc-rs`/`aws-lc-sys` (RUSTSEC-2026-0044 through 0048), and `rkyv`
+  (RUSTSEC-2026-0001)
+- `testcontainers` 0.27 bump removes vulnerable `astral-tokio-tar` 0.5.x
+  and unmaintained `rustls-pemfile` from the dev-dependency tree
+- `cargo audit` now reports zero vulnerabilities
+
+### Changed
+
+- Updated Apache Iggy Rust SDK from 0.8.0 to 0.10.0 (latest stable);
+  no source changes required — the `Client` trait API is unchanged
+- Pinned the `apache/iggy` server image to 0.8.0 (the release paired
+  with the 0.10 SDK) in `docker-compose.yaml` and integration tests,
+  replacing the floating `latest` tag
+- Bumped direct dependencies: `tower-http` 0.7, `rand` 0.10,
+  `metrics-exporter-prometheus` 0.18, `testcontainers` 0.27 (dev),
+  `reqwest` 0.13 (dev); raised version floors for `tokio` (1.52),
+  `uuid` (1.23), and `rust_decimal` (1.42)
+- Migrated `deny.toml` to the current cargo-deny schema and pruned
+  obsolete advisory ignores; allowed `Unicode-3.0` and
+  `CDLA-Permissive-2.0` licenses required by new transitive deps
+- Documented why the service integrates at the SDK `Client` trait level
+  instead of the high-level `IggyProducer`/`IggyConsumer` clients
+
 ### Added
 
 - **Observability Stack**: Complete Grafana-based monitoring setup
