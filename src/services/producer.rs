@@ -57,9 +57,16 @@ impl ProducerService {
         event: &Event,
         partition_key: Option<&str>,
     ) -> AppResult<SendMessageResponse> {
-        self.client
+        let start = std::time::Instant::now();
+        let result = self
+            .client
             .send_event(stream, topic, event, partition_key)
-            .await?;
+            .await;
+        crate::metrics::record_send_duration(stream, topic, start.elapsed().as_secs_f64());
+        if result.is_err() {
+            crate::metrics::record_message_sent(stream, topic, "failure");
+        }
+        result?;
 
         self.messages_sent.fetch_add(1, Ordering::Relaxed);
         crate::metrics::record_message_sent(stream, topic, "success");
@@ -96,9 +103,21 @@ impl ProducerService {
         events: &[Event],
         partition_key: Option<&str>,
     ) -> AppResult<Vec<SendMessageResponse>> {
-        self.client
+        let start = std::time::Instant::now();
+        let result = self
+            .client
             .send_events_batch(stream, topic, events, partition_key)
-            .await?;
+            .await;
+        crate::metrics::record_send_duration(stream, topic, start.elapsed().as_secs_f64());
+        if result.is_err() {
+            crate::metrics::record_messages_sent_batch(
+                stream,
+                topic,
+                "failure",
+                events.len() as u64,
+            );
+        }
+        result?;
 
         self.messages_sent
             .fetch_add(events.len() as u64, Ordering::Relaxed);

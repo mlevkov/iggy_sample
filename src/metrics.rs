@@ -13,7 +13,6 @@
 //! - `iggy_circuit_breaker_rejections_total` - Requests rejected by circuit breaker
 //!
 //! ## Histograms
-//! - `iggy_request_duration_seconds` - Request duration (with labels: endpoint, method, status)
 //! - `iggy_send_duration_seconds` - Message send duration
 //! - `iggy_poll_duration_seconds` - Message poll duration
 //!
@@ -24,20 +23,19 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use iggy_sample::metrics::{init_metrics, record_message_sent, record_request_duration};
+//! use iggy_sample::metrics::{init_metrics, record_message_sent};
 //!
 //! // Initialize metrics (call once at startup)
 //! init_metrics();
 //!
 //! // Record metrics in handlers
 //! record_message_sent("my-stream", "my-topic", "success");
-//! record_request_duration("/messages", "POST", "200", 0.045);
 //! ```
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
-use tracing::{error, info};
+use tracing::info;
 
 /// Metric names as constants for consistency.
 pub mod names {
@@ -46,7 +44,6 @@ pub mod names {
     pub const CONNECTION_RECONNECTS_TOTAL: &str = "iggy_connection_reconnects_total";
     pub const CIRCUIT_BREAKER_OPENS_TOTAL: &str = "iggy_circuit_breaker_opens_total";
     pub const CIRCUIT_BREAKER_REJECTIONS_TOTAL: &str = "iggy_circuit_breaker_rejections_total";
-    pub const REQUEST_DURATION_SECONDS: &str = "iggy_request_duration_seconds";
     pub const SEND_DURATION_SECONDS: &str = "iggy_send_duration_seconds";
     pub const POLL_DURATION_SECONDS: &str = "iggy_poll_duration_seconds";
     pub const CONNECTION_STATUS: &str = "iggy_connection_status";
@@ -95,10 +92,6 @@ pub fn init_metrics(metrics_addr: SocketAddr) -> Result<(), String> {
     );
 
     describe_histogram!(
-        names::REQUEST_DURATION_SECONDS,
-        "HTTP request duration in seconds"
-    );
-    describe_histogram!(
         names::SEND_DURATION_SECONDS,
         "Message send operation duration in seconds"
     );
@@ -118,15 +111,6 @@ pub fn init_metrics(metrics_addr: SocketAddr) -> Result<(), String> {
 
     info!(addr = %metrics_addr, "Prometheus metrics endpoint started");
     Ok(())
-}
-
-/// Try to initialize metrics, logging any errors but not failing.
-///
-/// This is useful for cases where metrics are optional.
-pub fn try_init_metrics(metrics_addr: SocketAddr) {
-    if let Err(e) = init_metrics(metrics_addr) {
-        error!(error = %e, "Failed to initialize metrics, continuing without metrics");
-    }
 }
 
 // =============================================================================
@@ -169,12 +153,6 @@ pub fn record_circuit_breaker_rejection() {
 // =============================================================================
 // Histogram Recording Functions
 // =============================================================================
-
-/// Record HTTP request duration.
-pub fn record_request_duration(endpoint: &str, method: &str, status: &str, duration_secs: f64) {
-    histogram!(names::REQUEST_DURATION_SECONDS, "endpoint" => endpoint.to_string(), "method" => method.to_string(), "status" => status.to_string())
-        .record(duration_secs);
-}
 
 /// Record message send duration.
 pub fn record_send_duration(stream: &str, topic: &str, duration_secs: f64) {
@@ -220,11 +198,6 @@ mod tests {
     #[test]
     fn test_record_messages_polled() {
         record_messages_polled("test-stream", "test-topic", 10);
-    }
-
-    #[test]
-    fn test_record_request_duration() {
-        record_request_duration("/messages", "POST", "200", 0.1);
     }
 
     #[test]

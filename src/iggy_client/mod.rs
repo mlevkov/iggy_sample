@@ -360,17 +360,25 @@ impl IggyClientWrapper {
             match IggyClient::from_connection_string(&self.config.iggy_connection_string) {
                 Ok(new_client) => {
                     // Bound the connect: the SDK's internal reconnection would
-                    // otherwise retry inside connect() indefinitely.
-                    match tokio::time::timeout(self.config.operation_timeout, new_client.connect())
-                        .await
-                    {
+                    // otherwise retry inside connect() indefinitely. The bound
+                    // is HALF the operation timeout so a failed attempt exits
+                    // through the cleanup arms below before reconnect_bounded's
+                    // outer deadline aborts the whole session (an abort drops
+                    // the client mid-connect with no chance to shut it down).
+                    let attempt_timeout = self.config.operation_timeout / 2;
+                    match tokio::time::timeout(attempt_timeout, new_client.connect()).await {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
                             warn!(attempt, error = %e, "Reconnection attempt failed");
+                            // Best-effort cleanup: connect() may already have
+                            // spawned the SDK's detached heartbeat task, which
+                            // Drop alone does not stop.
+                            let _ = new_client.shutdown().await;
                             continue;
                         }
                         Err(_) => {
                             warn!(attempt, "Reconnection attempt timed out");
+                            let _ = new_client.shutdown().await;
                             continue;
                         }
                     }
@@ -383,7 +391,10 @@ impl IggyClientWrapper {
                     let old_client = std::mem::replace(&mut *client_guard, new_client);
                     drop(client_guard);
                     if let Err(e) = old_client.shutdown().await {
-                        debug!(error = %e, "Old client shutdown returned an error (ignored)");
+                        // This call exists to kill the old heartbeat task; if
+                        // it fails, a zombie connection may persist - worth a
+                        // warning (reconnects are rare, no spam risk).
+                        warn!(error = %e, "Old client shutdown failed; its heartbeat task may persist");
                     }
 
                     self.state.set_connected(true);
@@ -1116,6 +1127,22 @@ mod tests {
         // Tiny base with maximum negative jitter must not go below the floor.
         let delay = backoff_delay_ms(1, 1, 30_000, 0.0);
         assert!(delay >= 100, "delay {} below MIN_RECONNECT_DELAY_MS", delay);
+    }
+
+    #[test]
+    fn test_backoff_max_below_floor_collapses_to_max() {
+        // When the configured max is below MIN_RECONNECT_DELAY_MS, the max
+        // wins (the floor must never raise a delay above the configured cap).
+        assert_eq!(backoff_delay_ms(1, 1000, 50, 0.5), 50);
+        assert_eq!(backoff_delay_ms(10, 1000, 50, 0.999_999), 50);
+    }
+
+    #[test]
+    fn test_backoff_zero_max_yields_zero_delay() {
+        // Degenerate but explicit: RECONNECT_MAX_DELAY_MS=0 produces
+        // zero-delay retries (no panic, clamp floor collapses to 0).
+        assert_eq!(backoff_delay_ms(1, 1000, 0, 0.5), 0);
+        assert_eq!(backoff_delay_ms(100, 1000, 0, 0.0), 0);
     }
 
     #[test]

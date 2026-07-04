@@ -69,7 +69,10 @@ impl ConsumerService {
         params: PollParams,
     ) -> AppResult<PollMessagesResponse> {
         let partition_id = params.partition_id;
-        let polled = self.client.poll_messages(stream, topic, params).await?;
+        let start = std::time::Instant::now();
+        let result = self.client.poll_messages(stream, topic, params).await;
+        crate::metrics::record_poll_duration(stream, topic, start.elapsed().as_secs_f64());
+        let polled = result?;
 
         let messages = self.parse_messages(&polled.messages);
         let message_count = messages.len();

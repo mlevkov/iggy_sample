@@ -44,6 +44,27 @@ async fn run() -> Result<(), exitcode::ExitCode> {
         "Configuration loaded"
     );
 
+    // Start the Prometheus metrics exporter FIRST (it depends only on
+    // config) so metrics recorded during connection/initialization are not
+    // silently dropped by the no-op default recorder. A bind failure fails
+    // startup: silently missing metrics would defeat alerting.
+    if let Some(metrics_addr) = config.metrics_addr() {
+        let metrics_addr: SocketAddr = metrics_addr.parse().map_err(|e| {
+            error!("Invalid metrics address: {e}");
+            exitcode::CONFIG
+        })?;
+        iggy_sample::metrics::init_metrics(metrics_addr).map_err(|e| {
+            error!("Failed to start metrics exporter: {e}");
+            exitcode::UNAVAILABLE
+        })?;
+        // Seed the gauges so every series exists from the first scrape -
+        // absent-series is otherwise indistinguishable from healthy.
+        iggy_sample::metrics::set_connection_status(false);
+        iggy_sample::metrics::set_circuit_breaker_state(0);
+    } else {
+        info!("Metrics exporter disabled (METRICS_PORT=0)");
+    }
+
     // Initialize Iggy client
     info!("Connecting to Iggy server...");
     let iggy_client = IggyClientWrapper::new(config.clone()).await.map_err(|e| {
@@ -51,6 +72,7 @@ async fn run() -> Result<(), exitcode::ExitCode> {
         exitcode::UNAVAILABLE
     })?;
     info!("Successfully connected to Iggy server");
+    iggy_sample::metrics::set_connection_status(true);
 
     // Initialize default stream and topic
     info!("Initializing default stream and topic...");
@@ -62,23 +84,6 @@ async fn run() -> Result<(), exitcode::ExitCode> {
         "Default stream '{}' and topic '{}' initialized",
         config.default_stream, config.default_topic
     );
-
-    // Start the Prometheus metrics exporter (dedicated listener). A bind
-    // failure fails startup: silently missing metrics would defeat alerting.
-    if config.metrics_port > 0 {
-        let metrics_addr: SocketAddr = format!("{}:{}", config.host, config.metrics_port)
-            .parse()
-            .map_err(|e| {
-            error!("Invalid metrics address: {e}");
-            exitcode::CONFIG
-        })?;
-        iggy_sample::metrics::init_metrics(metrics_addr).map_err(|e| {
-            error!("Failed to start metrics exporter: {e}");
-            exitcode::UNAVAILABLE
-        })?;
-    } else {
-        info!("Metrics exporter disabled (METRICS_PORT=0)");
-    }
 
     // Build application state and router
     let state = AppState::new(iggy_client, config.clone());

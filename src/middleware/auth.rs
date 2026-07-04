@@ -421,9 +421,12 @@ mod tests {
         let auth = ApiKeyAuth::with_defaults(Some("secret".to_string()));
         let mut svc = auth.layer(OkService);
 
-        // Far more valid requests than the failure budget (10/min + burst 5).
-        // A regression to counting every request would 429 partway through.
-        for i in 0..40 {
+        // Far more valid requests than the failure budget. A regression to
+        // counting every request would 429 partway through. Derived from the
+        // constants so raising the budget cannot silently weaken the test.
+        let beyond_budget =
+            2 * (DEFAULT_AUTH_FAILURE_LIMIT.get() + DEFAULT_AUTH_FAILURE_BURST.get()) + 10;
+        for i in 0..beyond_budget {
             let resp = svc.call(request_with_key(Some("secret"))).await.unwrap();
             assert_eq!(
                 resp.status(),
@@ -441,8 +444,10 @@ mod tests {
 
         // All requests share the "unknown" IP bucket (no proxy headers).
         // Failures should 401 until the budget is exhausted, then 429.
+        let beyond_budget =
+            2 * (DEFAULT_AUTH_FAILURE_LIMIT.get() + DEFAULT_AUTH_FAILURE_BURST.get()) + 10;
         let mut saw_429 = false;
-        for _ in 0..40 {
+        for _ in 0..beyond_budget {
             let resp = svc.call(request_with_key(Some("wrong"))).await.unwrap();
             match resp.status() {
                 StatusCode::UNAUTHORIZED => {}
@@ -459,6 +464,31 @@ mod tests {
         // failures are blocked, legitimate clients are unaffected.
         let resp = svc.call(request_with_key(Some("secret"))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_failure_buckets_are_per_ip() {
+        let auth = ApiKeyAuth::with_defaults(Some("secret".to_string()));
+        let mut svc = auth.layer(OkService);
+        let beyond_budget =
+            2 * (DEFAULT_AUTH_FAILURE_LIMIT.get() + DEFAULT_AUTH_FAILURE_BURST.get()) + 10;
+
+        // Exhaust IP A's failure budget (default config trusts headers).
+        for _ in 0..beyond_budget {
+            let mut req = request_with_key(Some("wrong"));
+            req.headers_mut()
+                .insert("x-forwarded-for", "203.0.113.1".parse().unwrap());
+            let _ = svc.call(req).await.unwrap();
+        }
+
+        // A failing request from IP B has a fresh budget: 401, not 429.
+        // A regression collapsing all clients into one global bucket would
+        // return 429 here.
+        let mut req = request_with_key(Some("wrong"));
+        req.headers_mut()
+            .insert("x-forwarded-for", "203.0.113.2".parse().unwrap());
+        let resp = svc.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

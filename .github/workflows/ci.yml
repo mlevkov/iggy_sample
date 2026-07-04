@@ -181,8 +181,8 @@ jobs:
             - name: Install cargo-deny
               uses: taiki-e/install-action@cargo-deny
 
-            - name: Check advisories and licenses
-              run: cargo deny check advisories licenses
+            - name: Check dependency policy (advisories, bans, licenses, sources)
+              run: cargo deny check
 
     # ==========================================================================
     # Final status check (for branch protection)

@@ -272,11 +272,7 @@ impl CircuitBreaker {
                 );
 
                 if state.consecutive_failures >= self.config.failure_threshold {
-                    state.state = CircuitState::Open;
-                    state.opened_at = Some(Instant::now());
-                    self.times_opened.fetch_add(1, Ordering::Relaxed);
-                    crate::metrics::record_circuit_breaker_open();
-                    crate::metrics::set_circuit_breaker_state(2);
+                    self.open_now(&mut state);
                     warn!(
                         failures = state.consecutive_failures,
                         open_duration = ?self.config.open_duration,
@@ -286,12 +282,8 @@ impl CircuitBreaker {
             }
             CircuitState::HalfOpen => {
                 // Any failure in half-open state reopens the circuit
-                state.state = CircuitState::Open;
-                state.opened_at = Some(Instant::now());
                 state.consecutive_successes = 0;
-                self.times_opened.fetch_add(1, Ordering::Relaxed);
-                crate::metrics::record_circuit_breaker_open();
-                crate::metrics::set_circuit_breaker_state(2);
+                self.open_now(&mut state);
                 warn!("Circuit breaker reopened after failure in HalfOpen state");
             }
             CircuitState::Open => {
@@ -324,16 +316,26 @@ impl CircuitBreaker {
         state.opened_at = None;
         state.consecutive_failures = 0;
         state.consecutive_successes = 0;
+        crate::metrics::set_circuit_breaker_state(0);
         info!("Circuit breaker forcibly closed");
     }
 
     /// Force the circuit to open (for testing or manual intervention).
     pub async fn force_open(&self) {
         let mut state = self.state.write().await;
+        self.open_now(&mut state);
+        warn!("Circuit breaker forcibly opened");
+    }
+
+    /// Transition to Open, keeping internal counters and Prometheus metrics
+    /// in lockstep. Shared by the threshold, half-open-failure, and forced
+    /// open transitions so the gauge cannot drift from the atomics.
+    fn open_now(&self, state: &mut CircuitBreakerState) {
         state.state = CircuitState::Open;
         state.opened_at = Some(Instant::now());
         self.times_opened.fetch_add(1, Ordering::Relaxed);
-        warn!("Circuit breaker forcibly opened");
+        crate::metrics::record_circuit_breaker_open();
+        crate::metrics::set_circuit_breaker_state(2);
     }
 }
 

@@ -301,15 +301,14 @@ impl Config {
         self.metrics_port > 0
     }
 
-    /// Get the metrics endpoint address.
+    /// Get the metrics endpoint address (binds the same host as the API).
     ///
     /// Returns `None` if metrics are disabled (port = 0).
-    pub fn metrics_addr(&self) -> Option<std::net::SocketAddr> {
+    /// This is the single source of truth for the metrics bind address;
+    /// `main.rs` starts the exporter from it.
+    pub fn metrics_addr(&self) -> Option<String> {
         if self.metrics_enabled() {
-            Some(std::net::SocketAddr::from((
-                [0, 0, 0, 0],
-                self.metrics_port,
-            )))
+            Some(format!("{}:{}", self.host, self.metrics_port))
         } else {
             None
         }
