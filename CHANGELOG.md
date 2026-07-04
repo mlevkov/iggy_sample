@@ -42,6 +42,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   licenses-only and non-blocking); weekly stress tests pin
   `apache/iggy:0.8.0` instead of `latest`
 
+### Fixed
+
+Findings from the session-01 eight-agent double review
+(`docs/code-reviews/`); deferred items carry tech-debt records with binding
+triggers (`docs/tech-debt/`):
+
+- **Resilience**: SDK connection errors are now classified into the
+  wrapper's connection-aware variants, making the reconnect and
+  circuit-breaker paths reachable (previously dead code); the background
+  health check performs live pings so `/health` and `/ready` stay truthful
+  during outages; reconnection no longer leaks the old client's heartbeat
+  task, resets its attempt counter per session, uses saturating backoff
+  arithmetic, and is bounded on the request path; `ensure_stream/topic` no
+  longer swallow lookup errors and tolerate losing a concurrent creation
+  race instead of crash-looping
+- **Security**: `TRUSTED_PROXIES` is enforced against the actual peer
+  address (spoofed forwarded headers from untrusted peers are ignored) and
+  invalid entries fail startup; the auth brute-force limiter meters
+  failures only, so valid-key clients are no longer throttled to the
+  failure budget
+- **Observability**: the Prometheus exporter is now actually started on
+  `METRICS_PORT` and the message/reconnect/breaker metrics are recorded;
+  Prometheus scrapes the correct port
+- **API**: `count=0` polls return 400 instead of 500; all-digit resource
+  names ("42") are treated as names, not numeric server IDs; removed the
+  dead `PollMessagesRequest` type
+
 ### Added
 
 - **Observability Stack**: Complete Grafana-based monitoring setup

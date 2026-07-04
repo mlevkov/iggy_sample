@@ -420,13 +420,13 @@ environment:
 ### Running Tests
 
 ```bash
-# Unit tests (130 tests)
+# Unit tests (147 tests)
 cargo test --lib
 
-# Integration tests (24 tests, requires Docker for testcontainers)
+# Integration tests (26 tests, requires Docker for testcontainers)
 cargo test --test integration_tests
 
-# Model tests (20 tests)
+# Model tests (18 tests)
 cargo test --test model_tests
 
 # All tests
@@ -705,6 +705,9 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 - Bounded: 100ms minimum, 5 minutes maximum
 - Stored in request extensions for handler use
 - `RequestTimeoutExt` trait for easy extraction in handlers
+- **Note**: currently parsed and stored only — no handler consumes it yet, so
+  all Iggy operations are bounded by the global `OPERATION_TIMEOUT_SECS`.
+  Enforcement is tracked in `docs/tech-debt/TD-2026-07-04.md`.
 
 ## Deployment Security
 

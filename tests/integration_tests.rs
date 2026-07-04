@@ -332,6 +332,126 @@ async fn test_stats_endpoint() {
 // Message Tests
 // ============================================================================
 
+/// Build a generic test event payload with the given marker message.
+fn generic_event(marker: &str, partition_key: Option<&str>) -> serde_json::Value {
+    let event = json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "event_type": "test.semantics",
+        "timestamp": "2026-07-03T10:30:00Z",
+        "payload": {
+            "type": "Generic",
+            "data": { "message": marker }
+        }
+    });
+    match partition_key {
+        Some(key) => json!({ "event": event, "partition_key": key }),
+        None => json!({ "event": event }),
+    }
+}
+
+/// Poll one partition and return the number of messages.
+async fn poll_count(fixture: &TestFixture, query: &str) -> u64 {
+    let response = fixture
+        .client
+        .get(fixture.url(&format!("/messages?{}", query)))
+        .send()
+        .await
+        .expect("Poll request failed");
+    assert!(
+        response.status().is_success(),
+        "poll '{}' failed: {}",
+        query,
+        response.status()
+    );
+    let body: serde_json::Value = response.json().await.expect("Failed to parse poll body");
+    body.get("count").and_then(|v| v.as_u64()).expect("count")
+}
+
+/// Pins the SDK-0.10 semantics of PollingStrategy::next + auto_commit: a poll
+/// without an explicit offset resumes from the consumer's committed offset,
+/// so a second poll must not re-deliver the first poll's messages.
+#[tokio::test]
+async fn test_poll_without_offset_advances_committed_offset() {
+    let fixture = TestFixture::new().await;
+
+    for i in 0..3 {
+        let response = fixture
+            .client
+            .post(fixture.url("/messages"))
+            .json(&generic_event(&format!("offset-semantics-{i}"), None))
+            .send()
+            .await
+            .expect("Send request failed");
+        assert!(response.status().is_success());
+    }
+    sleep(Duration::from_millis(300)).await;
+
+    // First round: no offset param (PollingStrategy::next) + auto_commit,
+    // across both partitions of the 2-partition test topic.
+    let first: u64 = poll_count(
+        &fixture,
+        "partition_id=0&consumer_id=77&count=10&auto_commit=true",
+    )
+    .await
+        + poll_count(
+            &fixture,
+            "partition_id=1&consumer_id=77&count=10&auto_commit=true",
+        )
+        .await;
+    assert_eq!(
+        first, 3,
+        "first next-poll round should deliver all messages"
+    );
+
+    // Second round: offsets were committed, nothing may be re-delivered.
+    let second: u64 = poll_count(
+        &fixture,
+        "partition_id=0&consumer_id=77&count=10&auto_commit=true",
+    )
+    .await
+        + poll_count(
+            &fixture,
+            "partition_id=1&consumer_id=77&count=10&auto_commit=true",
+        )
+        .await;
+    assert_eq!(
+        second, 0,
+        "second next-poll round re-delivered committed messages"
+    );
+}
+
+/// Pins the SDK-0.10 semantics of Partitioning::messages_key_str: all
+/// messages sharing a partition key must land in exactly one partition
+/// (per-entity ordering guarantee).
+#[tokio::test]
+async fn test_same_partition_key_routes_to_single_partition() {
+    let fixture = TestFixture::new().await;
+
+    for i in 0..5 {
+        let response = fixture
+            .client
+            .post(fixture.url("/messages"))
+            .json(&generic_event(
+                &format!("routing-{i}"),
+                Some("routing-invariant-key"),
+            ))
+            .send()
+            .await
+            .expect("Send request failed");
+        assert!(response.status().is_success());
+    }
+    sleep(Duration::from_millis(300)).await;
+
+    let p0 = poll_count(&fixture, "partition_id=0&consumer_id=88&count=50&offset=0").await;
+    let p1 = poll_count(&fixture, "partition_id=1&consumer_id=88&count=50&offset=0").await;
+
+    assert_eq!(p0 + p1, 5, "all keyed messages should be delivered");
+    assert!(
+        (p0 == 5 && p1 == 0) || (p0 == 0 && p1 == 5),
+        "messages with one partition key split across partitions (p0={p0}, p1={p1})"
+    );
+}
+
 #[tokio::test]
 async fn test_send_and_poll_message() {
     let fixture = TestFixture::new().await;
