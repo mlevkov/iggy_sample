@@ -63,6 +63,23 @@ async fn run() -> Result<(), exitcode::ExitCode> {
         config.default_stream, config.default_topic
     );
 
+    // Start the Prometheus metrics exporter (dedicated listener). A bind
+    // failure fails startup: silently missing metrics would defeat alerting.
+    if config.metrics_port > 0 {
+        let metrics_addr: SocketAddr = format!("{}:{}", config.host, config.metrics_port)
+            .parse()
+            .map_err(|e| {
+            error!("Invalid metrics address: {e}");
+            exitcode::CONFIG
+        })?;
+        iggy_sample::metrics::init_metrics(metrics_addr).map_err(|e| {
+            error!("Failed to start metrics exporter: {e}");
+            exitcode::UNAVAILABLE
+        })?;
+    } else {
+        info!("Metrics exporter disabled (METRICS_PORT=0)");
+    }
+
     // Build application state and router
     let state = AppState::new(iggy_client, config.clone());
     let app = build_router(state.clone()).map_err(|e| {

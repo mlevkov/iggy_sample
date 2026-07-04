@@ -55,21 +55,9 @@ impl ConsumerService {
     /// * `params` - Polling parameters (partition, consumer, offset, count, auto_commit)
     #[instrument(skip(self, params), fields(partition_id = params.partition_id, consumer_id = params.consumer_id))]
     pub async fn poll(&self, params: PollParams) -> AppResult<PollMessagesResponse> {
-        let partition_id = params.partition_id;
-        let polled = self.client.poll_messages_default(params).await?;
-
-        let messages = self.parse_messages(&polled.messages);
-        let message_count = messages.len();
-
-        self.messages_consumed
-            .fetch_add(message_count as u64, Ordering::Relaxed);
-
-        Ok(PollMessagesResponse {
-            messages,
-            count: message_count,
-            partition_id,
-            current_offset: polled.current_offset,
-        })
+        let stream = self.client.default_stream().to_string();
+        let topic = self.client.default_topic().to_string();
+        self.poll_from(&stream, &topic, params).await
     }
 
     /// Poll messages from a specific stream and topic.
@@ -88,6 +76,7 @@ impl ConsumerService {
 
         self.messages_consumed
             .fetch_add(message_count as u64, Ordering::Relaxed);
+        crate::metrics::record_messages_polled(stream, topic, message_count as u64);
 
         Ok(PollMessagesResponse {
             messages,

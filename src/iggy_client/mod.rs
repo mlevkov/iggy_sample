@@ -269,6 +269,7 @@ impl IggyClientWrapper {
 
         let healthy = matches!(result, Ok(Ok(())));
         self.state.set_connected(healthy);
+        crate::metrics::set_connection_status(healthy);
         if !healthy {
             debug!("Live health check failed: server did not answer ping in time");
         }
@@ -322,6 +323,7 @@ impl IggyClientWrapper {
 
         loop {
             let attempt = self.state.increment_attempts();
+            crate::metrics::record_reconnect_attempt();
 
             // Check if we've exceeded max attempts (0 = infinite)
             if max_attempts > 0 && attempt > max_attempts {

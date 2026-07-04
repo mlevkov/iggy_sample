@@ -191,6 +191,7 @@ impl CircuitBreaker {
                         && opened_at.elapsed() < self.config.open_duration
                     {
                         self.requests_rejected.fetch_add(1, Ordering::Relaxed);
+                        crate::metrics::record_circuit_breaker_rejection();
                         return false;
                     }
                     // Timeout expired - need to transition to half-open
@@ -208,10 +209,12 @@ impl CircuitBreaker {
             {
                 state.state = CircuitState::HalfOpen;
                 state.consecutive_successes = 0;
+                crate::metrics::set_circuit_breaker_state(1);
                 info!("Circuit breaker transitioning from Open to HalfOpen");
                 return true;
             }
             self.requests_rejected.fetch_add(1, Ordering::Relaxed);
+            crate::metrics::record_circuit_breaker_rejection();
             return false;
         }
 
@@ -241,6 +244,7 @@ impl CircuitBreaker {
                     state.state = CircuitState::Closed;
                     state.opened_at = None;
                     state.consecutive_failures = 0;
+                    crate::metrics::set_circuit_breaker_state(0);
                     info!("Circuit breaker closed after successful recovery");
                 }
             }
@@ -271,6 +275,8 @@ impl CircuitBreaker {
                     state.state = CircuitState::Open;
                     state.opened_at = Some(Instant::now());
                     self.times_opened.fetch_add(1, Ordering::Relaxed);
+                    crate::metrics::record_circuit_breaker_open();
+                    crate::metrics::set_circuit_breaker_state(2);
                     warn!(
                         failures = state.consecutive_failures,
                         open_duration = ?self.config.open_duration,
@@ -284,11 +290,14 @@ impl CircuitBreaker {
                 state.opened_at = Some(Instant::now());
                 state.consecutive_successes = 0;
                 self.times_opened.fetch_add(1, Ordering::Relaxed);
+                crate::metrics::record_circuit_breaker_open();
+                crate::metrics::set_circuit_breaker_state(2);
                 warn!("Circuit breaker reopened after failure in HalfOpen state");
             }
             CircuitState::Open => {
-                // Already open, refresh the timer
-                state.opened_at = Some(Instant::now());
+                // Already open. Deliberately do NOT refresh opened_at:
+                // straggler failures from in-flight requests would otherwise
+                // extend the open window indefinitely and delay recovery.
             }
         }
     }
