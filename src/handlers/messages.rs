@@ -24,7 +24,8 @@ use crate::iggy_client::PollParams;
 use crate::models::{Event, PollMessagesResponse, SendMessageRequest, SendMessageResponse};
 use crate::state::AppState;
 use crate::validation::{
-    validate_consumer_id, validate_event_type, validate_partition_id, validate_resource_name,
+    validate_consumer_id, validate_event_type, validate_partition_id, validate_poll_count,
+    validate_resource_name,
 };
 
 /// Send a single message to the default stream/topic.
@@ -174,6 +175,7 @@ pub async fn poll_messages(
     // Validate poll parameters
     validate_partition_id(query.partition_id)?;
     validate_consumer_id(query.consumer_id)?;
+    validate_poll_count(query.count)?;
 
     let max_count = state.config.poll_max_count;
     let count = query.count.min(max_count);
@@ -251,6 +253,7 @@ pub async fn poll_messages_from(
     // Validate poll parameters
     validate_partition_id(query.partition_id)?;
     validate_consumer_id(query.consumer_id)?;
+    validate_poll_count(query.count)?;
 
     let max_count = state.config.poll_max_count;
     let count = query.count.min(max_count);

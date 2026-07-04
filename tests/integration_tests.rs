@@ -220,8 +220,18 @@ impl TestFixture {
 
         for attempt in 1..=max_attempts {
             // Check if server task failed
-            if let Ok(Err(e)) = error_rx.try_recv() {
-                panic!("Server failed to start: {}", e);
+            match error_rx.try_recv() {
+                Ok(Err(e)) => panic!("Server failed to start: {}", e),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    // The server task dropped its sender without reporting an
+                    // error: it panicked or returned early. Surfacing this
+                    // immediately beats 30s of polling a dead server followed
+                    // by a generic timeout message that hides the real cause.
+                    panic!(
+                        "Server task exited unexpectedly (likely panicked) before becoming ready"
+                    );
+                }
+                Ok(Ok(())) | Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
 
             match client.get(&health_url).send().await {
