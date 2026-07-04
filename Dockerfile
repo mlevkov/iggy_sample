@@ -32,9 +32,10 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies (curl is required by HEALTHCHECK)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -45,8 +46,8 @@ COPY --from=builder /app/target/release/iggy_sample /app/iggy_sample
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose port
-EXPOSE 8000
+# Expose the API port and the Prometheus metrics listener (METRICS_PORT)
+EXPOSE 8000 9090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

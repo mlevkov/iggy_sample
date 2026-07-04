@@ -165,7 +165,7 @@ fn default_count() -> u32 {
 /// # Example
 ///
 /// ```bash
-/// curl "http://localhost:3000/messages?partition_id=1&count=10&offset=0"
+/// curl "http://localhost:8000/messages?partition_id=1&count=10&offset=0"
 /// ```
 #[instrument(skip(state))]
 pub async fn poll_messages(

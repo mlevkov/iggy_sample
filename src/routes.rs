@@ -22,6 +22,11 @@
 //!          │
 //!          ▼
 //! ┌──────────────────┐
+//! │  Timeout Extract │ ← Parses X-Request-Timeout into extensions
+//! └────────┬─────────┘
+//!          │
+//!          ▼
+//! ┌──────────────────┐
 //! │     Tracing      │ ← HTTP request/response logging
 //! └────────┬─────────┘
 //!          │

@@ -20,7 +20,7 @@
 //! Clients can provide their own request ID:
 //!
 //! ```bash
-//! curl -H "X-Request-Id: my-correlation-id" http://localhost:3000/messages
+//! curl -H "X-Request-Id: my-correlation-id" http://localhost:8000/messages
 //! ```
 //!
 //! The same ID will be returned in the response for correlation.

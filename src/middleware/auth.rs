@@ -18,10 +18,10 @@
 //!
 //! ```bash
 //! # Header method (preferred)
-//! curl -H "X-API-Key: your-secret-key" http://localhost:3000/messages
+//! curl -H "X-API-Key: your-secret-key" http://localhost:8000/messages
 //!
 //! # Query parameter method
-//! curl "http://localhost:3000/messages?api_key=your-secret-key"
+//! curl "http://localhost:8000/messages?api_key=your-secret-key"
 //! ```
 //!
 //! # Bypassed Endpoints

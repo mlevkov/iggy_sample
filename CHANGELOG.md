@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI now fails on `cargo deny check advisories licenses` (previously
   licenses-only and non-blocking); weekly stress tests pin
   `apache/iggy:0.8.0` instead of `latest`
+- Updated `docker-compose.yaml` with full observability stack configuration
+- Simplified documentation section in README.md to reference `docs/`
+  directory
 
 ### Fixed
 
@@ -68,6 +71,8 @@ triggers (`docs/tech-debt/`):
 - **API**: `count=0` polls return 400 instead of 500; all-digit resource
   names ("42") are treated as names, not numeric server IDs; removed the
   dead `PollMessagesRequest` type
+- Added `issues: write` permission to CI security audit job to allow
+  creating advisory issues
 
 ### Added
 
@@ -81,21 +86,6 @@ triggers (`docs/tech-debt/`):
   - Partitioning guide (`docs/partitioning-guide.md`): partition keys, ordering guarantees, selection strategies
   - Durable storage guide (`docs/durable-storage-guide.md`): storage architecture, fsync configuration, S3 backup/archiving, recovery procedures
   - Documentation index (`docs/README.md`) with topic-based navigation
-
-### Changed
-
-- Updated `docker-compose.yaml` with full observability stack configuration
-- Simplified documentation section in README.md to reference `docs/` directory
-
-### Fixed
-
-- Added `issues: write` permission to CI security audit job to allow creating advisory issues
-
-### Security
-
-- Ignored unmaintained transitive dependency advisories in `deny.toml`:
-  - `RUSTSEC-2024-0384` (instant): from iggy -> reqwest-retry -> parking_lot v0.11
-  - `RUSTSEC-2025-0134` (rustls-pemfile): from testcontainers -> bollard (dev-dep only)
 
 ## [0.1.0] - 2024-12-01
 

@@ -35,11 +35,11 @@ This application showcases how to build a production-ready message streaming ser
 │                      Axum HTTP Server                       │
 │                      (src/main.rs)                          │
 ├─────────────────────────────────────────────────────────────┤
-│  Middleware Stack (src/middleware/)                         │
+│  Middleware Stack (src/middleware/), in request order:     │
 │  - rate_limit.rs: Token bucket rate limiting                │
 │  - auth.rs: API key authentication                          │
-│  - timeout.rs: Request timeout propagation                  │
 │  - request_id.rs: Request ID propagation                    │
+│  - timeout.rs: Request timeout parsing                      │
 │  + tower_http: Tracing, CORS                                │
 ├─────────────────────────────────────────────────────────────┤
 │  Handlers (src/handlers/)                                   │
@@ -99,6 +99,7 @@ src/
 ├── metrics.rs        # Prometheus metrics export
 ├── state.rs          # Shared application state with stats caching
 ├── routes.rs         # Route definitions and middleware stack
+├── utils.rs          # Shutdown-signal helpers
 ├── iggy_client/      # Iggy SDK wrapper module
 │   ├── mod.rs        # Client wrapper with auto-reconnection
 │   ├── circuit_breaker.rs # Circuit breaker pattern implementation
@@ -127,7 +128,8 @@ src/
     ├── health.rs     # Health endpoints
     ├── messages.rs   # Message endpoints
     ├── streams.rs    # Stream management
-    └── topics.rs     # Topic management
+    ├── topics.rs     # Topic management
+    └── util.rs       # Shared handler utilities
 
 tests/
 ├── integration_tests.rs  # End-to-end API tests with testcontainers
@@ -190,7 +192,7 @@ Environment variables (see `.env.example`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `3000` | Server port |
+| `PORT` | `8000` | Server port |
 | `RUST_LOG` | `info` | Log level |
 
 ### Iggy Connection
@@ -304,6 +306,7 @@ The project includes a complete Grafana-based observability stack for monitoring
 | Service | Port | Description |
 |---------|------|-------------|
 | **Iggy** | 3000 | Message streaming server (also serves `/metrics`) |
+| **Sample App metrics** | 9091 (host) | App Prometheus metrics (`METRICS_PORT` 9090 in-container) |
 | **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, and users |
 | **Prometheus** | 9090 | Metrics collection and storage |
 | **Grafana** | 3001 | Visualization and dashboards |
