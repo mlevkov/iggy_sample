@@ -2,7 +2,7 @@
 name = "iggy_sample"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90.0"
+rust-version = "1.93.0"
 description = "A comprehensive demonstration of Apache Iggy message streaming with Axum"
 license = "MIT"
 repository = "https://github.com/mlevkov/iggy_sample"

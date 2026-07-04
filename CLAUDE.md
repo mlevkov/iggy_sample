@@ -380,7 +380,7 @@ environment:
 ## Development
 
 ### Prerequisites
-- Rust 1.90+ (edition 2024, MSRV: 1.90.0)
+- Rust 1.93+ (edition 2024, MSRV: 1.93.0)
 - Docker & Docker Compose
 
 ### Quick Start

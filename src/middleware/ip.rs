@@ -223,7 +223,7 @@ fn rightmost_untrusted_xff(xff: &str, trusted_proxies: &TrustedProxyConfig) -> O
 ///   the peer address is the client IP (spoofed headers from direct clients
 ///   are inert).
 /// - Peer in a trusted range with `X-Forwarded-For`: resolved via the
-///   rightmost-untrusted rule (see [`rightmost_untrusted_xff`]) so the
+///   rightmost-untrusted rule (see `rightmost_untrusted_xff`) so the
 ///   guarantee holds for both overwriting and appending proxies; an
 ///   unparseable chain falls back to the peer address.
 /// - Peer in a trusted range with `X-Real-IP`: the value is used only if it

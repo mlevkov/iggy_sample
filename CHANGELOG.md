@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Updated Apache Iggy Rust SDK from 0.8.0 to 0.10.0 (latest stable);
   no source changes required — the `Client` trait API is unchanged
+- **Breaking**: MSRV raised 1.90 → 1.93: iggy 0.10's `compio-buf`
+  dependency uses APIs stabilized in Rust 1.93 (and declares no
+  rust-version, so cargo cannot catch this at resolution time)
 - Pinned the `apache/iggy` server image to 0.8.0 (the release paired
   with the 0.10 SDK) in `docker-compose.yaml` and integration tests,
   replacing the floating `latest` tag

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml/badge.svg)](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.90%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.93%2B-blue.svg)](https://www.rust-lang.org)
 
 A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) message streaming integrated with [Axum](https://github.com/tokio-rs/axum) web framework in Rust.
 
@@ -78,7 +78,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ## Prerequisites
 
-- Rust 1.90+ (edition 2024, MSRV: 1.90.0)
+- Rust 1.93+ (edition 2024, MSRV: 1.93.0)
 - Docker & Docker Compose
 - curl or httpie (for testing)
 
