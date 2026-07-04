@@ -76,8 +76,12 @@ use crate::models::Event;
 // Re-exports for public API
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use connection::ConnectionState;
-pub use helpers::{classify_iggy_error, rand_jitter, to_identifier};
+pub use helpers::{rand_jitter, to_identifier};
 pub use params::PollParams;
+
+// Internal-only: the error classifier's fallback contract (must be a
+// NON-connection variant) is too easy to violate to expose publicly.
+use helpers::classify_iggy_error;
 
 // =============================================================================
 // Constants

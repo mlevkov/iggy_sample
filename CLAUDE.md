@@ -246,9 +246,13 @@ The `TRUSTED_PROXIES` variable configures IP spoofing mitigation for both the
 rate limiter and the auth brute-force limiter. When set, forwarded headers
 (`X-Forwarded-For`/`X-Real-IP`) are only honored if the direct peer address is
 inside a trusted range; requests from untrusted peers are keyed by their actual
-peer address. Invalid entries fail startup
-(`RateLimitError::InvalidTrustedProxyCidr`) instead of silently degrading to
-trust-all.
+peer address. Honored `X-Forwarded-For` chains are resolved with the
+**rightmost-untrusted** rule (walk from the right, skip trusted-range hops,
+take the first untrusted address), so the guarantee holds for proxies that
+append to a client-supplied header — the common default — as well as those
+that overwrite it. Unparseable forwarded values fall back to the peer address.
+Invalid entries fail startup (`RateLimitError::InvalidTrustedProxyCidr`)
+instead of silently degrading to trust-all.
 
 **Format**: Comma-separated CIDR notation
 

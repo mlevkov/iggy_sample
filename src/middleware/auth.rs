@@ -385,8 +385,6 @@ fn rate_limited_response(retry_after: u64) -> Response<Body> {
         .into_response()
 }
 
-// Note: extract_client_ip is imported from super::ip module
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

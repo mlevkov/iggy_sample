@@ -181,7 +181,7 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
         router = router.layer(RateLimitLayer::with_trusted_proxies(
             config.rate_limit_rps,
             config.rate_limit_burst,
-            &config.trusted_proxies,
+            trusted_proxies,
         )?);
     } else {
         info!("Rate limiting disabled (RATE_LIMIT_RPS=0)");

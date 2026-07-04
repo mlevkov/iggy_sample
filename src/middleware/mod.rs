@@ -31,7 +31,7 @@ pub mod request_id;
 pub mod timeout;
 
 pub use auth::ApiKeyAuth;
-pub use ip::{UNKNOWN_IP, extract_client_ip, extract_client_ip_with_validation};
+pub use ip::extract_client_ip_with_validation;
 pub use rate_limit::{RateLimitError, RateLimitLayer, TrustedProxyConfig};
 pub use request_id::RequestIdLayer;
 pub use timeout::{
