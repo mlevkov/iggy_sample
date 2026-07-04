@@ -93,18 +93,25 @@ async fn run() -> Result<(), exitcode::ExitCode> {
     info!("  GET  /streams/{{name}}   - Get stream info");
     info!("  DELETE /streams/{{name}} - Delete stream");
 
-    // Start server with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(utils::shutdown_signal())
-        .await
-        .map_err(|e| {
-            error!("Server error: {e}");
-            exitcode::SOFTWARE
-        })?;
+    // Start server with graceful shutdown. ConnectInfo exposes the peer
+    // address to the middleware stack, which TRUSTED_PROXIES enforcement
+    // needs to decide whether forwarded headers can be honored.
+    let serve_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(utils::shutdown_signal())
+    .await;
 
-    // Gracefully shutdown background tasks
+    // Gracefully shutdown background tasks on BOTH exit paths - a serve
+    // error must not leave the stats/health tasks running un-awaited.
     info!("HTTP server stopped, shutting down background tasks...");
     state.shutdown().await;
+
+    serve_result.map_err(|e| {
+        error!("Server error: {e}");
+        exitcode::SOFTWARE
+    })?;
 
     info!("Server shutdown complete");
     Ok(())

@@ -197,9 +197,14 @@ impl TestFixture {
             .await
             .map_err(|e| format!("Failed to bind server: {}", e))?;
 
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| format!("Server failed: {}", e))?;
+        // Match production: ConnectInfo exposes the peer address for
+        // TRUSTED_PROXIES enforcement in the middleware stack.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| format!("Server failed: {}", e))?;
 
         Ok(())
     }
@@ -1101,9 +1106,14 @@ impl SecureTestFixture {
             .await
             .map_err(|e| format!("Failed to bind server: {}", e))?;
 
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| format!("Server failed: {}", e))?;
+        // Match production: ConnectInfo exposes the peer address for
+        // TRUSTED_PROXIES enforcement in the middleware stack.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| format!("Server failed: {}", e))?;
 
         Ok(())
     }
@@ -1229,6 +1239,10 @@ async fn test_auth_invalid_api_key() {
         "Expected 401 Unauthorized with wrong API key"
     );
 }
+
+// Note: valid-key-never-throttled and failure-budget-throttling semantics are
+// covered by deterministic unit tests in src/middleware/auth.rs (the secure
+// fixture's general rate limiter (5 RPS) would dominate a wire-level test).
 
 #[tokio::test]
 async fn test_health_bypasses_auth() {

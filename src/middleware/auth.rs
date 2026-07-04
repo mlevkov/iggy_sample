@@ -46,7 +46,8 @@ use subtle::ConstantTimeEq;
 use tower::{Layer, Service};
 use tracing::{debug, error, warn};
 
-use super::ip::extract_client_ip;
+use super::ip::extract_client_ip_with_validation;
+use super::rate_limit::TrustedProxyConfig;
 
 /// Header name for API key.
 pub const API_KEY_HEADER: &str = "x-api-key";
@@ -95,9 +96,10 @@ type AuthFailureLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, De
 ///
 /// # Brute Force Protection
 ///
-/// Includes per-IP rate limiting for authentication failures. After too many
-/// failed attempts, further requests from that IP are temporarily blocked
-/// even before validating the API key.
+/// Includes per-IP rate limiting of authentication FAILURES only: valid-key
+/// requests never consume from the failure budget, so legitimate clients are
+/// unaffected. Once an IP exhausts its failure budget, further failing
+/// requests receive `429 Too Many Requests` until the window refills.
 #[derive(Clone)]
 pub struct ApiKeyAuth {
     /// Expected API key (None = auth disabled)
@@ -106,6 +108,8 @@ pub struct ApiKeyAuth {
     bypass_paths: Arc<Vec<String>>,
     /// Rate limiter for tracking auth failures per IP
     failure_limiter: Option<Arc<AuthFailureLimiter>>,
+    /// Trusted proxy configuration for spoofing-resistant IP extraction
+    trusted_proxies: Arc<TrustedProxyConfig>,
 }
 
 impl ApiKeyAuth {
@@ -116,6 +120,24 @@ impl ApiKeyAuth {
     /// * `api_key` - Expected API key, or `None` to disable authentication
     /// * `bypass_paths` - Paths that bypass authentication (e.g., health endpoints)
     pub fn new(api_key: Option<String>, bypass_paths: Vec<String>) -> Self {
+        Self::with_trusted_proxies(
+            api_key,
+            bypass_paths,
+            Arc::new(TrustedProxyConfig::default()),
+        )
+    }
+
+    /// Create a new API key auth layer with trusted-proxy validation for the
+    /// per-IP brute-force limiter.
+    ///
+    /// With trusted proxies configured, forwarded headers are only honored
+    /// when the direct peer is inside a trusted range, so attackers cannot
+    /// rotate spoofed `X-Forwarded-For` values to escape failure tracking.
+    pub fn with_trusted_proxies(
+        api_key: Option<String>,
+        bypass_paths: Vec<String>,
+        trusted_proxies: Arc<TrustedProxyConfig>,
+    ) -> Self {
         let failure_limiter = if api_key.is_some() {
             // Only create rate limiter when auth is enabled
             let quota = Quota::per_minute(DEFAULT_AUTH_FAILURE_LIMIT)
@@ -129,6 +151,7 @@ impl ApiKeyAuth {
             expected_key: api_key.map(Arc::new),
             bypass_paths: Arc::new(bypass_paths),
             failure_limiter,
+            trusted_proxies,
         }
     }
 
@@ -158,6 +181,7 @@ impl<S> Layer<S> for ApiKeyAuth {
             expected_key: self.expected_key.clone(),
             bypass_paths: self.bypass_paths.clone(),
             failure_limiter: self.failure_limiter.clone(),
+            trusted_proxies: self.trusted_proxies.clone(),
         }
     }
 }
@@ -169,6 +193,7 @@ pub struct ApiKeyAuthService<S> {
     expected_key: Option<Arc<String>>,
     bypass_paths: Arc<Vec<String>>,
     failure_limiter: Option<Arc<AuthFailureLimiter>>,
+    trusted_proxies: Arc<TrustedProxyConfig>,
 }
 
 impl<S> Service<Request<Body>> for ApiKeyAuthService<S>
@@ -190,6 +215,7 @@ where
         let expected_key = self.expected_key.clone();
         let bypass_paths = self.bypass_paths.clone();
         let failure_limiter = self.failure_limiter.clone();
+        let trusted_proxies = self.trusted_proxies.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
@@ -206,65 +232,59 @@ where
                 return inner.call(req).await;
             }
 
-            // Extract client IP for failure tracking (convert to owned String for rate limiter)
-            let client_ip = extract_client_ip(&req).into_owned();
-
-            // Check if this IP is blocked due to too many failures
-            if let Some(ref limiter) = failure_limiter {
-                // We use check_key in reverse: if it fails, the IP has too many failures
-                // The rate limiter tracks "tokens consumed", so we check available capacity
-                if let Err(not_until) = limiter.check_key(&client_ip) {
-                    let wait_time =
-                        not_until.wait_time_from(governor::clock::DefaultClock::default().now());
-                    let retry_after = wait_time.as_secs().max(1);
-
-                    error!(
-                        client_ip = %client_ip,
-                        retry_after_secs = retry_after,
-                        "IP blocked due to excessive auth failures"
-                    );
-
-                    return Ok(rate_limited_response(retry_after));
-                }
-            }
-
-            // Extract API key from request
+            // Validate the key FIRST. The failure limiter only meters
+            // FAILURES: consuming a token on every request would throttle
+            // legitimate clients down to the failure budget (~10 req/min/IP),
+            // and all direct clients share the "unknown" bucket.
             let provided_key = extract_api_key(&req);
 
             match provided_key {
                 Some(extracted) if constant_time_eq(&extracted.key, &expected) => {
-                    // Valid API key - proceed
+                    // Valid API key - proceed without touching the limiter
                     debug!(
                         from_query = extracted.from_query,
                         "API key authentication successful"
                     );
                     inner.call(req).await
                 }
-                Some(_) => {
-                    // Invalid API key - record failure
-                    if let Some(ref limiter) = failure_limiter {
-                        // Consume a token for this failure
-                        let _ = limiter.check_key(&client_ip);
+                provided => {
+                    // Auth failure: consume one failure token for this IP.
+                    // Once the failure budget is exhausted, respond 429 so
+                    // brute-force attempts are throttled.
+                    let client_ip =
+                        extract_client_ip_with_validation(&req, &trusted_proxies).into_owned();
+
+                    if let Some(ref limiter) = failure_limiter
+                        && let Err(not_until) = limiter.check_key(&client_ip)
+                    {
+                        let wait_time = not_until
+                            .wait_time_from(governor::clock::DefaultClock::default().now());
+                        let retry_after = wait_time.as_secs().max(1);
+
+                        error!(
+                            client_ip = %client_ip,
+                            retry_after_secs = retry_after,
+                            "IP blocked due to excessive auth failures"
+                        );
+
+                        return Ok(rate_limited_response(retry_after));
                     }
-                    warn!(
-                        path = %req.uri().path(),
-                        client_ip = %client_ip,
-                        "Invalid API key provided"
-                    );
-                    Ok(unauthorized_response("Invalid API key"))
-                }
-                None => {
-                    // No API key provided - record failure
-                    if let Some(ref limiter) = failure_limiter {
-                        // Consume a token for this failure
-                        let _ = limiter.check_key(&client_ip);
+
+                    if provided.is_some() {
+                        warn!(
+                            path = %req.uri().path(),
+                            client_ip = %client_ip,
+                            "Invalid API key provided"
+                        );
+                        Ok(unauthorized_response("Invalid API key"))
+                    } else {
+                        warn!(
+                            path = %req.uri().path(),
+                            client_ip = %client_ip,
+                            "Missing API key"
+                        );
+                        Ok(unauthorized_response("API key required"))
                     }
-                    warn!(
-                        path = %req.uri().path(),
-                        client_ip = %client_ip,
-                        "Missing API key"
-                    );
-                    Ok(unauthorized_response("API key required"))
                 }
             }
         })
@@ -371,6 +391,77 @@ fn rate_limited_response(retry_after: u64) -> Response<Body> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Minimal inner service returning 200 OK, for driving the auth layer.
+    #[derive(Clone)]
+    struct OkService;
+
+    impl Service<Request<Body>> for OkService {
+        type Response = Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Request<Body>) -> Self::Future {
+            std::future::ready(Ok(StatusCode::OK.into_response()))
+        }
+    }
+
+    fn request_with_key(key: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri("/stats");
+        if let Some(k) = key {
+            builder = builder.header(API_KEY_HEADER, k);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_valid_key_requests_never_consume_failure_budget() {
+        let auth = ApiKeyAuth::with_defaults(Some("secret".to_string()));
+        let mut svc = auth.layer(OkService);
+
+        // Far more valid requests than the failure budget (10/min + burst 5).
+        // A regression to counting every request would 429 partway through.
+        for i in 0..40 {
+            let resp = svc.call(request_with_key(Some("secret"))).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "valid-key request {} was throttled by the failure limiter",
+                i
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auth_failures_throttled_after_budget_exhausted() {
+        let auth = ApiKeyAuth::with_defaults(Some("secret".to_string()));
+        let mut svc = auth.layer(OkService);
+
+        // All requests share the "unknown" IP bucket (no proxy headers).
+        // Failures should 401 until the budget is exhausted, then 429.
+        let mut saw_429 = false;
+        for _ in 0..40 {
+            let resp = svc.call(request_with_key(Some("wrong"))).await.unwrap();
+            match resp.status() {
+                StatusCode::UNAUTHORIZED => {}
+                StatusCode::TOO_MANY_REQUESTS => {
+                    saw_429 = true;
+                    break;
+                }
+                other => panic!("unexpected status {other}"),
+            }
+        }
+        assert!(saw_429, "failure budget was never exhausted");
+
+        // A VALID key from the same (blocked) bucket still succeeds: only
+        // failures are blocked, legitimate clients are unaffected.
+        let resp = svc.call(request_with_key(Some("secret"))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 
     #[test]
     fn test_api_key_auth_enabled() {

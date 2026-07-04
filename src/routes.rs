@@ -41,17 +41,20 @@
 //! - `/streams` - Stream management
 //! - `/streams/{stream}/topics` - Topic management
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{delete, get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::handlers;
 use crate::middleware::{
-    ApiKeyAuth, RateLimitError, RateLimitLayer, RequestIdLayer, extract_request_timeout,
+    ApiKeyAuth, RateLimitError, RateLimitLayer, RequestIdLayer, TrustedProxyConfig,
+    extract_request_timeout,
 };
 use crate::state::AppState;
 
@@ -143,8 +146,17 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
     // 5. Request ID
     router = router.layer(RequestIdLayer::new());
 
+    // Trusted proxy configuration is shared by auth (brute-force tracking)
+    // and rate limiting; invalid entries fail startup rather than silently
+    // degrading to trust-all.
+    let trusted_proxies = Arc::new(TrustedProxyConfig::try_new(&config.trusted_proxies)?);
+
     // 6. Authentication (if enabled)
-    let auth_layer = ApiKeyAuth::new(config.api_key.clone(), config.auth_bypass_paths.clone());
+    let auth_layer = ApiKeyAuth::with_trusted_proxies(
+        config.api_key.clone(),
+        config.auth_bypass_paths.clone(),
+        trusted_proxies.clone(),
+    );
     if auth_layer.is_enabled() {
         info!("API key authentication enabled");
         router = router.layer(auth_layer);
@@ -194,11 +206,25 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
             .allow_methods(Any)
             .allow_headers(Any)
     } else {
-        // Parse specific origins
+        // Parse specific origins; dropped entries are surfaced instead of
+        // silently vanishing (an all-invalid list fails closed - no origins
+        // allowed - which would otherwise look like a mystery CORS failure).
         let origins: Vec<_> = allowed_origins
             .iter()
-            .filter_map(|o| o.parse().ok())
+            .filter_map(|o| match o.parse() {
+                Ok(origin) => Some(origin),
+                Err(_) => {
+                    warn!(origin = %o, "Ignoring invalid CORS_ALLOWED_ORIGINS entry");
+                    None
+                }
+            })
             .collect();
+
+        if origins.is_empty() {
+            warn!(
+                "CORS_ALLOWED_ORIGINS contained no valid origins; all cross-origin requests will be rejected"
+            );
+        }
 
         CorsLayer::new()
             .allow_origin(origins)

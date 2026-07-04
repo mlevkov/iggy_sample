@@ -50,13 +50,16 @@ use governor::{Quota, RateLimiter};
 use tower::{Layer, Service};
 
 /// Error type for rate limit layer configuration.
-///
-/// This is a simple enum with no data, so it derives `Copy` for efficient
-/// pass-by-value semantics without cloning overhead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RateLimitError {
     /// RPS value cannot be zero.
     ZeroRps,
+    /// A TRUSTED_PROXIES entry could not be parsed as an IP or CIDR range.
+    ///
+    /// Startup fails instead of silently skipping the entry: a typo in the
+    /// trusted-proxy list would otherwise degrade to trusting spoofable
+    /// forwarded headers from everyone.
+    InvalidTrustedProxyCidr(String),
 }
 
 impl fmt::Display for RateLimitError {
@@ -66,6 +69,13 @@ impl fmt::Display for RateLimitError {
                 write!(
                     f,
                     "RPS must be greater than 0; use disabled() for no limiting"
+                )
+            }
+            RateLimitError::InvalidTrustedProxyCidr(entry) => {
+                write!(
+                    f,
+                    "Invalid TRUSTED_PROXIES entry '{}': expected an IP address or CIDR range (e.g. 10.0.0.0/8)",
+                    entry
                 )
             }
         }
@@ -179,20 +189,22 @@ pub struct TrustedProxyConfig {
 impl TrustedProxyConfig {
     /// Create a new trusted proxy configuration from CIDR strings.
     ///
-    /// Invalid CIDR strings are logged as warnings and skipped.
-    pub fn new(cidrs: &[String]) -> Self {
+    /// # Errors
+    ///
+    /// Returns [`RateLimitError::InvalidTrustedProxyCidr`] on the first entry
+    /// that fails to parse. Failing fast at startup is deliberate: silently
+    /// skipping a typo'd entry would degrade to trusting spoofable forwarded
+    /// headers from everyone (or, with a partial list, from unintended peers).
+    pub fn try_new(cidrs: &[String]) -> Result<Self, RateLimitError> {
         let ranges: Vec<CidrRange> = cidrs
             .iter()
-            .filter_map(|cidr| {
-                let parsed = CidrRange::parse(cidr);
-                if parsed.is_none() {
-                    warn!(cidr = %cidr, "Invalid CIDR range in TRUSTED_PROXIES, skipping");
-                }
-                parsed
+            .map(|cidr| {
+                CidrRange::parse(cidr)
+                    .ok_or_else(|| RateLimitError::InvalidTrustedProxyCidr(cidr.clone()))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
-        if !cidrs.is_empty() && !ranges.is_empty() {
+        if !ranges.is_empty() {
             debug!(
                 count = ranges.len(),
                 "Trusted proxy validation enabled with {} CIDR ranges",
@@ -200,7 +212,7 @@ impl TrustedProxyConfig {
             );
         }
 
-        Self { ranges }
+        Ok(Self { ranges })
     }
 
     /// Check if trusted proxy validation is enabled (any ranges configured).
@@ -227,8 +239,18 @@ impl TrustedProxyConfig {
             }
         };
 
-        // Check against all configured ranges
-        self.ranges.iter().any(|range| range.contains(&ip))
+        self.is_trusted_ip(&ip)
+    }
+
+    /// Check if an already-parsed IP address is from a trusted proxy.
+    ///
+    /// Returns `true` if the IP matches any configured CIDR range,
+    /// or if no ranges are configured (trust all mode).
+    pub fn is_trusted_ip(&self, ip: &IpAddr) -> bool {
+        if self.ranges.is_empty() {
+            return true;
+        }
+        self.ranges.iter().any(|range| range.contains(ip))
     }
 }
 
@@ -301,8 +323,8 @@ impl RateLimitLayer {
         // Create keyed rate limiter with custom hasher for efficiency
         let limiter = RateLimiter::keyed(quota);
 
-        // Parse trusted proxy configuration
-        let proxy_config = TrustedProxyConfig::new(trusted_proxies);
+        // Parse trusted proxy configuration (fails fast on invalid entries)
+        let proxy_config = TrustedProxyConfig::try_new(trusted_proxies)?;
 
         Ok(Self {
             limiter: Arc::new(limiter),
@@ -475,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_trusted_proxy_config_empty() {
-        let config = TrustedProxyConfig::new(&[]);
+        let config = TrustedProxyConfig::try_new(&[]).unwrap();
         assert!(!config.is_enabled());
         // Empty config trusts all
         assert!(config.is_trusted("1.2.3.4"));
@@ -485,7 +507,8 @@ mod tests {
     #[test]
     fn test_trusted_proxy_config_with_ranges() {
         let config =
-            TrustedProxyConfig::new(&["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()]);
+            TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()])
+                .unwrap();
         assert!(config.is_enabled());
 
         // Should trust IPs in configured ranges

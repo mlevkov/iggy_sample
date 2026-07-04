@@ -240,8 +240,13 @@ Environment variables (see `.env.example`):
 
 #### Trusted Proxy Configuration
 
-The `TRUSTED_PROXIES` variable configures IP spoofing mitigation for the rate limiter.
-When set, X-Forwarded-For headers are validated against trusted proxy networks.
+The `TRUSTED_PROXIES` variable configures IP spoofing mitigation for both the
+rate limiter and the auth brute-force limiter. When set, forwarded headers
+(`X-Forwarded-For`/`X-Real-IP`) are only honored if the direct peer address is
+inside a trusted range; requests from untrusted peers are keyed by their actual
+peer address. Invalid entries fail startup
+(`RateLimitError::InvalidTrustedProxyCidr`) instead of silently degrading to
+trust-all.
 
 **Format**: Comma-separated CIDR notation
 
@@ -516,7 +521,8 @@ Error types and HTTP status codes:
 
 ```rust
 pub enum RateLimitError {
-    ZeroRps,  // RPS cannot be 0; use disabled() instead
+    ZeroRps,                          // RPS cannot be 0; use disabled() instead
+    InvalidTrustedProxyCidr(String),  // Unparseable TRUSTED_PROXIES entry
 }
 ```
 
@@ -688,7 +694,9 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 
 ### API Key Authentication (`src/middleware/auth.rs`)
 - Constant-time comparison to prevent timing attacks
-- Per-IP brute force protection via shared `extract_client_ip()` function
+- Per-IP brute force protection that meters authentication FAILURES only —
+  valid-key requests never consume from the failure budget
+- Honors `TRUSTED_PROXIES` for spoofing-resistant IP extraction
 - Accepts key via `X-API-Key` header or `api_key` query parameter
 - Bypasses `/health` and `/ready` for health checks (exact path matching)
 

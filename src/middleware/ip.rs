@@ -58,10 +58,14 @@
 //!
 //! ## Trusted Proxy Validation
 //!
-//! When `TrustedProxyConfig` is provided with CIDR ranges, the extraction
-//! functions log debug information to help detect potential spoofing. Note that
-//! full connection IP validation requires Axum's `ConnectInfo` extension, which
-//! is not available at the middleware level.
+//! When `TrustedProxyConfig` is configured with CIDR ranges, forwarded headers
+//! are only honored if the direct peer (from Axum's `ConnectInfo` extension)
+//! is inside a trusted range; otherwise the peer address itself is used as the
+//! client IP, so spoofed `X-Forwarded-For`/`X-Real-IP` headers from untrusted
+//! sources are ignored. This requires the server to be started with
+//! `into_make_service_with_connect_info::<SocketAddr>()` (both `main.rs` and
+//! the integration-test harness do this). If `ConnectInfo` is absent, the
+//! functions fall back to header extraction and log a warning.
 //!
 //! # Internal Architecture
 //!
@@ -89,9 +93,11 @@
 //! - Both public functions return `Cow<'static, str>` for consistent zero-allocation fallback
 
 use std::borrow::Cow;
+use std::net::SocketAddr;
 
+use axum::extract::ConnectInfo;
 use axum::http::Request;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::rate_limit::TrustedProxyConfig;
 
@@ -206,31 +212,48 @@ pub fn extract_client_ip_with_validation<B>(
     req: &Request<B>,
     trusted_proxies: &TrustedProxyConfig,
 ) -> Cow<'static, str> {
+    if trusted_proxies.is_enabled() {
+        match req.extensions().get::<ConnectInfo<SocketAddr>>() {
+            Some(ConnectInfo(peer)) => {
+                let peer_ip = peer.ip();
+                if trusted_proxies.is_trusted_ip(&peer_ip) {
+                    // Peer is a trusted proxy: honor the forwarded headers it
+                    // set, falling back to the peer address itself when the
+                    // proxy sent none.
+                    return match extract_ip_from_headers(req) {
+                        ExtractedIp::FromXff(ip) | ExtractedIp::FromRealIp(ip) => {
+                            Cow::Owned(ip.to_string())
+                        }
+                        ExtractedIp::NotFound => Cow::Owned(peer_ip.to_string()),
+                    };
+                }
+                // Peer is NOT a trusted proxy: forwarded headers are
+                // client-controlled and spoofable, so ignore them and key on
+                // the actual peer address.
+                if !matches!(extract_ip_from_headers(req), ExtractedIp::NotFound) {
+                    debug!(
+                        peer_ip = %peer_ip,
+                        "Ignoring forwarded headers from untrusted peer"
+                    );
+                }
+                return Cow::Owned(peer_ip.to_string());
+            }
+            None => {
+                // TRUSTED_PROXIES is configured but the server was started
+                // without connect-info, so enforcement is impossible. Fall
+                // back to header trust and say so loudly.
+                warn!(
+                    "TRUSTED_PROXIES is set but the peer address is unavailable \
+                     (server not started with into_make_service_with_connect_info); \
+                     falling back to trusting forwarded headers"
+                );
+            }
+        }
+    }
+
     match extract_ip_from_headers(req) {
-        ExtractedIp::FromXff(ip) => {
-            if trusted_proxies.is_enabled() {
-                debug!(
-                    client_ip = %ip,
-                    "Extracted client IP from X-Forwarded-For (trusted proxy validation enabled)"
-                );
-            }
-            Cow::Owned(ip.to_string())
-        }
-        ExtractedIp::FromRealIp(ip) => {
-            if trusted_proxies.is_enabled() {
-                debug!(
-                    client_ip = %ip,
-                    "Extracted client IP from X-Real-IP (trusted proxy validation enabled)"
-                );
-            }
-            Cow::Owned(ip.to_string())
-        }
-        ExtractedIp::NotFound => {
-            if trusted_proxies.is_enabled() {
-                debug!("No proxy headers found - request may be bypassing reverse proxy");
-            }
-            Cow::Borrowed(UNKNOWN_IP)
-        }
+        ExtractedIp::FromXff(ip) | ExtractedIp::FromRealIp(ip) => Cow::Owned(ip.to_string()),
+        ExtractedIp::NotFound => Cow::Borrowed(UNKNOWN_IP),
     }
 }
 
@@ -372,6 +395,68 @@ mod tests {
         assert_eq!(ip, "unknown");
         // Simple version should also return borrowed for "unknown"
         assert!(matches!(ip, Cow::Borrowed(_)));
+    }
+
+    // ==========================================================================
+    // Trusted Proxy Enforcement Tests
+    // ==========================================================================
+
+    fn req_with_peer(xff: Option<&str>, peer: [u8; 4]) -> Request<Body> {
+        let mut builder = Request::builder();
+        if let Some(v) = xff {
+            builder = builder.header("x-forwarded-for", v);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((peer, 12345))));
+        req
+    }
+
+    #[test]
+    fn test_validation_trusted_peer_honors_forwarded_header() {
+        let trusted = TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string()]).unwrap();
+        let req = req_with_peer(Some("203.0.113.50"), [10, 0, 0, 5]);
+
+        assert_eq!(
+            extract_client_ip_with_validation(&req, &trusted),
+            "203.0.113.50"
+        );
+    }
+
+    #[test]
+    fn test_validation_untrusted_peer_ignores_forwarded_header() {
+        let trusted = TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string()]).unwrap();
+        // Peer outside the trusted range spoofs X-Forwarded-For
+        let req = req_with_peer(Some("1.2.3.4"), [203, 0, 113, 9]);
+
+        // The spoofed header must be ignored; the peer address is the client
+        assert_eq!(
+            extract_client_ip_with_validation(&req, &trusted),
+            "203.0.113.9"
+        );
+    }
+
+    #[test]
+    fn test_validation_trusted_peer_without_header_uses_peer_ip() {
+        let trusted = TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string()]).unwrap();
+        let req = req_with_peer(None, [10, 0, 0, 5]);
+
+        assert_eq!(
+            extract_client_ip_with_validation(&req, &trusted),
+            "10.0.0.5"
+        );
+    }
+
+    #[test]
+    fn test_validation_missing_connect_info_falls_back_to_headers() {
+        let trusted = TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string()]).unwrap();
+        // No ConnectInfo extension (server started without connect-info)
+        let req = Request::builder()
+            .header("x-forwarded-for", "1.2.3.4")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(extract_client_ip_with_validation(&req, &trusted), "1.2.3.4");
     }
 
     // ==========================================================================
