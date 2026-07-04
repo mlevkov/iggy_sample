@@ -265,6 +265,17 @@ impl IggyClientWrapper {
     ///
     /// Called periodically by the background health-check task; safe to call
     /// from handlers as well.
+    ///
+    /// # Lock interaction
+    ///
+    /// The wrapper read guard is held for the probe's duration (the SDK
+    /// client is not `Clone`, so the handle cannot be snapshotted out).
+    /// During an outage a probe can hold it for up to the operation timeout,
+    /// delaying — but not cancelling — a concurrent reconnect swap, which
+    /// runs in a detached task (see `reconnect_bounded`) and simply acquires
+    /// the write lock when the probe finishes. A probe that started against
+    /// the OLD client and completes after a swap may briefly overwrite the
+    /// fresh connected state; the next tick corrects it.
     pub async fn health_check(&self) -> bool {
         let result = {
             let client = self.client.read().await;
@@ -409,23 +420,35 @@ impl IggyClientWrapper {
         }
     }
 
-    /// Reconnect, bounded by the operation timeout.
+    /// Reconnect, bounded by the operation timeout from the caller's view.
     ///
-    /// Used on the request path so a handler never hangs indefinitely behind
-    /// an unbounded reconnection session (the default configuration retries
-    /// forever). If the bound elapses, the reconnection attempt is aborted
-    /// (its scope guard releases the in-progress flag) and the next failing
-    /// request will start a fresh session.
+    /// The session runs in a SPAWNED task and the caller awaits its
+    /// `JoinHandle` under the timeout. This is a cancellation-safety
+    /// requirement, not a style choice: dropping the reconnect future at
+    /// its commit-point awaits (between `connect()` succeeding and the
+    /// swap/shutdown completing) would leak a fully-connected client whose
+    /// detached SDK heartbeat task can never be shut down — it holds the
+    /// inner client Arc and only exits on `ClientShutdown`, which nothing
+    /// can send once the handle is gone. Dropping a `JoinHandle` does NOT
+    /// cancel the task, so when the caller's deadline expires the session
+    /// keeps running in the background and completes (or fails) cleanly;
+    /// the caller just reports the timeout, and waiters on a later attempt
+    /// join the still-running session as followers.
     async fn reconnect_bounded(&self) -> AppResult<()> {
         let timeout = self.config.operation_timeout;
-        tokio::time::timeout(timeout, self.reconnect())
-            .await
-            .map_err(|_| {
-                AppError::ConnectionFailed(format!(
-                    "Reconnection did not complete within {:?}",
-                    timeout
-                ))
-            })?
+        let this = self.clone();
+        let session = tokio::spawn(async move { this.reconnect().await });
+
+        match tokio::time::timeout(timeout, session).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(join_error)) => Err(AppError::Internal(format!(
+                "Reconnection task failed: {join_error}"
+            ))),
+            Err(_) => Err(AppError::ConnectionFailed(format!(
+                "Reconnection did not complete within {:?} (continuing in background)",
+                timeout
+            ))),
+        }
     }
 
     /// Execute an operation with automatic reconnection on connection failure.
@@ -434,6 +457,21 @@ impl IggyClientWrapper {
     /// - **Circuit Breaker**: Fail fast when service is known to be unavailable
     /// - **Timeout**: All operations are bounded by `config.operation_timeout`
     /// - **Retry**: On connection failure, attempts reconnect and retries once
+    ///
+    /// # Worst-case latency
+    ///
+    /// A request on the reconnect path can take up to 3x the operation
+    /// timeout (first attempt + bounded reconnect + retry) - bounded, but
+    /// well above the typical single-operation expectation.
+    ///
+    /// # Breaker false positives
+    ///
+    /// Timeouts count as breaker failures because the SDK's internal
+    /// reconnection swallows outages into blocking retries (a timeout is
+    /// often the only signal). The cost: N consecutive merely-SLOW
+    /// operations (including the background stats refresher's) can open the
+    /// circuit without a real outage. Failures must be consecutive - any
+    /// success resets the count - which bounds the risk.
     ///
     /// # Circuit Breaker Integration
     ///

@@ -41,7 +41,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (158 unit tests, 29 integration tests, 18 model tests)
+- Comprehensive test suite (159 unit tests, 29 integration tests, 18 model tests)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
@@ -346,7 +346,7 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RATE_LIMIT_RPS` | `100` | Requests per second (0 = disabled) |
-| `RATE_LIMIT_BURST` | `50` | Burst capacity above RPS limit |
+| `RATE_LIMIT_BURST` | `50` | Instantaneous bucket capacity (replaces, not adds to, the default) |
 | `API_KEY` | (none) | API key for authentication (disabled if not set) |
 | `AUTH_BYPASS_PATHS` | `/health,/ready` | Comma-separated paths that bypass auth |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |

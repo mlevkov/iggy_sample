@@ -18,9 +18,23 @@ pub fn classify_iggy_error(error: IggyError, fallback: fn(String) -> AppError) -
         | IggyError::NotConnected
         | IggyError::StaleClient
         | IggyError::ClientShutdown => AppError::Disconnected(error.to_string()),
-        IggyError::ConnectionClosed | IggyError::TcpError => {
-            AppError::ConnectionReset(error.to_string())
-        }
+        // Connection-flavored variants across ALL transports the connection
+        // string can select (TCP, QUIC, HTTP, WebSocket) - classifying only
+        // the TCP set would leave the reconnect path dead code on the other
+        // three. EmptyResponse is in the SDK's own internal reconnect-trigger
+        // list. HttpResponseError (a response WITH an error status) is
+        // deliberately NOT here: the server answered, that is an application
+        // error.
+        IggyError::ConnectionClosed
+        | IggyError::TcpError
+        | IggyError::QuicError
+        | IggyError::EmptyResponse
+        | IggyError::HttpError(_)
+        | IggyError::WebSocketError
+        | IggyError::WebSocketConnectionError
+        | IggyError::WebSocketCloseError
+        | IggyError::WebSocketReceiveError
+        | IggyError::WebSocketSendError => AppError::ConnectionReset(error.to_string()),
         IggyError::CannotEstablishConnection => AppError::ConnectionFailed(error.to_string()),
         other => fallback(other.to_string()),
     }
@@ -127,7 +141,18 @@ mod tests {
 
     #[test]
     fn test_classify_connection_reset_variants() {
-        for error in [IggyError::ConnectionClosed, IggyError::TcpError] {
+        for error in [
+            IggyError::ConnectionClosed,
+            IggyError::TcpError,
+            IggyError::QuicError,
+            IggyError::EmptyResponse,
+            IggyError::HttpError("connection refused".to_string()),
+            IggyError::WebSocketError,
+            IggyError::WebSocketConnectionError,
+            IggyError::WebSocketCloseError,
+            IggyError::WebSocketReceiveError,
+            IggyError::WebSocketSendError,
+        ] {
             let classified = classify_iggy_error(error, AppError::SendError);
             assert!(
                 matches!(classified, AppError::ConnectionReset(_)),
@@ -135,6 +160,17 @@ mod tests {
                 classified
             );
         }
+    }
+
+    #[test]
+    fn test_classify_http_response_error_is_not_a_connection_error() {
+        // The server ANSWERED with an error status - reconnecting would be
+        // wrong; it must map through the fallback.
+        let classified = classify_iggy_error(
+            IggyError::HttpResponseError(500, "boom".to_string()),
+            AppError::SendError,
+        );
+        assert!(matches!(classified, AppError::SendError(_)));
     }
 
     #[test]

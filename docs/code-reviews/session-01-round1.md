@@ -77,11 +77,14 @@ Four agents independently traced the same root cause:
    resurrect a zombie server connection (verified in vendored SDK source).
 
 **Remediation (this branch):** structured IggyError→AppError classification at
-the mapping sites (0.10's error discriminants make this clean); disable the
-SDK's internal reconnection so the wrapper's documented policy is the only
-one; make the health task actually `ping()` and drive `ConnectionState`;
-`shutdown()` the old client before swap; record breaker failures on timeout
-paths. **Deferred with TD records:** DiagnosticEvents-driven state,
+the mapping sites (0.10's error discriminants make this clean); make the
+health task actually `ping()` and drive `ConnectionState`; `shutdown()` the
+old client before swap; record breaker failures on timeout paths.
+*[Round 2 correction: the originally planned "disable the SDK's internal
+reconnection" proved impossible — `enabled: true` is hardcoded in the SDK's
+connection-string parsing (see TD-2026-07-02); the shipped design keeps the
+SDK as the transport-level reconnection layer with the wrapper observing
+truthfully (timeouts as breaker signal, live pings, classified errors).]* **Deferred with TD records:** DiagnosticEvents-driven state,
 with_reconnect paused-clock test matrix.
 
 ## Theme B — CI never enforces the deny.toml this branch migrated
@@ -166,7 +169,9 @@ directly-exposed service throttles the whole service with a misattributed 429.
 **Remediation (this branch):** parse TRUSTED_PROXIES at startup and fail fast
 on invalid entries; enforce header trust against the parsed ranges; restructure
 auth to validate first and count only failures; warn on dropped CORS origins.
-**Deferred with TD record:** peer-address (ConnectInfo) as the trust anchor.
+*[Round 2 correction: peer-address (ConnectInfo) as the trust anchor was
+NOT deferred — it was implemented in-branch (commit 5998dfe); no TD record
+exists or is needed for it.]*
 
 ## Theme I — Defects inside the (currently dead) reconnect machinery
 [architect #5–#9; simplify #1, #2; silentfail M3; tests #2, #8]

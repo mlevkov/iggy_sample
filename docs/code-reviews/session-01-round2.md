@@ -77,8 +77,49 @@ auth metering, metrics exporter startup, count=0 → 400, `Identifier::named`,
 - Branch-protection requirement on "CI Success" not verifiable in-repo —
   operator action item.
 
+## Addendum — late reports from the interrupted lenses
+
+Both agents lost to the session limit delivered full reports after the reset,
+completing the 8/8 suite. Their findings and dispositions:
+
+**Architect (late):** corroborated the zombie-client leak with the precise
+mechanism and found it went DEEPER than the earlier fix: `reconnect_bounded`'s
+timeout could drop the reconnect future at its commit-point awaits (between
+`connect()` success and swap/shutdown), leaking an unkillable heartbeat — with
+a realistic trigger via the health-probe read guard [HIGH]. **Fixed:** the
+session now runs in a spawned task awaited under the timeout (JoinHandle drop
+does not cancel), making the commit atomic w.r.t. caller deadlines. Also
+found: a real lost-wakeup race in `wait_for_reconnection` (tokio `Notify`
+registers on first poll, not creation — the old comment claimed the opposite)
+[MEDIUM, **fixed** with `enable()`]; transport-incomplete error classification
+(QUIC/HTTP/WebSocket variants fell through — the round-1 dead-path bug
+resurfacing on three transports) [MEDIUM, **fixed** + tests]; health-probe
+guard-hold and stale-probe overwrite [MEDIUM-LOW, **documented** — SDK client
+is not Clone; the spawned-session fix removes the leak consequence];
+timeouts-as-breaker-failures false-positive path via the stats refresher
+[**documented** in with_reconnect docs]; zero max-delay config
+[**validated at startup now**]. Verdicts: classification set right for TCP
+with no false-positive triggers; backoff edges all sound; all 10 round-1
+resilience fixes verified correct.
+
+**Comment-analyzer (late; reviewed the pre-56d5fd0 tree):** verified 13/13
+round-1 prose fixes accurate, including SDK-source verification of the
+"two layers" module doc and every CHANGELOG Fixed bullet. Of its new
+findings: N3/N7 and the CHANGELOG duplicate were already fixed by later
+commits; **fixed now:** stale rate_limit module doc (log-only claim), auth
+guarantee doc (now cites rightmost-untrusted), non-compiling init_metrics
+example, governor burst semantics misdocumented as additive in four places
+(allow_burst REPLACES capacity), "License check" naming, stale IP-extraction
+bullets, round-1 artifact corrections (the "disable SDK reconnection" line
+and the phantom Theme-H TD reference — both annotated), TD-03 doc-site list,
+body-limit box in the routes diagram. The pre-existing key-length timing
+nuance remains an accepted LOW.
+
+TD-2026-07-01 records a second in-session trigger event (the spawned-task
+change) with the same explicit re-arm.
+
 ## Gate status at close
 
 `cargo fmt --check` ✓ · `clippy --all-targets -D warnings` ✓ ·
-158 lib + 29 integration + 18 model tests ✓ · `cargo audit` 0 vulns ✓ ·
+159 lib + 29 integration + 18 model tests ✓ · `cargo audit` 0 vulns ✓ ·
 `cargo deny check` all four sections ✓.

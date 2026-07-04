@@ -13,7 +13,7 @@
 //! # Configuration
 //!
 //! - `rate_limit_rps`: Sustained requests per second per IP
-//! - `rate_limit_burst`: Additional burst capacity above RPS
+//! - `rate_limit_burst`: Instantaneous bucket capacity (governor's `allow_burst` REPLACES the default capacity; it is not added on top of RPS)
 //! - `trusted_proxies`: CIDR ranges of trusted reverse proxies
 //!
 //! # Response Headers
@@ -32,8 +32,11 @@
 //! 2. Ensure your proxy overwrites (not appends) client IP headers
 //! 3. Block direct access to this service from the internet
 //!
-//! When `trusted_proxies` is configured, the middleware logs warnings if
-//! X-Forwarded-For is received from an untrusted source.
+//! When `trusted_proxies` is configured, forwarded headers are only honored
+//! when the direct peer (via `ConnectInfo`) is inside a trusted range;
+//! requests from untrusted peers are keyed by their actual peer address and
+//! the ignored headers are noted at debug level. See `middleware::ip` for
+//! the full resolution rules (rightmost-untrusted X-Forwarded-For).
 
 use std::fmt;
 use std::net::IpAddr;
@@ -265,7 +268,7 @@ impl RateLimitLayer {
     /// # Arguments
     ///
     /// * `rps` - Requests per second limit per IP (sustained rate)
-    /// * `burst` - Additional burst capacity per IP
+    /// * `burst` - Instantaneous bucket capacity per IP (replaces, not adds to, the default capacity)
     ///
     /// # Errors
     ///
@@ -285,7 +288,7 @@ impl RateLimitLayer {
     /// # Arguments
     ///
     /// * `rps` - Requests per second limit per IP (sustained rate)
-    /// * `burst` - Additional burst capacity per IP
+    /// * `burst` - Instantaneous bucket capacity per IP (replaces, not adds to, the default capacity)
     /// * `trusted_proxies` - Shared trusted-proxy configuration
     ///
     /// # Errors

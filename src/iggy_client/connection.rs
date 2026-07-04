@@ -79,12 +79,18 @@ impl ConnectionState {
     ///
     /// # Implementation Note
     ///
-    /// We register for notification BEFORE checking `is_reconnecting()` to avoid
-    /// a race condition: if we checked first and then registered, reconnection
-    /// could complete between those two operations, causing us to wait forever.
+    /// Creating `Notified` does NOT register the waiter — registration
+    /// happens on first poll (or an explicit `enable()`), and
+    /// `notify_waiters()` stores no permit for late registrants. So we must
+    /// `enable()` BEFORE checking `is_reconnecting()`: otherwise the leader
+    /// can call `stop_reconnecting()` between our check and our first poll,
+    /// and the wakeup is lost (the waiter then stalls until its own caller's
+    /// deadline instead of waking immediately).
     pub async fn wait_for_reconnection(&self) {
-        // Register for notification FIRST to avoid race condition
         let notified = self.reconnect_complete.notified();
+        tokio::pin!(notified);
+        // Register with the Notify BEFORE the check (see note above).
+        notified.as_mut().enable();
         if self.is_reconnecting() {
             notified.await;
         }

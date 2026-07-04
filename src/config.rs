@@ -250,6 +250,13 @@ impl Config {
             )));
         }
 
+        // A zero max collapses the backoff floor to zero-delay retry spinning
+        if self.reconnect_max_delay.is_zero() {
+            return Err(AppError::ConfigError(
+                "RECONNECT_MAX_DELAY_MS must be greater than 0".to_string(),
+            ));
+        }
+
         // Validate message limits are positive
         if self.batch_max_size == 0 {
             return Err(AppError::ConfigError(

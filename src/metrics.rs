@@ -25,8 +25,9 @@
 //! ```rust,ignore
 //! use iggy_sample::metrics::{init_metrics, record_message_sent};
 //!
-//! // Initialize metrics (call once at startup)
-//! init_metrics();
+//! // Initialize metrics once at startup; a bind failure should fail startup
+//! let addr: std::net::SocketAddr = "0.0.0.0:9090".parse()?;
+//! init_metrics(addr)?;
 //!
 //! // Record metrics in handlers
 //! record_message_sent("my-stream", "my-topic", "success");

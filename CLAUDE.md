@@ -223,7 +223,7 @@ Environment variables (see `.env.example`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RATE_LIMIT_RPS` | `100` | Requests per second (0 = disabled) |
-| `RATE_LIMIT_BURST` | `50` | Burst capacity above RPS limit |
+| `RATE_LIMIT_BURST` | `50` | Instantaneous bucket capacity (replaces, not adds to, the default) |
 
 ### Message Limits
 | Variable | Default | Description |
@@ -427,7 +427,7 @@ environment:
 ### Running Tests
 
 ```bash
-# Unit tests (158 tests)
+# Unit tests (159 tests)
 cargo test --lib
 
 # Integration tests (29 tests, requires Docker for testcontainers)
@@ -687,7 +687,9 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 
 ### Client IP Extraction (`src/middleware/ip.rs`)
 - Shared IP extraction logic used by both rate limiting and authentication
-- Header priority: `X-Forwarded-For` (first IP) → `X-Real-IP` → "unknown" fallback
+- With `TRUSTED_PROXIES` set: peer-address gating + rightmost-untrusted
+  `X-Forwarded-For` resolution (see the Trusted Proxy Configuration section)
+- Without it: header priority `X-Forwarded-For` → `X-Real-IP` → "unknown" fallback
 - Uses `Cow<'static, str>` for zero-allocation on the "unknown" fallback path
 - `#[inline]` hints on hot paths for potential inlining
 - See module-level docs for security warnings about IP spoofing
@@ -776,7 +778,7 @@ GitHub Actions workflows provide automated quality assurance:
 - **Coverage**: Uploaded to Codecov
 - **Documentation**: Build with `-D warnings`
 - **Security audit**: `cargo-audit` for vulnerabilities
-- **License check**: `cargo-deny` for license compliance
+- **Dependency policy**: `cargo-deny` gates advisories, bans, licenses, and sources
 - **Scheduled runs**: Weekly Monday 2:00 AM UTC to catch dependency issues
 
 ### PR Checks (`pr.yml`)

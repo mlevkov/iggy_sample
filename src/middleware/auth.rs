@@ -80,7 +80,8 @@ pub const API_KEY_QUERY: &str = "api_key";
 const DEFAULT_BYPASS_PATHS: [&str; 2] = ["/health", "/ready"];
 
 /// Default maximum auth failures per IP per minute before blocking.
-/// After this many failures, further requests from the IP are blocked temporarily.
+/// After this many failures, further FAILING requests from the IP are
+/// blocked temporarily; valid-key requests always pass.
 const DEFAULT_AUTH_FAILURE_LIMIT: NonZeroU32 = NonZeroU32::new(10).unwrap();
 
 /// Default burst capacity for auth failure rate limiting.
@@ -131,8 +132,10 @@ impl ApiKeyAuth {
     /// per-IP brute-force limiter.
     ///
     /// With trusted proxies configured, forwarded headers are only honored
-    /// when the direct peer is inside a trusted range, so attackers cannot
-    /// rotate spoofed `X-Forwarded-For` values to escape failure tracking.
+    /// when the direct peer is inside a trusted range, and honored
+    /// `X-Forwarded-For` chains are resolved rightmost-untrusted (see
+    /// `middleware::ip`), so attackers cannot rotate spoofed values to
+    /// escape failure tracking - whether the proxy overwrites or appends.
     pub fn with_trusted_proxies(
         api_key: Option<String>,
         bypass_paths: Vec<String>,
