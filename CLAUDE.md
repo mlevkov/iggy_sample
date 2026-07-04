@@ -427,10 +427,10 @@ environment:
 ### Running Tests
 
 ```bash
-# Unit tests (147 tests)
+# Unit tests (158 tests)
 cargo test --lib
 
-# Integration tests (26 tests, requires Docker for testcontainers)
+# Integration tests (29 tests, requires Docker for testcontainers)
 cargo test --test integration_tests
 
 # Model tests (18 tests)
