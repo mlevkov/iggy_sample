@@ -11,3 +11,4 @@ condition under which the record MUST be resolved (not "someday").
 | [TD-2026-07-04](TD-2026-07-04.md) | X-Request-Timeout enforcement | Review session 01 (silentfail M4) | Before advertising the header in any client-facing docs beyond CLAUDE.md |
 | [TD-2026-07-05](TD-2026-07-05.md) | Metrics exporter smoke test | Review session 01 (tests #7) | Next metrics-exporter-prometheus major/minor bump |
 | [TD-2026-07-06](TD-2026-07-06.md) | Durable-storage guide config re-validation | Review session 01 (consistency #10) | Next server image bump past 0.8.x |
+| [TD-2026-07-07](TD-2026-07-07.md) | Pin third-party GitHub Actions to commit SHAs | Security review on v0.2.0 release PR | Next CI-focused change, or any new repo secret |
