@@ -1,38 +1,38 @@
 //! Scope guard for cleanup on drop.
 //!
 //! This is a minimal implementation to avoid adding the `scopeguard` crate
-//! as a dependency for a single use case.
+//! as a dependency for a single use case. The `Drop`-based guard is
+//! load-bearing in `reconnect()`: it releases the reconnection-in-progress
+//! flag on every exit path, including early returns and future cancellation.
 
 /// A guard that executes a closure when dropped.
-pub struct ScopeGuard<T, F: FnOnce(T)> {
-    value: Option<T>,
-    dropper: Option<F>,
+pub struct ScopeGuard<F: FnOnce()> {
+    callback: Option<F>,
 }
 
-impl<T, F: FnOnce(T)> Drop for ScopeGuard<T, F> {
+impl<F: FnOnce()> Drop for ScopeGuard<F> {
     fn drop(&mut self) {
-        if let (Some(value), Some(dropper)) = (self.value.take(), self.dropper.take()) {
-            dropper(value);
+        if let Some(callback) = self.callback.take() {
+            callback();
         }
     }
 }
 
-/// Create a scope guard that will execute `dropper` with `value` when dropped.
+/// Create a scope guard that will execute `callback` when dropped.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// let flag = Arc::new(AtomicBool::new(true));
 /// let flag_clone = flag.clone();
-/// let _guard = guard((), move |_| {
+/// let _guard = guard(move || {
 ///     flag_clone.store(false, Ordering::SeqCst);
 /// });
 /// // When _guard goes out of scope, the flag will be set to false
 /// ```
-pub fn guard<T, F: FnOnce(T)>(value: T, dropper: F) -> ScopeGuard<T, F> {
+pub fn guard<F: FnOnce()>(callback: F) -> ScopeGuard<F> {
     ScopeGuard {
-        value: Some(value),
-        dropper: Some(dropper),
+        callback: Some(callback),
     }
 }
 
@@ -40,7 +40,7 @@ pub fn guard<T, F: FnOnce(T)>(value: T, dropper: F) -> ScopeGuard<T, F> {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn test_scopeguard_executes_on_drop() {
@@ -48,28 +48,28 @@ mod tests {
         let executed_clone = executed.clone();
 
         {
-            let _guard = guard((), move |_| {
+            let _guard = guard(move || {
                 executed_clone.store(true, Ordering::SeqCst);
             });
         }
 
         assert!(
             executed.load(Ordering::SeqCst),
-            "dropper should have executed"
+            "callback should have executed"
         );
     }
 
     #[test]
-    fn test_scopeguard_passes_value_to_dropper() {
-        let received_value = Arc::new(AtomicUsize::new(0));
-        let received_clone = received_value.clone();
-
-        {
-            let _guard = guard(42usize, move |v| {
-                received_clone.store(v, Ordering::SeqCst);
+    fn test_scopeguard_executes_on_early_return() {
+        fn early_return(flag: Arc<AtomicBool>) -> u32 {
+            let _guard = guard(move || {
+                flag.store(true, Ordering::SeqCst);
             });
+            42 // guard drops here
         }
 
-        assert_eq!(received_value.load(Ordering::SeqCst), 42);
+        let executed = Arc::new(AtomicBool::new(false));
+        assert_eq!(early_return(executed.clone()), 42);
+        assert!(executed.load(Ordering::SeqCst));
     }
 }

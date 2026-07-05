@@ -574,7 +574,7 @@ Key metrics to monitor for storage health:
 
 ## Current Limitations
 
-As of Iggy v0.6.0 (December 2025):
+As of Iggy server v0.8.0 (April 2026):
 
 ### Single-Node Architecture
 
@@ -718,5 +718,5 @@ tmp_upload_dir = "/tmp/iggy-upload"
 
 ---
 
-*Last updated: December 2025*
-*Iggy version: 0.6.0*
+*Last updated: July 2026*
+*Iggy server version: 0.8.0*

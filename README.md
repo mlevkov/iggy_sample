@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml/badge.svg)](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.90%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.93%2B-blue.svg)](https://www.rust-lang.org)
 
 A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) message streaming integrated with [Axum](https://github.com/tokio-rs/axum) web framework in Rust.
 
@@ -10,8 +10,8 @@ A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) m
 
 This project showcases how to build a production-ready message streaming service using:
 
-- **Apache Iggy 0.6.0-edge** - High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy SDK 0.8.0-edge.6** - Latest edge SDK for compatibility with edge server features
+- **Apache Iggy server 0.8.0** - High-performance message streaming with io_uring shared-nothing architecture
+- **Iggy Rust SDK 0.10.0** - Latest stable SDK, paired with the server 0.8 release line
 - **Axum 0.8** - Ergonomic and modular Rust web framework
 - **Tokio** - Async runtime for Rust
 
@@ -41,7 +41,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (93 unit tests, 24 integration tests, 20 model tests)
+- Comprehensive test suite (159 unit tests, 29 integration tests, 18 model tests)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
@@ -53,7 +53,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 │                        (Port 8000)                          │
 ├─────────────────────────────────────────────────────────────┤
 │  Middleware Stack                                           │
-│  Rate Limit → Auth → Request ID → Tracing → CORS            │
+│  Rate Limit → Auth → Request ID → Timeout → Tracing → CORS  │
 ├─────────────────────────────────────────────────────────────┤
 │  Handlers                                                   │
 │  ├── health.rs    - Health/readiness checks, stats          │
@@ -78,7 +78,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ## Prerequisites
 
-- Rust 1.90+ (edition 2024, MSRV: 1.90.0)
+- Rust 1.93+ (edition 2024, MSRV: 1.93.0)
 - Docker & Docker Compose
 - curl or httpie (for testing)
 
@@ -186,7 +186,7 @@ Expected response:
 ### Send a User Event
 
 ```bash
-curl -X POST http://localhost:3000/messages \
+curl -X POST http://localhost:8000/messages \
   -H "Content-Type: application/json" \
   -d '{
     "event": {
@@ -209,7 +209,7 @@ curl -X POST http://localhost:3000/messages \
 ### Send an Order Event
 
 ```bash
-curl -X POST http://localhost:3000/messages \
+curl -X POST http://localhost:8000/messages \
   -H "Content-Type: application/json" \
   -d '{
     "event": {
@@ -240,7 +240,7 @@ curl -X POST http://localhost:3000/messages \
 ### Send a Generic Event
 
 ```bash
-curl -X POST http://localhost:3000/messages \
+curl -X POST http://localhost:8000/messages \
   -H "Content-Type: application/json" \
   -d '{
     "event": {
@@ -262,16 +262,16 @@ curl -X POST http://localhost:3000/messages \
 
 ```bash
 # Poll from partition 1, starting at offset 0
-curl "http://localhost:3000/messages?partition_id=1&count=10&offset=0"
+curl "http://localhost:8000/messages?partition_id=1&count=10&offset=0"
 
 # Poll with auto-commit
-curl "http://localhost:3000/messages?partition_id=1&count=10&auto_commit=true"
+curl "http://localhost:8000/messages?partition_id=1&count=10&auto_commit=true"
 ```
 
 ### Send Batch Messages
 
 ```bash
-curl -X POST http://localhost:3000/messages/batch \
+curl -X POST http://localhost:8000/messages/batch \
   -H "Content-Type: application/json" \
   -d '{
     "events": [
@@ -294,7 +294,7 @@ curl -X POST http://localhost:3000/messages/batch \
 ### Create a Stream
 
 ```bash
-curl -X POST http://localhost:3000/streams \
+curl -X POST http://localhost:8000/streams \
   -H "Content-Type: application/json" \
   -d '{"name": "my-stream"}'
 ```
@@ -302,7 +302,7 @@ curl -X POST http://localhost:3000/streams \
 ### Create a Topic
 
 ```bash
-curl -X POST http://localhost:3000/streams/my-stream/topics \
+curl -X POST http://localhost:8000/streams/my-stream/topics \
   -H "Content-Type: application/json" \
   -d '{"name": "my-topic", "partitions": 3}'
 ```
@@ -310,24 +310,24 @@ curl -X POST http://localhost:3000/streams/my-stream/topics \
 ### List Streams
 
 ```bash
-curl http://localhost:3000/streams
+curl http://localhost:8000/streams
 ```
 
 ### Get Statistics
 
 ```bash
-curl http://localhost:3000/stats
+curl http://localhost:8000/stats
 ```
 
 ## Configuration
 
-Configuration is loaded from environment variables. See `.env.example` for all options.
+Configuration is loaded from environment variables. See `.env.example` for the common options; the tables below list all of them.
 
 ### Server & Iggy Connection
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `3000` | Server port |
+| `PORT` | `8000` | Server port |
 | `IGGY_CONNECTION_STRING` | `iggy://iggy:iggy@localhost:8090` | Iggy connection string |
 | `IGGY_STREAM` | `sample-stream` | Default stream name |
 | `IGGY_TOPIC` | `events` | Default topic name |
@@ -346,7 +346,7 @@ Configuration is loaded from environment variables. See `.env.example` for all o
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RATE_LIMIT_RPS` | `100` | Requests per second (0 = disabled) |
-| `RATE_LIMIT_BURST` | `50` | Burst capacity above RPS limit |
+| `RATE_LIMIT_BURST` | `50` | Instantaneous bucket capacity (replaces, not adds to, the default) |
 | `API_KEY` | (none) | API key for authentication (disabled if not set) |
 | `AUTH_BYPASS_PATHS` | `/health,/ready` | Comma-separated paths that bypass auth |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
@@ -395,7 +395,9 @@ iggy_sample/
 │   ├── error.rs            # Error types with HTTP status codes
 │   ├── state.rs            # Shared application state
 │   ├── routes.rs           # Route definitions
-│   ├── iggy_client.rs      # Iggy SDK wrapper
+│   ├── utils.rs            # Shutdown-signal helpers
+│   ├── metrics.rs          # Prometheus metrics export
+│   ├── iggy_client/        # Iggy SDK wrapper module
 │   ├── validation.rs       # Input validation utilities
 │   ├── middleware/
 │   │   ├── mod.rs          # Middleware exports
@@ -415,7 +417,8 @@ iggy_sample/
 │       ├── health.rs       # Health endpoints
 │       ├── messages.rs     # Message endpoints
 │       ├── streams.rs      # Stream management
-│       └── topics.rs       # Topic management
+│       ├── topics.rs       # Topic management
+│       └── util.rs         # Shared handler utilities
 ├── tests/
 │   ├── integration_tests.rs # End-to-end API tests
 │   └── model_tests.rs       # Unit tests for models
@@ -435,15 +438,11 @@ cargo test
 
 ### Run Integration Tests
 
-Integration tests require a running server:
+Integration tests use [testcontainers](https://rust.testcontainers.org) and
+spin up their own Iggy server automatically — only Docker needs to be running:
 
 ```bash
-# Terminal 1: Start services
-docker-compose up -d iggy
-cargo run &
-
-# Terminal 2: Run integration tests
-cargo test --test integration_tests -- --ignored
+cargo test --test integration_tests
 ```
 
 ### Run with Coverage
@@ -484,6 +483,7 @@ The project includes a complete observability stack for monitoring and managing 
 | Component | Port | Description |
 |-----------|------|-------------|
 | **Iggy Server** | 3000 | HTTP API + Prometheus metrics at `/metrics` |
+| **Sample App metrics** | 9091 (host) | App Prometheus metrics (`METRICS_PORT` 9090 in-container) |
 | **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, users |
 | **Prometheus** | 9090 | Metrics collection with 15-day retention |
 | **Grafana** | 3001 | Pre-configured dashboards for visualization |
@@ -514,6 +514,10 @@ Iggy exposes Prometheus-compatible metrics:
 ```bash
 # View raw metrics from Iggy
 curl http://localhost:3000/metrics
+
+# View the sample app's own metrics (message counters, reconnects,
+# circuit breaker state; host port 9091 under docker-compose)
+curl http://localhost:9091/metrics
 
 # Query via Prometheus
 curl 'http://localhost:9090/api/v1/query?query=up{job="iggy"}'
@@ -599,6 +603,10 @@ All errors return structured JSON responses:
 | Error Type | HTTP Status | Description |
 |------------|-------------|-------------|
 | `connection_failed` | 503 | Iggy server unavailable |
+| `disconnected` | 503 | Lost connection during operation |
+| `connection_reset` | 503 | Connection was reset by peer |
+| `circuit_open` | 503 | Circuit breaker open, failing fast |
+| `operation_timeout` | 503 | Iggy operation exceeded the timeout |
 | `stream_error` | 500 | Stream operation failed |
 | `topic_error` | 500 | Topic operation failed |
 | `send_error` | 500 | Message send failed |
@@ -648,19 +656,19 @@ Key dependencies (see `Cargo.toml` for full list):
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `iggy` | 0.8.0-edge.6 | Iggy Rust SDK (edge) |
+| `iggy` | 0.10.0 | Iggy Rust SDK |
 | `axum` | 0.8 | Web framework |
-| `tokio` | 1.48 | Async runtime |
+| `tokio` | 1.52 | Async runtime |
 | `serde` | 1.0 | Serialization |
 | `tracing` | 0.1 | Structured logging |
 | `thiserror` | 2.0 | Error handling |
-| `governor` | 0.8 | Rate limiting (token bucket) |
+| `governor` | 0.10 | Rate limiting (token bucket) |
 | `subtle` | 2.6 | Constant-time comparison |
-| `tower-http` | 0.6 | HTTP middleware (CORS, tracing) |
-| `rust_decimal` | 1.37 | Exact decimal arithmetic for money |
-| `uuid` | 1.18 | UUID generation |
+| `tower-http` | 0.7 | HTTP middleware (CORS, tracing) |
+| `rust_decimal` | 1.42 | Exact decimal arithmetic for money |
+| `uuid` | 1.23 | UUID generation |
 | `chrono` | 0.4 | Date/time handling |
-| `testcontainers` | 0.24 | Integration testing |
+| `testcontainers` | 0.27 | Integration testing |
 
 ## CI/CD
 

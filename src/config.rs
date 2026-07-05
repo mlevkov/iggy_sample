@@ -38,7 +38,7 @@ pub struct Config {
     /// Server host address (default: "0.0.0.0")
     pub host: String,
 
-    /// Server port (default: 3000)
+    /// Server port (default: 8000; the Iggy server's HTTP API uses 3000)
     pub port: u16,
 
     // =========================================================================
@@ -170,7 +170,7 @@ impl Config {
         let config = Self {
             // Server
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-            port: Self::parse_env("PORT", 3000)?,
+            port: Self::parse_env("PORT", 8000)?,
 
             // Iggy connection
             iggy_connection_string: env::var("IGGY_CONNECTION_STRING")
@@ -250,6 +250,13 @@ impl Config {
             )));
         }
 
+        // A zero max collapses the backoff floor to zero-delay retry spinning
+        if self.reconnect_max_delay.is_zero() {
+            return Err(AppError::ConfigError(
+                "RECONNECT_MAX_DELAY_MS must be greater than 0".to_string(),
+            ));
+        }
+
         // Validate message limits are positive
         if self.batch_max_size == 0 {
             return Err(AppError::ConfigError(
@@ -301,15 +308,14 @@ impl Config {
         self.metrics_port > 0
     }
 
-    /// Get the metrics endpoint address.
+    /// Get the metrics endpoint address (binds the same host as the API).
     ///
     /// Returns `None` if metrics are disabled (port = 0).
-    pub fn metrics_addr(&self) -> Option<std::net::SocketAddr> {
+    /// This is the single source of truth for the metrics bind address;
+    /// `main.rs` starts the exporter from it.
+    pub fn metrics_addr(&self) -> Option<String> {
         if self.metrics_enabled() {
-            Some(std::net::SocketAddr::from((
-                [0, 0, 0, 0],
-                self.metrics_port,
-            )))
+            Some(format!("{}:{}", self.host, self.metrics_port))
         } else {
             None
         }
@@ -381,7 +387,7 @@ impl Default for Config {
         Self {
             // Server
             host: "0.0.0.0".to_string(),
-            port: 3000,
+            port: 8000,
             // Iggy connection
             iggy_connection_string: "iggy://iggy:iggy@localhost:8090".to_string(),
             default_stream: "sample-stream".to_string(),
@@ -427,7 +433,7 @@ mod tests {
         let config = Config::default();
 
         assert_eq!(config.host, "0.0.0.0");
-        assert_eq!(config.port, 3000);
+        assert_eq!(config.port, 8000);
         assert_eq!(config.rate_limit_rps, 100);
         assert_eq!(config.batch_max_size, 1000);
         assert_eq!(config.max_request_body_size, 10 * 1024 * 1024);

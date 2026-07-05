@@ -5,8 +5,8 @@ A comprehensive demonstration of Apache Iggy message streaming with Axum.
 ## Project Overview
 
 This application showcases how to build a production-ready message streaming service using:
-- **Apache Iggy 0.6.0-edge**: High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy SDK 0.8.0-edge.6**: Latest edge SDK for compatibility with edge server features
+- **Apache Iggy server 0.8.0**: High-performance message streaming with io_uring shared-nothing architecture
+- **Iggy Rust SDK 0.10.0**: Latest stable SDK, paired with the server 0.8 release line
 - **Axum 0.8**: Ergonomic and modular Rust web framework
 - **Tokio**: Async runtime for Rust
 
@@ -35,11 +35,11 @@ This application showcases how to build a production-ready message streaming ser
 │                      Axum HTTP Server                       │
 │                      (src/main.rs)                          │
 ├─────────────────────────────────────────────────────────────┤
-│  Middleware Stack (src/middleware/)                         │
+│  Middleware Stack (src/middleware/), in request order:     │
 │  - rate_limit.rs: Token bucket rate limiting                │
 │  - auth.rs: API key authentication                          │
-│  - timeout.rs: Request timeout propagation                  │
 │  - request_id.rs: Request ID propagation                    │
+│  - timeout.rs: Request timeout parsing                      │
 │  + tower_http: Tracing, CORS                                │
 ├─────────────────────────────────────────────────────────────┤
 │  Handlers (src/handlers/)                                   │
@@ -52,7 +52,7 @@ This application showcases how to build a production-ready message streaming ser
 │  - producer.rs: Message publishing logic                    │
 │  - consumer.rs: Message consumption logic                   │
 ├─────────────────────────────────────────────────────────────┤
-│  IggyClientWrapper (src/iggy_client.rs)                     │
+│  IggyClientWrapper (src/iggy_client/)                       │
 │  High-level wrapper with automatic reconnection             │
 │  + Circuit breaker for fail-fast during outages             │
 │  + PollParams builder for cleaner polling API               │
@@ -99,6 +99,7 @@ src/
 ├── metrics.rs        # Prometheus metrics export
 ├── state.rs          # Shared application state with stats caching
 ├── routes.rs         # Route definitions and middleware stack
+├── utils.rs          # Shutdown-signal helpers
 ├── iggy_client/      # Iggy SDK wrapper module
 │   ├── mod.rs        # Client wrapper with auto-reconnection
 │   ├── circuit_breaker.rs # Circuit breaker pattern implementation
@@ -127,7 +128,8 @@ src/
     ├── health.rs     # Health endpoints
     ├── messages.rs   # Message endpoints
     ├── streams.rs    # Stream management
-    └── topics.rs     # Topic management
+    ├── topics.rs     # Topic management
+    └── util.rs       # Shared handler utilities
 
 tests/
 ├── integration_tests.rs  # End-to-end API tests with testcontainers
@@ -190,7 +192,7 @@ Environment variables (see `.env.example`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `3000` | Server port |
+| `PORT` | `8000` | Server port |
 | `RUST_LOG` | `info` | Log level |
 
 ### Iggy Connection
@@ -221,7 +223,7 @@ Environment variables (see `.env.example`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RATE_LIMIT_RPS` | `100` | Requests per second (0 = disabled) |
-| `RATE_LIMIT_BURST` | `50` | Burst capacity above RPS limit |
+| `RATE_LIMIT_BURST` | `50` | Instantaneous bucket capacity (replaces, not adds to, the default) |
 
 ### Message Limits
 | Variable | Default | Description |
@@ -240,8 +242,17 @@ Environment variables (see `.env.example`):
 
 #### Trusted Proxy Configuration
 
-The `TRUSTED_PROXIES` variable configures IP spoofing mitigation for the rate limiter.
-When set, X-Forwarded-For headers are validated against trusted proxy networks.
+The `TRUSTED_PROXIES` variable configures IP spoofing mitigation for both the
+rate limiter and the auth brute-force limiter. When set, forwarded headers
+(`X-Forwarded-For`/`X-Real-IP`) are only honored if the direct peer address is
+inside a trusted range; requests from untrusted peers are keyed by their actual
+peer address. Honored `X-Forwarded-For` chains are resolved with the
+**rightmost-untrusted** rule (walk from the right, skip trusted-range hops,
+take the first untrusted address), so the guarantee holds for proxies that
+append to a client-supplied header — the common default — as well as those
+that overwrite it. Unparseable forwarded values fall back to the peer address.
+Invalid entries fail startup (`RateLimitError::InvalidTrustedProxyCidr`)
+instead of silently degrading to trust-all.
 
 **Format**: Comma-separated CIDR notation
 
@@ -299,6 +310,7 @@ The project includes a complete Grafana-based observability stack for monitoring
 | Service | Port | Description |
 |---------|------|-------------|
 | **Iggy** | 3000 | Message streaming server (also serves `/metrics`) |
+| **Sample App metrics** | 9091 (host) | App Prometheus metrics (`METRICS_PORT` 9090 in-container) |
 | **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, and users |
 | **Prometheus** | 9090 | Metrics collection and storage |
 | **Grafana** | 3001 | Visualization and dashboards |
@@ -368,7 +380,7 @@ environment:
 ## Development
 
 ### Prerequisites
-- Rust 1.90+ (edition 2024, MSRV: 1.90.0)
+- Rust 1.93+ (edition 2024, MSRV: 1.93.0)
 - Docker & Docker Compose
 
 ### Quick Start
@@ -386,10 +398,10 @@ environment:
 3. Test the API:
    ```bash
    # Health check
-   curl http://localhost:3000/health
+   curl http://localhost:8000/health
 
    # Send a message
-   curl -X POST http://localhost:3000/messages \
+   curl -X POST http://localhost:8000/messages \
      -H "Content-Type: application/json" \
      -d '{
        "event": {
@@ -409,19 +421,19 @@ environment:
      }'
 
    # Poll messages (partition_id is 0-indexed, 0 = first partition)
-   curl "http://localhost:3000/messages?partition_id=0&count=10"
+   curl "http://localhost:8000/messages?partition_id=0&count=10"
    ```
 
 ### Running Tests
 
 ```bash
-# Unit tests (130 tests)
+# Unit tests (159 tests)
 cargo test --lib
 
-# Integration tests (24 tests, requires Docker for testcontainers)
+# Integration tests (29 tests, requires Docker for testcontainers)
 cargo test --test integration_tests
 
-# Model tests (20 tests)
+# Model tests (18 tests)
 cargo test --test model_tests
 
 # All tests
@@ -516,7 +528,8 @@ Error types and HTTP status codes:
 
 ```rust
 pub enum RateLimitError {
-    ZeroRps,  // RPS cannot be 0; use disabled() instead
+    ZeroRps,                          // RPS cannot be 0; use disabled() instead
+    InvalidTrustedProxyCidr(String),  // Unparseable TRUSTED_PROXIES entry
 }
 ```
 
@@ -555,20 +568,40 @@ Iggy uses **0-indexed partitions**:
 ## Dependencies
 
 Key dependencies (see `Cargo.toml`):
-- `iggy 0.8.0`: Iggy Rust SDK
+- `iggy 0.10.0`: Iggy Rust SDK (paired with server 0.8.0, pinned in `docker-compose.yaml`)
 - `axum 0.8`: Web framework
-- `tokio 1.48`: Async runtime
+- `tokio 1.52`: Async runtime
 - `tokio-util 0.7`: Task tracking and cancellation tokens
 - `serde 1.0`: Serialization
 - `tracing 0.1`: Structured logging
 - `thiserror 2.0`: Error handling
-- `governor 0.8`: Rate limiting with token bucket algorithm
+- `governor 0.10`: Rate limiting with token bucket algorithm
 - `subtle 2.6`: Constant-time comparison for security
-- `tower-http 0.6`: HTTP middleware (CORS, tracing, request ID)
-- `rust_decimal 1.39`: Exact decimal arithmetic for monetary values
+- `tower-http 0.7`: HTTP middleware (CORS, tracing, request ID)
+- `rust_decimal 1.42`: Exact decimal arithmetic for monetary values
 - `metrics 0.24`: Application metrics
-- `metrics-exporter-prometheus 0.16`: Prometheus metrics export
-- `testcontainers 0.26`: Integration testing with containerized Iggy
+- `metrics-exporter-prometheus 0.18`: Prometheus metrics export
+- `testcontainers 0.27`: Integration testing with containerized Iggy
+
+### Iggy SDK Integration
+
+This service integrates with the SDK at the `Client` trait level (via
+`IggyClientWrapper`) rather than through the higher-level `IggyProducer`/
+`IggyConsumer` clients. This is deliberate: the HTTP gateway serves
+*arbitrary* stream/topic routes with per-request partition, offset, and
+consumer parameters. `IggyProducer` binds to a single stream/topic at build
+time and batches in the background, and `IggyConsumer` is a long-lived
+subscription iterator — neither maps onto stateless request/response
+semantics. The high-level clients are the right choice for dedicated
+pipeline workers; a protocol gateway belongs on the trait API.
+
+Resilience is layered: the SDK's connection-string clients ship with
+transport-level auto-reconnection (default on, unlimited retries), which
+swallows most mid-operation connection failures into blocking retries. The
+wrapper therefore treats **timeouts** as circuit-breaker failures, classifies
+the SDK error variants that do escape (`classify_iggy_error`), and runs live
+`ping` health probes so `/health` and `/ready` reflect reality during an
+outage rather than a latched startup flag.
 
 ## Structured Concurrency
 
@@ -614,7 +647,7 @@ impl AppState {
 Uses `tokio::sync::Notify` instead of busy-wait for efficient reconnection:
 
 ```rust
-// In src/iggy_client.rs - ConnectionState
+// In src/iggy_client/connection.rs - ConnectionState
 struct ConnectionState {
     reconnect_complete: Notify,  // Efficient wake-up
     // ...
@@ -642,19 +675,21 @@ let params = PollParams::new(1, 1)  // partition_id, consumer_id
     .with_auto_commit(true);
 
 // Use with the cleaner API
-let messages = client.poll_with_params("stream", "topic", params).await?;
+let messages = client.poll_messages("stream", "topic", params).await?;
 ```
 
 ## Middleware Stack
 
 Request flow (applied in order):
 ```
-Request → Rate Limit → Auth → Timeout → Request ID → Tracing → CORS → Handler
+Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS → Handler
 ```
 
 ### Client IP Extraction (`src/middleware/ip.rs`)
 - Shared IP extraction logic used by both rate limiting and authentication
-- Header priority: `X-Forwarded-For` (first IP) → `X-Real-IP` → "unknown" fallback
+- With `TRUSTED_PROXIES` set: peer-address gating + rightmost-untrusted
+  `X-Forwarded-For` resolution (see the Trusted Proxy Configuration section)
+- Without it: header priority `X-Forwarded-For` → `X-Real-IP` → "unknown" fallback
 - Uses `Cow<'static, str>` for zero-allocation on the "unknown" fallback path
 - `#[inline]` hints on hot paths for potential inlining
 - See module-level docs for security warnings about IP spoofing
@@ -668,7 +703,9 @@ Request → Rate Limit → Auth → Timeout → Request ID → Tracing → CORS 
 
 ### API Key Authentication (`src/middleware/auth.rs`)
 - Constant-time comparison to prevent timing attacks
-- Per-IP brute force protection via shared `extract_client_ip()` function
+- Per-IP brute force protection that meters authentication FAILURES only —
+  valid-key requests never consume from the failure budget
+- Honors `TRUSTED_PROXIES` for spoofing-resistant IP extraction
 - Accepts key via `X-API-Key` header or `api_key` query parameter
 - Bypasses `/health` and `/ready` for health checks (exact path matching)
 
@@ -677,6 +714,9 @@ Request → Rate Limit → Auth → Timeout → Request ID → Tracing → CORS 
 - Bounded: 100ms minimum, 5 minutes maximum
 - Stored in request extensions for handler use
 - `RequestTimeoutExt` trait for easy extraction in handlers
+- **Note**: currently parsed and stored only — no handler consumes it yet, so
+  all Iggy operations are bounded by the global `OPERATION_TIMEOUT_SECS`.
+  Enforcement is tracked in `docs/tech-debt/TD-2026-07-04.md`.
 
 ## Deployment Security
 
@@ -738,7 +778,7 @@ GitHub Actions workflows provide automated quality assurance:
 - **Coverage**: Uploaded to Codecov
 - **Documentation**: Build with `-D warnings`
 - **Security audit**: `cargo-audit` for vulnerabilities
-- **License check**: `cargo-deny` for license compliance
+- **Dependency policy**: `cargo-deny` gates advisories, bans, licenses, and sources
 - **Scheduled runs**: Weekly Monday 2:00 AM UTC to catch dependency issues
 
 ### PR Checks (`pr.yml`)

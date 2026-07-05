@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Refreshed `Cargo.lock` to patch 10 RUSTSEC advisories in transitive
+  dependencies: `bytes` (RUSTSEC-2026-0007), `time` (RUSTSEC-2026-0009),
+  `quinn-proto` (RUSTSEC-2026-0037), `rustls-webpki` (RUSTSEC-2026-0049),
+  `aws-lc-sys` (RUSTSEC-2026-0044 through 0048), and `rkyv`
+  (RUSTSEC-2026-0001)
+- `testcontainers` 0.27 bump upgrades `astral-tokio-tar` to patched 0.6.x
+  and removes unmaintained `rustls-pemfile` from the dev-dependency tree
+- `cargo audit` now reports zero vulnerabilities
+
+### Changed
+
+- Updated Apache Iggy Rust SDK from 0.8.0 to 0.10.0 (latest stable);
+  no source changes required — the `Client` trait API is unchanged
+- **Breaking**: MSRV raised 1.90 → 1.93: iggy 0.10's `compio-buf`
+  dependency uses APIs stabilized in Rust 1.93 (and declares no
+  rust-version, so cargo cannot catch this at resolution time)
+- Pinned the `apache/iggy` server image to 0.8.0 (the release paired
+  with the 0.10 SDK) in `docker-compose.yaml` and integration tests,
+  replacing the floating `latest` tag
+- Bumped direct dependencies: `tower-http` 0.7, `rand` 0.10,
+  `metrics-exporter-prometheus` 0.18, `testcontainers` 0.27 (dev),
+  `reqwest` 0.13 (dev); raised version floors for `tokio` (1.52),
+  `uuid` (1.23), and `rust_decimal` (1.42)
+- Migrated `deny.toml` to the current cargo-deny schema and pruned
+  obsolete advisory ignores; allowed `Unicode-3.0` and
+  `CDLA-Permissive-2.0` licenses required by new transitive deps
+- Documented why the service integrates at the SDK `Client` trait level
+  instead of the high-level `IggyProducer`/`IggyConsumer` clients
+- **Breaking**: default app port changed from 3000 to 8000 — the old
+  default collided with the Iggy server's HTTP API port under the
+  documented docker-compose quick start; all docs, `.env.example`, and
+  compose now agree on 8000
+- CI now fails on `cargo deny check advisories licenses` (previously
+  licenses-only and non-blocking); weekly stress tests pin
+  `apache/iggy:0.8.0` instead of `latest`
+- Updated `docker-compose.yaml` with full observability stack configuration
+- Simplified documentation section in README.md to reference `docs/`
+  directory
+
+### Fixed
+
+Findings from the session-01 eight-agent double review
+(`docs/code-reviews/`); deferred items carry tech-debt records with binding
+triggers (`docs/tech-debt/`):
+
+- **Resilience**: SDK connection errors are now classified into the
+  wrapper's connection-aware variants, making the reconnect and
+  circuit-breaker paths reachable (previously dead code); the background
+  health check performs live pings so `/health` and `/ready` stay truthful
+  during outages; reconnection no longer leaks the old client's heartbeat
+  task, resets its attempt counter per session, uses saturating backoff
+  arithmetic, and is bounded on the request path; `ensure_stream/topic` no
+  longer swallow lookup errors and tolerate losing a concurrent creation
+  race instead of crash-looping
+- **Security**: `TRUSTED_PROXIES` is enforced against the actual peer
+  address (spoofed forwarded headers from untrusted peers are ignored) and
+  invalid entries fail startup; the auth brute-force limiter meters
+  failures only, so valid-key clients are no longer throttled to the
+  failure budget
+- **Observability**: the Prometheus exporter is now actually started on
+  `METRICS_PORT` and the message/reconnect/breaker metrics are recorded;
+  Prometheus scrapes the correct port
+- **API**: `count=0` polls return 400 instead of 500; all-digit resource
+  names ("42") are treated as names, not numeric server IDs; removed the
+  dead `PollMessagesRequest` type
+- Added `issues: write` permission to CI security audit job to allow
+  creating advisory issues
+
 ### Added
 
 - **Observability Stack**: Complete Grafana-based monitoring setup
@@ -19,21 +89,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Partitioning guide (`docs/partitioning-guide.md`): partition keys, ordering guarantees, selection strategies
   - Durable storage guide (`docs/durable-storage-guide.md`): storage architecture, fsync configuration, S3 backup/archiving, recovery procedures
   - Documentation index (`docs/README.md`) with topic-based navigation
-
-### Changed
-
-- Updated `docker-compose.yaml` with full observability stack configuration
-- Simplified documentation section in README.md to reference `docs/` directory
-
-### Fixed
-
-- Added `issues: write` permission to CI security audit job to allow creating advisory issues
-
-### Security
-
-- Ignored unmaintained transitive dependency advisories in `deny.toml`:
-  - `RUSTSEC-2024-0384` (instant): from iggy -> reqwest-retry -> parking_lot v0.11
-  - `RUSTSEC-2025-0134` (rustls-pemfile): from testcontainers -> bollard (dev-dep only)
 
 ## [0.1.0] - 2024-12-01
 

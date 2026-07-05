@@ -11,13 +11,12 @@ scrape_configs:
     metrics_path: '/metrics'
     scheme: 'http'
 
-  # Sample application metrics (if exposed)
+  # Sample application metrics (dedicated exporter listener on METRICS_PORT)
   - job_name: 'iggy-sample-app'
     static_configs:
-      - targets: ['app:8000']
+      - targets: ['app:9090']
     metrics_path: '/metrics'
     scheme: 'http'
-    # Don't fail if app doesn't expose metrics
     scrape_timeout: 5s
 
   # Prometheus self-monitoring

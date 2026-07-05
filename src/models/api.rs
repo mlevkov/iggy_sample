@@ -50,32 +50,6 @@ pub struct SendMessageResponse {
     pub timestamp: DateTime<Utc>,
 }
 
-/// Request to poll messages from a topic.
-#[derive(Debug, Deserialize)]
-pub struct PollMessagesRequest {
-    /// Consumer ID for tracking offsets
-    #[serde(default = "default_consumer_id")]
-    pub consumer_id: u32,
-    /// Partition to poll from (None = all partitions)
-    pub partition_id: Option<u32>,
-    /// Starting offset (None = from last committed offset)
-    pub offset: Option<u64>,
-    /// Maximum number of messages to return
-    #[serde(default = "default_message_count")]
-    pub count: u32,
-    /// Whether to auto-commit the offset after polling
-    #[serde(default)]
-    pub auto_commit: bool,
-}
-
-fn default_consumer_id() -> u32 {
-    1
-}
-
-fn default_message_count() -> u32 {
-    10
-}
-
 /// Response containing polled messages.
 #[derive(Debug, Serialize)]
 pub struct PollMessagesResponse {
@@ -197,17 +171,6 @@ mod tests {
 
         assert_eq!(request.name, "my-topic");
         assert_eq!(request.partitions, 1);
-    }
-
-    #[test]
-    fn test_poll_messages_request_defaults() {
-        let json = r#"{}"#;
-        let request: PollMessagesRequest =
-            serde_json::from_str(json).expect("Deserialization should succeed");
-
-        assert_eq!(request.consumer_id, 1);
-        assert_eq!(request.count, 10);
-        assert!(!request.auto_commit);
     }
 
     #[test]

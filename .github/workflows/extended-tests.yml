@@ -75,11 +75,24 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event.inputs.run_stress_tests == 'true' }}
     services:
       iggy:
-        image: apache/iggy:latest
+        # Keep in lockstep with docker-compose.yaml and tests/integration_tests.rs
+        image: apache/iggy:0.8.0
         ports:
           - 8090:8090
+        env:
+          # The server binds 127.0.0.1 by default - unreachable from the
+          # runner; credentials match the stress step's connection string
+          IGGY_ROOT_USERNAME: iggy
+          IGGY_ROOT_PASSWORD: iggy
+          IGGY_TCP_ADDRESS: 0.0.0.0:8090
+          IGGY_HTTP_ADDRESS: 0.0.0.0:3000
+        # --privileged: the io_uring-based server (0.6+) cannot create its
+        # runtime under the default seccomp profile ("Operation not
+        # permitted"). Healthcheck uses the bundled iggy CLI - the image
+        # ships no curl (mirrors docker-compose's healthcheck).
         options: >-
-          --health-cmd "curl -f http://localhost:3000/health || exit 1"
+          --privileged
+          --health-cmd "iggy ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10

@@ -26,8 +26,9 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Zlib",
-    "MPL-2.0",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    # CA certificate bundle data (webpki-roots, via iggy TLS support)
+    "CDLA-Permissive-2.0",
     "CC0-1.0",
     "Unlicense",
 ]
@@ -64,6 +65,10 @@ skip = []
 # =============================================================================
 # Advisories
 # =============================================================================
+# Requires cargo-deny >= 0.18.2 (for the `unmaintained` scope field).
+# Under the current schema, vulnerability and unmaintained advisories are
+# errors by default; yanked crates only warn. Enforced in CI by the
+# "Dependency Policy" job (cargo deny check advisories licenses).
 [advisories]
 # Path to the advisory database
 db-path = "~/.cargo/advisory-db"
@@ -71,26 +76,12 @@ db-path = "~/.cargo/advisory-db"
 # URL to the advisory database
 db-urls = ["https://github.com/rustsec/advisory-db"]
 
-# Lint level for security vulnerabilities
-vulnerability = "deny"
-
-# Lint level for unmaintained crates
-unmaintained = "warn"
-
-# Lint level for yanked crates
-yanked = "warn"
+# Which dependencies to check for unmaintained advisories
+unmaintained = "all"
 
 # Ignore specific advisories
 # These are transitive dependencies we cannot directly update
 ignore = [
-    # instant is unmaintained, but comes from iggy -> reqwest-retry -> parking_lot v0.11.2
-    # Upstream needs to update parking_lot to v0.12+
-    "RUSTSEC-2024-0384",
-
-    # rustls-pemfile is unmaintained, but comes from testcontainers -> bollard (dev-dependency only)
-    # Upstream needs to migrate to rustls-pki-types
-    "RUSTSEC-2025-0134",
-
     # paste is unmaintained, but comes from iggy -> iggy_common -> compio-io
     # Upstream (iggy/compio) needs to migrate to pastey or alternative
     "RUSTSEC-2024-0436",

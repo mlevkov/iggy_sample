@@ -43,17 +43,9 @@ impl ProducerService {
         event: &Event,
         partition_key: Option<&str>,
     ) -> AppResult<SendMessageResponse> {
-        self.client.send_event_default(event, partition_key).await?;
-
-        self.messages_sent.fetch_add(1, Ordering::Relaxed);
-
-        Ok(SendMessageResponse {
-            success: true,
-            event_id: event.id,
-            stream: self.client.default_stream().to_string(),
-            topic: self.client.default_topic().to_string(),
-            timestamp: Utc::now(),
-        })
+        let stream = self.client.default_stream().to_string();
+        let topic = self.client.default_topic().to_string();
+        self.send_to(&stream, &topic, event, partition_key).await
     }
 
     /// Send an event to a specific stream and topic.
@@ -65,11 +57,19 @@ impl ProducerService {
         event: &Event,
         partition_key: Option<&str>,
     ) -> AppResult<SendMessageResponse> {
-        self.client
+        let start = std::time::Instant::now();
+        let result = self
+            .client
             .send_event(stream, topic, event, partition_key)
-            .await?;
+            .await;
+        crate::metrics::record_send_duration(stream, topic, start.elapsed().as_secs_f64());
+        if result.is_err() {
+            crate::metrics::record_message_sent(stream, topic, "failure");
+        }
+        result?;
 
         self.messages_sent.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::record_message_sent(stream, topic, "success");
 
         Ok(SendMessageResponse {
             success: true,
@@ -88,35 +88,10 @@ impl ProducerService {
         events: &[Event],
         partition_key: Option<&str>,
     ) -> AppResult<Vec<SendMessageResponse>> {
-        // Use true batch sending - single network call for all messages
-        self.client
-            .send_events_batch_default(events, partition_key)
-            .await?;
-
-        self.messages_sent
-            .fetch_add(events.len() as u64, Ordering::Relaxed);
-
-        let timestamp = Utc::now();
         let stream = self.client.default_stream().to_string();
         let topic = self.client.default_topic().to_string();
-
-        // Build responses for each event
-        let responses = events
-            .iter()
-            .map(|event| SendMessageResponse {
-                success: true,
-                event_id: event.id,
-                stream: stream.clone(),
-                topic: topic.clone(),
-                timestamp,
-            })
-            .collect();
-
-        info!(
-            "Sent batch of {} events in single network call",
-            events.len()
-        );
-        Ok(responses)
+        self.send_batch_to(&stream, &topic, events, partition_key)
+            .await
     }
 
     /// Send multiple events in a batch to a specific stream and topic.
@@ -128,12 +103,25 @@ impl ProducerService {
         events: &[Event],
         partition_key: Option<&str>,
     ) -> AppResult<Vec<SendMessageResponse>> {
-        self.client
+        let start = std::time::Instant::now();
+        let result = self
+            .client
             .send_events_batch(stream, topic, events, partition_key)
-            .await?;
+            .await;
+        crate::metrics::record_send_duration(stream, topic, start.elapsed().as_secs_f64());
+        if result.is_err() {
+            crate::metrics::record_messages_sent_batch(
+                stream,
+                topic,
+                "failure",
+                events.len() as u64,
+            );
+        }
+        result?;
 
         self.messages_sent
             .fetch_add(events.len() as u64, Ordering::Relaxed);
+        crate::metrics::record_messages_sent_batch(stream, topic, "success", events.len() as u64);
 
         let timestamp = Utc::now();
         // Allocate stream/topic once outside the loop to avoid per-event allocation
@@ -152,7 +140,7 @@ impl ProducerService {
             .collect();
 
         info!(
-            "Sent batch of {} events to {}/{}",
+            "Sent batch of {} events to {}/{} in a single network call",
             events.len(),
             stream,
             topic

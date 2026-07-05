@@ -180,10 +180,36 @@ pub fn validate_consumer_id(consumer_id: u32) -> AppResult<()> {
     Ok(())
 }
 
+/// Validate a poll message count.
+///
+/// The Iggy server rejects `count == 0` (`InvalidMessagesCount`); validating
+/// at the HTTP boundary turns that client mistake into a 400 instead of the
+/// misleading 500 the SDK error would map to.
+pub fn validate_poll_count(count: u32) -> AppResult<()> {
+    if count == 0 {
+        return Err(AppError::BadRequest("count must be at least 1".to_string()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_poll_count_zero_rejected() {
+        let result = validate_poll_count(0);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    #[test]
+    fn test_poll_count_positive_accepted() {
+        assert!(validate_poll_count(1).is_ok());
+        assert!(validate_poll_count(100).is_ok());
+        assert!(validate_poll_count(u32::MAX).is_ok());
+    }
 
     #[test]
     fn test_valid_names() {

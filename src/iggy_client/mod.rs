@@ -30,13 +30,19 @@
 //! - `helpers` - Utility functions for identifier conversion and jitter
 //! - `scopeguard` - RAII guard for cleanup on drop
 //!
-//! # Connection Resilience
+//! # Connection Resilience (two layers)
 //!
-//! The wrapper implements automatic reconnection with configurable:
-//! - Maximum retry attempts (0 = infinite)
-//! - Exponential backoff with jitter
-//! - Maximum delay cap
-//! - Per-operation timeout
+//! The SDK itself provides transport-level reconnection for connection-string
+//! clients (enabled by default, unlimited retries at ~1s intervals). During an
+//! outage most operations therefore block inside the SDK rather than erroring,
+//! and surface here as timeouts. On top of that, this wrapper adds:
+//! - Per-operation timeouts (so requests never block unboundedly in the SDK)
+//! - Circuit breaking driven by classified connection errors AND timeouts
+//! - Live health probes (`health_check`) that keep the connection state, and
+//!   therefore `/health` and `/ready`, truthful
+//! - App-level reconnection with exponential backoff + jitter as a second
+//!   line of defense, for error classes that escape the SDK's internal retry
+//!   (see `helpers::classify_iggy_error`)
 //!
 //! # Example
 //!
@@ -73,6 +79,10 @@ pub use connection::ConnectionState;
 pub use helpers::{rand_jitter, to_identifier};
 pub use params::PollParams;
 
+// Internal-only: the error classifier's fallback contract (must be a
+// NON-connection variant) is too easy to violate to expose publicly.
+use helpers::classify_iggy_error;
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -88,6 +98,30 @@ const BACKOFF_JITTER_PERCENT: f64 = 0.2;
 /// Even with exponential backoff, we never retry faster than this to avoid
 /// overwhelming a recovering server.
 const MIN_RECONNECT_DELAY_MS: u64 = 100;
+
+/// Maximum backoff exponent. `max_ms` caps the delay long before this in any
+/// realistic configuration; the clamp only exists so the shift can never
+/// overflow with an unbounded attempt counter.
+const MAX_BACKOFF_EXPONENT: u32 = 32;
+
+/// Compute the reconnection delay for `attempt` (1-indexed): exponential
+/// backoff from `base_ms`, jittered by ±[`BACKOFF_JITTER_PERCENT`], clamped to
+/// `[MIN_RECONNECT_DELAY_MS, max_ms]`.
+///
+/// `jitter_unit` is a random value in `[0, 1)` (see [`rand_jitter`]). The cap
+/// is applied AFTER jitter so the delay never exceeds the configured maximum,
+/// and all arithmetic saturates so an unbounded attempt counter (infinite
+/// retries are the default) cannot overflow.
+fn backoff_delay_ms(attempt: u32, base_ms: u64, max_ms: u64, jitter_unit: f64) -> u64 {
+    let exponent = attempt.saturating_sub(1).min(MAX_BACKOFF_EXPONENT);
+    let raw = base_ms.saturating_mul(2u64.saturating_pow(exponent));
+    let capped = raw.min(max_ms);
+
+    let jitter = (capped as f64 * BACKOFF_JITTER_PERCENT * (jitter_unit * 2.0 - 1.0)) as i64;
+    let jittered = (capped as i64).saturating_add(jitter).max(0) as u64;
+
+    jittered.clamp(MIN_RECONNECT_DELAY_MS.min(max_ms), max_ms)
+}
 
 // =============================================================================
 // IggyClientWrapper
@@ -144,14 +178,16 @@ pub struct IggyClientWrapper {
 impl IggyClientWrapper {
     /// Create a new Iggy client wrapper from configuration.
     ///
-    /// Establishes initial connection to the Iggy server. If connection fails,
-    /// returns an error immediately (no automatic retry on initial connection).
+    /// Establishes the initial connection to the Iggy server, bounded by
+    /// `OPERATION_TIMEOUT_SECS`. The SDK's own transport-level reconnection
+    /// (enabled by default for connection-string clients) would otherwise
+    /// retry indefinitely and hang startup when the server is down.
     ///
     /// # Errors
     ///
     /// Returns `AppError::ConnectionFailed` if:
     /// - The connection string is invalid
-    /// - The server is unreachable
+    /// - The server is unreachable within the operation timeout
     /// - Authentication fails
     #[instrument(skip(config), fields(connection_string = %config.iggy_connection_string))]
     pub async fn new(config: Config) -> AppResult<Self> {
@@ -174,7 +210,15 @@ impl IggyClientWrapper {
             circuit_breaker: Arc::new(CircuitBreaker::new(circuit_breaker_config)),
         };
 
-        wrapper.connect().await?;
+        let timeout = wrapper.config.operation_timeout;
+        tokio::time::timeout(timeout, wrapper.connect())
+            .await
+            .map_err(|_| {
+                AppError::ConnectionFailed(format!(
+                    "Initial connection timed out after {:?}",
+                    timeout
+                ))
+            })??;
 
         Ok(wrapper)
     }
@@ -208,6 +252,43 @@ impl IggyClientWrapper {
     /// a live connectivity test.
     pub fn is_connected(&self) -> bool {
         self.state.is_connected()
+    }
+
+    /// Perform a live connectivity check against the Iggy server.
+    ///
+    /// Sends a `ping` bounded by the configured operation timeout and updates
+    /// the tracked connection state with the result. This is what keeps
+    /// `/health` and `/ready` truthful during an outage: the SDK's internal
+    /// transport reconnection swallows most mid-operation failures, so without
+    /// an active probe the connected flag would stay latched at its startup
+    /// value.
+    ///
+    /// Called periodically by the background health-check task; safe to call
+    /// from handlers as well.
+    ///
+    /// # Lock interaction
+    ///
+    /// The wrapper read guard is held for the probe's duration (the SDK
+    /// client is not `Clone`, so the handle cannot be snapshotted out).
+    /// During an outage a probe can hold it for up to the operation timeout,
+    /// delaying — but not cancelling — a concurrent reconnect swap, which
+    /// runs in a detached task (see `reconnect_bounded`) and simply acquires
+    /// the write lock when the probe finishes. A probe that started against
+    /// the OLD client and completes after a swap may briefly overwrite the
+    /// fresh connected state; the next tick corrects it.
+    pub async fn health_check(&self) -> bool {
+        let result = {
+            let client = self.client.read().await;
+            tokio::time::timeout(self.config.operation_timeout, client.ping()).await
+        };
+
+        let healthy = matches!(result, Ok(Ok(())));
+        self.state.set_connected(healthy);
+        crate::metrics::set_connection_status(healthy);
+        if !healthy {
+            debug!("Live health check failed: server did not answer ping in time");
+        }
+        healthy
     }
 
     /// Attempt to reconnect to the Iggy server with exponential backoff.
@@ -244,15 +325,20 @@ impl IggyClientWrapper {
         }
 
         // Guard to ensure we always mark reconnection as complete
-        let _guard = scopeguard::guard((), |_| {
+        let _guard = scopeguard::guard(|| {
             self.state.stop_reconnecting();
         });
 
         self.state.set_connected(false);
+        // Start each reconnection session with a fresh attempt counter so a
+        // previously exhausted session cannot poison this one into failing
+        // immediately (and so the backoff exponent reflects THIS session).
+        self.state.reset_attempts();
         let max_attempts = self.config.max_reconnect_attempts;
 
         loop {
             let attempt = self.state.increment_attempts();
+            crate::metrics::record_reconnect_attempt();
 
             // Check if we've exceeded max attempts (0 = infinite)
             if max_attempts > 0 && attempt > max_attempts {
@@ -266,15 +352,12 @@ impl IggyClientWrapper {
                 )));
             }
 
-            // Calculate delay with exponential backoff and jitter
-            let base_delay = self.config.reconnect_base_delay.as_millis() as u64;
-            let delay_ms = (base_delay * 2u64.saturating_pow(attempt.saturating_sub(1)))
-                .min(self.config.reconnect_max_delay.as_millis() as u64);
-
-            // Add jitter (±BACKOFF_JITTER_PERCENT)
-            let jitter =
-                (delay_ms as f64 * BACKOFF_JITTER_PERCENT * (rand_jitter() * 2.0 - 1.0)) as i64;
-            let final_delay = (delay_ms as i64 + jitter).max(MIN_RECONNECT_DELAY_MS as i64) as u64;
+            let final_delay = backoff_delay_ms(
+                attempt,
+                self.config.reconnect_base_delay.as_millis() as u64,
+                self.config.reconnect_max_delay.as_millis() as u64,
+                rand_jitter(),
+            );
 
             warn!(
                 attempt,
@@ -287,15 +370,43 @@ impl IggyClientWrapper {
             // Create a new client instance for reconnection
             match IggyClient::from_connection_string(&self.config.iggy_connection_string) {
                 Ok(new_client) => {
-                    if let Err(e) = new_client.connect().await {
-                        warn!(attempt, error = %e, "Reconnection attempt failed");
-                        continue;
+                    // Bound the connect: the SDK's internal reconnection would
+                    // otherwise retry inside connect() indefinitely. The bound
+                    // is HALF the operation timeout so a failed attempt exits
+                    // through the cleanup arms below before reconnect_bounded's
+                    // outer deadline aborts the whole session (an abort drops
+                    // the client mid-connect with no chance to shut it down).
+                    let attempt_timeout = self.config.operation_timeout / 2;
+                    match tokio::time::timeout(attempt_timeout, new_client.connect()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            warn!(attempt, error = %e, "Reconnection attempt failed");
+                            // Best-effort cleanup: connect() may already have
+                            // spawned the SDK's detached heartbeat task, which
+                            // Drop alone does not stop.
+                            let _ = new_client.shutdown().await;
+                            continue;
+                        }
+                        Err(_) => {
+                            warn!(attempt, "Reconnection attempt timed out");
+                            let _ = new_client.shutdown().await;
+                            continue;
+                        }
                     }
 
-                    // Successfully reconnected - update the client
+                    // Successfully reconnected - swap the client and shut down
+                    // the old one. Without shutdown() the old client's detached
+                    // heartbeat task keeps running and can re-establish a
+                    // zombie connection to the server (SDK 0.10 behavior).
                     let mut client_guard = self.client.write().await;
-                    *client_guard = new_client;
+                    let old_client = std::mem::replace(&mut *client_guard, new_client);
                     drop(client_guard);
+                    if let Err(e) = old_client.shutdown().await {
+                        // This call exists to kill the old heartbeat task; if
+                        // it fails, a zombie connection may persist - worth a
+                        // warning (reconnects are rare, no spam risk).
+                        warn!(error = %e, "Old client shutdown failed; its heartbeat task may persist");
+                    }
 
                     self.state.set_connected(true);
                     info!(attempt, "Successfully reconnected to Iggy server");
@@ -309,12 +420,58 @@ impl IggyClientWrapper {
         }
     }
 
+    /// Reconnect, bounded by the operation timeout from the caller's view.
+    ///
+    /// The session runs in a SPAWNED task and the caller awaits its
+    /// `JoinHandle` under the timeout. This is a cancellation-safety
+    /// requirement, not a style choice: dropping the reconnect future at
+    /// its commit-point awaits (between `connect()` succeeding and the
+    /// swap/shutdown completing) would leak a fully-connected client whose
+    /// detached SDK heartbeat task can never be shut down — it holds the
+    /// inner client Arc and only exits on `ClientShutdown`, which nothing
+    /// can send once the handle is gone. Dropping a `JoinHandle` does NOT
+    /// cancel the task, so when the caller's deadline expires the session
+    /// keeps running in the background and completes (or fails) cleanly;
+    /// the caller just reports the timeout, and waiters on a later attempt
+    /// join the still-running session as followers.
+    async fn reconnect_bounded(&self) -> AppResult<()> {
+        let timeout = self.config.operation_timeout;
+        let this = self.clone();
+        let session = tokio::spawn(async move { this.reconnect().await });
+
+        match tokio::time::timeout(timeout, session).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(join_error)) => Err(AppError::Internal(format!(
+                "Reconnection task failed: {join_error}"
+            ))),
+            Err(_) => Err(AppError::ConnectionFailed(format!(
+                "Reconnection did not complete within {:?} (continuing in background)",
+                timeout
+            ))),
+        }
+    }
+
     /// Execute an operation with automatic reconnection on connection failure.
     ///
     /// This is the core resilience mechanism. Features:
     /// - **Circuit Breaker**: Fail fast when service is known to be unavailable
     /// - **Timeout**: All operations are bounded by `config.operation_timeout`
     /// - **Retry**: On connection failure, attempts reconnect and retries once
+    ///
+    /// # Worst-case latency
+    ///
+    /// A request on the reconnect path can take up to 3x the operation
+    /// timeout (first attempt + bounded reconnect + retry) - bounded, but
+    /// well above the typical single-operation expectation.
+    ///
+    /// # Breaker false positives
+    ///
+    /// Timeouts count as breaker failures because the SDK's internal
+    /// reconnection swallows outages into blocking retries (a timeout is
+    /// often the only signal). The cost: N consecutive merely-SLOW
+    /// operations (including the background stats refresher's) can open the
+    /// circuit without a real outage. Failures must be consecutive - any
+    /// success resets the count - which bounds the risk.
     ///
     /// # Circuit Breaker Integration
     ///
@@ -361,70 +518,32 @@ impl IggyClientWrapper {
             Ok(Err(e)) if Self::is_connection_error(&e) => {
                 self.circuit_breaker.record_failure().await;
                 warn!(error = %e, "Operation failed due to connection error, attempting reconnect");
-                self.reconnect().await?;
-
-                // Retry with timeout
-                let retry_result = tokio::time::timeout(timeout_duration, operation()).await;
-                match retry_result {
-                    Ok(Ok(value)) => {
-                        self.circuit_breaker.record_success().await;
-                        Ok(value)
-                    }
-                    Ok(Err(e)) => {
-                        if Self::is_connection_error(&e) {
-                            self.circuit_breaker.record_failure().await;
-                        }
-                        Err(e)
-                    }
-                    Err(_) => {
-                        self.circuit_breaker.record_failure().await;
-                        Err(AppError::OperationTimeout(format!(
-                            "Operation timed out after {:?} on retry",
-                            timeout_duration
-                        )))
-                    }
-                }
+                self.reconnect_bounded().await?;
+                self.retry_once(&operation).await
             }
             Ok(Err(e)) => {
                 // Non-connection error - don't record as circuit breaker failure
                 Err(e)
             }
             Err(_) => {
-                // Timeout on first attempt
-                // Only reconnect if we have evidence the connection is actually lost.
-                // A timeout alone doesn't mean disconnection - could just be slow.
+                // Timeout on first attempt. The SDK's internal transport
+                // reconnection swallows most mid-operation connection failures
+                // into blocking retries, so a timeout is often the only outage
+                // signal we get - record it as a circuit-breaker failure.
+                self.circuit_breaker.record_failure().await;
+
+                // Only reconnect if we have evidence the connection is
+                // actually lost (the background health check drives this
+                // flag via live pings). A timeout alone could just be a slow
+                // operation.
                 if !self.state.is_connected() {
-                    self.circuit_breaker.record_failure().await;
                     warn!(
                         timeout = ?timeout_duration,
                         "Operation timed out and connection state is disconnected, attempting reconnect"
                     );
-                    self.reconnect().await?;
-
-                    // Retry with timeout
-                    let retry_result = tokio::time::timeout(timeout_duration, operation()).await;
-                    match retry_result {
-                        Ok(Ok(value)) => {
-                            self.circuit_breaker.record_success().await;
-                            Ok(value)
-                        }
-                        Ok(Err(e)) => {
-                            if Self::is_connection_error(&e) {
-                                self.circuit_breaker.record_failure().await;
-                            }
-                            Err(e)
-                        }
-                        Err(_) => {
-                            self.circuit_breaker.record_failure().await;
-                            Err(AppError::OperationTimeout(format!(
-                                "Operation timed out after {:?} on retry",
-                                timeout_duration
-                            )))
-                        }
-                    }
+                    self.reconnect_bounded().await?;
+                    self.retry_once(&operation).await
                 } else {
-                    // Connection appears healthy - this is just a slow operation
-                    // Don't record as circuit breaker failure (not a connection issue)
                     debug!(
                         timeout = ?timeout_duration,
                         "Operation timed out but connection state is healthy, not reconnecting"
@@ -434,6 +553,35 @@ impl IggyClientWrapper {
                         timeout_duration
                     )))
                 }
+            }
+        }
+    }
+
+    /// Single post-reconnect retry with timeout and circuit-breaker
+    /// bookkeeping. Shared by both reconnect paths of [`Self::with_reconnect`].
+    async fn retry_once<F, Fut, T>(&self, operation: &F) -> AppResult<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = AppResult<T>>,
+    {
+        let timeout_duration = self.config.operation_timeout;
+        match tokio::time::timeout(timeout_duration, operation()).await {
+            Ok(Ok(value)) => {
+                self.circuit_breaker.record_success().await;
+                Ok(value)
+            }
+            Ok(Err(e)) => {
+                if Self::is_connection_error(&e) {
+                    self.circuit_breaker.record_failure().await;
+                }
+                Err(e)
+            }
+            Err(_) => {
+                self.circuit_breaker.record_failure().await;
+                Err(AppError::OperationTimeout(format!(
+                    "Operation timed out after {:?} on retry",
+                    timeout_duration
+                )))
             }
         }
     }
@@ -471,14 +619,24 @@ impl IggyClientWrapper {
                     debug!(stream = name, "Stream already exists");
                     Ok(())
                 }
-                Ok(None) | Err(_) => {
+                Ok(None) => {
                     info!(stream = name, "Creating stream");
-                    client
-                        .create_stream(name)
-                        .await
-                        .map_err(|e| AppError::StreamError(e.to_string()))?;
-                    Ok(())
+                    match client.create_stream(name).await {
+                        Ok(_) => Ok(()),
+                        // Lost a creation race (e.g. two replicas starting
+                        // simultaneously) - the stream exists, which is all
+                        // this method guarantees.
+                        Err(IggyError::StreamNameAlreadyExists(_)) => {
+                            debug!(stream = name, "Stream was created concurrently");
+                            Ok(())
+                        }
+                        Err(e) => Err(classify_iggy_error(e, AppError::StreamError)),
+                    }
                 }
+                // Don't swallow the lookup error: a transient or permission
+                // failure here is not "stream missing", and blindly creating
+                // would surface a misleading already-exists error instead.
+                Err(e) => Err(classify_iggy_error(e, AppError::StreamError)),
             }
         })
         .await
@@ -500,9 +658,9 @@ impl IggyClientWrapper {
                     debug!(stream, topic, "Topic already exists");
                     Ok(())
                 }
-                Ok(None) | Err(_) => {
+                Ok(None) => {
                     info!(stream, topic, partitions, "Creating topic");
-                    client
+                    match client
                         .create_topic(
                             &stream_id,
                             topic,
@@ -513,9 +671,19 @@ impl IggyClientWrapper {
                             MaxTopicSize::Unlimited,
                         )
                         .await
-                        .map_err(|e| AppError::TopicError(e.to_string()))?;
-                    Ok(())
+                    {
+                        Ok(_) => Ok(()),
+                        // Lost a creation race - the topic exists, which is
+                        // all this method guarantees.
+                        Err(IggyError::TopicNameAlreadyExists(_, _)) => {
+                            debug!(stream, topic, "Topic was created concurrently");
+                            Ok(())
+                        }
+                        Err(e) => Err(classify_iggy_error(e, AppError::TopicError)),
+                    }
                 }
+                // Don't swallow the lookup error (see ensure_stream).
+                Err(e) => Err(classify_iggy_error(e, AppError::TopicError)),
             }
         })
         .await
@@ -583,7 +751,7 @@ impl IggyClientWrapper {
             client
                 .send_messages(&stream_id, &topic_id, &partitioning, &mut messages)
                 .await
-                .map_err(|e| AppError::SendError(e.to_string()))?;
+                .map_err(|e| classify_iggy_error(e, AppError::SendError))?;
 
             debug!(event_id = %event.id, "Event sent successfully");
             Ok(())
@@ -662,7 +830,7 @@ impl IggyClientWrapper {
             client
                 .send_messages(&stream_id, &topic_id, &partitioning, &mut messages)
                 .await
-                .map_err(|e| AppError::SendError(e.to_string()))?;
+                .map_err(|e| classify_iggy_error(e, AppError::SendError))?;
 
             debug!(batch_size = events.len(), "Batch sent successfully");
             Ok(())
@@ -704,10 +872,11 @@ impl IggyClientWrapper {
     /// let messages = client.poll_messages("stream", "topic", params).await?;
     /// ```
     ///
-    /// # Consumer Groups
+    /// # Consumer Offsets
     ///
-    /// Each unique `consumer_id` maintains its own offset. Use the same ID
-    /// across restarts to resume from the last committed position.
+    /// Polling uses a standalone consumer (not a consumer group). Each unique
+    /// `consumer_id` maintains its own offset. Use the same ID across restarts
+    /// to resume from the last committed position.
     #[instrument(skip(self, params), fields(partition_id = params.partition_id, consumer_id = params.consumer_id))]
     pub async fn poll_messages(
         &self,
@@ -742,7 +911,7 @@ impl IggyClientWrapper {
                     params.auto_commit,
                 )
                 .await
-                .map_err(|e| AppError::PollError(e.to_string()))?;
+                .map_err(|e| classify_iggy_error(e, AppError::PollError))?;
 
             debug!(
                 count = messages.messages.len(),
@@ -778,7 +947,7 @@ impl IggyClientWrapper {
             client
                 .get_stream(&stream_id)
                 .await
-                .map_err(|e| AppError::StreamError(e.to_string()))?
+                .map_err(|e| classify_iggy_error(e, AppError::StreamError))?
                 .ok_or_else(|| AppError::NotFound(format!("Stream '{}' not found", name)))
         })
         .await
@@ -795,7 +964,7 @@ impl IggyClientWrapper {
             client
                 .get_topic(&stream_id, &topic_id)
                 .await
-                .map_err(|e| AppError::TopicError(e.to_string()))?
+                .map_err(|e| classify_iggy_error(e, AppError::TopicError))?
                 .ok_or_else(|| {
                     AppError::NotFound(format!(
                         "Topic '{}' in stream '{}' not found",
@@ -815,7 +984,7 @@ impl IggyClientWrapper {
             client
                 .get_streams()
                 .await
-                .map_err(|e| AppError::StreamError(e.to_string()))
+                .map_err(|e| classify_iggy_error(e, AppError::StreamError))
         })
         .await
     }
@@ -830,7 +999,7 @@ impl IggyClientWrapper {
             client
                 .get_topics(&stream_id)
                 .await
-                .map_err(|e| AppError::TopicError(e.to_string()))
+                .map_err(|e| classify_iggy_error(e, AppError::TopicError))
         })
         .await
     }
@@ -844,7 +1013,7 @@ impl IggyClientWrapper {
             client
                 .create_stream(name)
                 .await
-                .map_err(|e| AppError::StreamError(e.to_string()))?;
+                .map_err(|e| classify_iggy_error(e, AppError::StreamError))?;
 
             info!(stream = name, "Stream created");
             Ok(())
@@ -870,7 +1039,7 @@ impl IggyClientWrapper {
                     MaxTopicSize::Unlimited,
                 )
                 .await
-                .map_err(|e| AppError::TopicError(e.to_string()))?;
+                .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;
 
             info!(stream, topic, partitions, "Topic created");
             Ok(())
@@ -890,7 +1059,7 @@ impl IggyClientWrapper {
             client
                 .delete_stream(&stream_id)
                 .await
-                .map_err(|e| AppError::StreamError(e.to_string()))?;
+                .map_err(|e| classify_iggy_error(e, AppError::StreamError))?;
 
             warn!(stream = name, "Stream deleted");
             Ok(())
@@ -911,7 +1080,7 @@ impl IggyClientWrapper {
             client
                 .delete_topic(&stream_id, &topic_id)
                 .await
-                .map_err(|e| AppError::TopicError(e.to_string()))?;
+                .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;
 
             warn!(stream, topic, "Topic deleted");
             Ok(())
@@ -962,6 +1131,70 @@ impl IggyClientWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_backoff_first_attempt_is_base_delay() {
+        // Zero jitter offset happens at jitter_unit = 0.5
+        assert_eq!(backoff_delay_ms(1, 1000, 30_000, 0.5), 1000);
+    }
+
+    #[test]
+    fn test_backoff_grows_exponentially() {
+        assert_eq!(backoff_delay_ms(2, 1000, 30_000, 0.5), 2000);
+        assert_eq!(backoff_delay_ms(3, 1000, 30_000, 0.5), 4000);
+        assert_eq!(backoff_delay_ms(4, 1000, 30_000, 0.5), 8000);
+    }
+
+    #[test]
+    fn test_backoff_never_exceeds_max_even_with_max_jitter() {
+        // jitter_unit ~1.0 gives the maximum positive jitter; the cap is
+        // applied after jitter so the delay must not exceed max_ms.
+        for attempt in 1..=100 {
+            let delay = backoff_delay_ms(attempt, 1000, 30_000, 0.999_999);
+            assert!(
+                delay <= 30_000,
+                "attempt {} produced delay {} > max",
+                attempt,
+                delay
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_respects_minimum_floor() {
+        // Tiny base with maximum negative jitter must not go below the floor.
+        let delay = backoff_delay_ms(1, 1, 30_000, 0.0);
+        assert!(delay >= 100, "delay {} below MIN_RECONNECT_DELAY_MS", delay);
+    }
+
+    #[test]
+    fn test_backoff_max_below_floor_collapses_to_max() {
+        // When the configured max is below MIN_RECONNECT_DELAY_MS, the max
+        // wins (the floor must never raise a delay above the configured cap).
+        assert_eq!(backoff_delay_ms(1, 1000, 50, 0.5), 50);
+        assert_eq!(backoff_delay_ms(10, 1000, 50, 0.999_999), 50);
+    }
+
+    #[test]
+    fn test_backoff_zero_max_yields_zero_delay() {
+        // Degenerate but explicit: RECONNECT_MAX_DELAY_MS=0 produces
+        // zero-delay retries (no panic, clamp floor collapses to 0).
+        assert_eq!(backoff_delay_ms(1, 1000, 0, 0.5), 0);
+        assert_eq!(backoff_delay_ms(100, 1000, 0, 0.0), 0);
+    }
+
+    #[test]
+    fn test_backoff_does_not_overflow_at_huge_attempt_counts() {
+        // Infinite retries are the default; attempt counts far past the
+        // overflow point (~attempt 56 with base 1000) must stay clamped.
+        for attempt in [56, 64, 1000, u32::MAX] {
+            let delay = backoff_delay_ms(attempt, 1000, 30_000, 0.999_999);
+            assert!(
+                (100..=30_000).contains(&delay),
+                "attempt {attempt} -> {delay}"
+            );
+        }
+    }
 
     #[test]
     fn test_is_connection_error_connection_failed() {

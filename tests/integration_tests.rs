@@ -7,7 +7,7 @@
 //!
 //! # Reconnection Testing
 //!
-//! Reconnection logic is tested via unit tests in `src/iggy_client.rs`.
+//! Reconnection logic is tested via unit tests in `src/iggy_client/`.
 //! Full integration reconnection testing (container stop/start) is complex
 //! and may result in flaky tests. The reconnection implementation uses:
 //!
@@ -38,9 +38,9 @@ struct IggyContainer {
 }
 
 impl IggyContainer {
-    // Using latest edge server (0.6.0-edge) with io_uring shared-nothing architecture
+    // Server release paired with the Rust SDK 0.10 line (see Cargo.toml)
     const IMAGE: &'static str = "apache/iggy";
-    const TAG: &'static str = "latest";
+    const TAG: &'static str = "0.8.0";
     const TCP_PORT: u16 = 8090;
 
     /// Start an Iggy container and return the mapped TCP port
@@ -50,7 +50,7 @@ impl IggyContainer {
         let container = GenericImage::new(Self::IMAGE, Self::TAG)
             .with_exposed_port(Self::TCP_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Iggy server is running"))
-            // Root credentials (edge server generates random password by default)
+            // Root credentials (the server generates a random password by default)
             .with_env_var("IGGY_ROOT_USERNAME", "iggy")
             .with_env_var("IGGY_ROOT_PASSWORD", "iggy")
             // Configure server to bind to 0.0.0.0 (accessible from host)
@@ -197,9 +197,14 @@ impl TestFixture {
             .await
             .map_err(|e| format!("Failed to bind server: {}", e))?;
 
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| format!("Server failed: {}", e))?;
+        // Match production: ConnectInfo exposes the peer address for
+        // TRUSTED_PROXIES enforcement in the middleware stack.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| format!("Server failed: {}", e))?;
 
         Ok(())
     }
@@ -215,8 +220,16 @@ impl TestFixture {
 
         for attempt in 1..=max_attempts {
             // Check if server task failed
-            if let Ok(Err(e)) = error_rx.try_recv() {
-                panic!("Server failed to start: {}", e);
+            match error_rx.try_recv() {
+                Ok(Err(e)) => panic!("Server failed to start: {}", e),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    // The server task dropped its sender without reporting an
+                    // error: it panicked or returned early. Surfacing this
+                    // immediately beats 30s of polling a dead server followed
+                    // by a generic timeout message that hides the real cause.
+                    panic!("Server task exited (panic or early return) before becoming ready");
+                }
+                Ok(Ok(())) | Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
 
             match client.get(&health_url).send().await {
@@ -316,6 +329,233 @@ async fn test_stats_endpoint() {
 // ============================================================================
 // Message Tests
 // ============================================================================
+
+/// Build a generic test event payload with the given marker message.
+fn generic_event(marker: &str, partition_key: Option<&str>) -> serde_json::Value {
+    let event = json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "event_type": "test.semantics",
+        "timestamp": "2026-07-03T10:30:00Z",
+        "payload": {
+            "type": "Generic",
+            "data": { "message": marker }
+        }
+    });
+    match partition_key {
+        Some(key) => json!({ "event": event, "partition_key": key }),
+        None => json!({ "event": event }),
+    }
+}
+
+/// Poll the given queries repeatedly (idempotent offset-0 reads) until their
+/// combined count reaches `expected` or a 10s deadline elapses; returns the
+/// last per-query counts. Replaces fixed sleeps so slow send-to-poll
+/// visibility under CI load retries instead of flaking.
+async fn wait_for_total(fixture: &TestFixture, queries: &[String], expected: u64) -> Vec<u64> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut counts = Vec::with_capacity(queries.len());
+        for q in queries {
+            counts.push(poll_count(fixture, q).await);
+        }
+        if counts.iter().sum::<u64>() >= expected || tokio::time::Instant::now() >= deadline {
+            return counts;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Poll one partition and return the number of messages.
+async fn poll_count(fixture: &TestFixture, query: &str) -> u64 {
+    let response = fixture
+        .client
+        .get(fixture.url(&format!("/messages?{}", query)))
+        .send()
+        .await
+        .expect("Poll request failed");
+    assert!(
+        response.status().is_success(),
+        "poll '{}' failed: {}",
+        query,
+        response.status()
+    );
+    let body: serde_json::Value = response.json().await.expect("Failed to parse poll body");
+    body.get("count").and_then(|v| v.as_u64()).expect("count")
+}
+
+/// Pins the SDK-0.10 semantics of PollingStrategy::next + auto_commit: a poll
+/// without an explicit offset resumes from the consumer's committed offset,
+/// so a second poll must not re-deliver the first poll's messages.
+#[tokio::test]
+async fn test_poll_without_offset_advances_committed_offset() {
+    let fixture = TestFixture::new().await;
+
+    for i in 0..3 {
+        let response = fixture
+            .client
+            .post(fixture.url("/messages"))
+            .json(&generic_event(&format!("offset-semantics-{i}"), None))
+            .send()
+            .await
+            .expect("Send request failed");
+        assert!(response.status().is_success());
+    }
+
+    // Wait for visibility with idempotent offset-0 reads (consumer 99, no
+    // commit) so the committed-offset rounds below are deterministic under
+    // CI load.
+    let visible = wait_for_total(
+        &fixture,
+        &[
+            "partition_id=0&consumer_id=99&count=10&offset=0".to_string(),
+            "partition_id=1&consumer_id=99&count=10&offset=0".to_string(),
+        ],
+        3,
+    )
+    .await;
+    assert_eq!(
+        visible.iter().sum::<u64>(),
+        3,
+        "messages never became visible"
+    );
+
+    // First round: no offset param (PollingStrategy::next) + auto_commit,
+    // across both partitions of the 2-partition test topic.
+    let first: u64 = poll_count(
+        &fixture,
+        "partition_id=0&consumer_id=77&count=10&auto_commit=true",
+    )
+    .await
+        + poll_count(
+            &fixture,
+            "partition_id=1&consumer_id=77&count=10&auto_commit=true",
+        )
+        .await;
+    assert_eq!(
+        first, 3,
+        "first next-poll round should deliver all messages"
+    );
+
+    // Second round: offsets were committed, nothing may be re-delivered.
+    let second: u64 = poll_count(
+        &fixture,
+        "partition_id=0&consumer_id=77&count=10&auto_commit=true",
+    )
+    .await
+        + poll_count(
+            &fixture,
+            "partition_id=1&consumer_id=77&count=10&auto_commit=true",
+        )
+        .await;
+    assert_eq!(
+        second, 0,
+        "second next-poll round re-delivered committed messages"
+    );
+}
+
+/// Pins the SDK-0.10 semantics of Partitioning::messages_key_str: all
+/// messages sharing a partition key must land in exactly one partition
+/// (per-entity ordering guarantee).
+#[tokio::test]
+async fn test_same_partition_key_routes_to_single_partition() {
+    let fixture = TestFixture::new().await;
+
+    for i in 0..5 {
+        let response = fixture
+            .client
+            .post(fixture.url("/messages"))
+            .json(&generic_event(
+                &format!("routing-{i}"),
+                Some("routing-invariant-key"),
+            ))
+            .send()
+            .await
+            .expect("Send request failed");
+        assert!(response.status().is_success());
+    }
+    let counts = wait_for_total(
+        &fixture,
+        &[
+            "partition_id=0&consumer_id=88&count=50&offset=0".to_string(),
+            "partition_id=1&consumer_id=88&count=50&offset=0".to_string(),
+        ],
+        5,
+    )
+    .await;
+    let (p0, p1) = match counts.as_slice() {
+        [p0, p1] => (*p0, *p1),
+        other => panic!("expected two partition counts, got {other:?}"),
+    };
+
+    assert_eq!(p0 + p1, 5, "all keyed messages should be delivered");
+    assert!(
+        (p0 == 5 && p1 == 0) || (p0 == 0 && p1 == 5),
+        "messages with one partition key split across partitions (p0={p0}, p1={p1})"
+    );
+}
+
+/// Both poll routes must reject count=0 with 400 at the HTTP boundary
+/// (the SDK would otherwise fail it with a misleading 500).
+#[tokio::test]
+async fn test_poll_count_zero_returns_400_on_both_routes() {
+    let fixture = TestFixture::new().await;
+
+    for path in [
+        "/messages?count=0",
+        "/streams/test-stream/topics/test-events/messages?count=0",
+    ] {
+        let response = fixture
+            .client
+            .get(fixture.url(path))
+            .send()
+            .await
+            .expect("Request failed");
+        assert_eq!(
+            response.status().as_u16(),
+            400,
+            "count=0 on {} should be a client error",
+            path
+        );
+    }
+}
+
+/// Pins initialize_defaults idempotence (the ensure_* already-exists arms)
+/// and the live health_check() true path against a real server.
+#[tokio::test]
+async fn test_wrapper_defaults_idempotent_and_health_check_live() {
+    use iggy_sample::{Config, IggyClientWrapper};
+
+    let (_container, iggy) = IggyContainer::start().await;
+
+    let config = Config {
+        iggy_connection_string: iggy.connection_string(),
+        default_stream: "idempotence-stream".to_string(),
+        default_topic: "idempotence-events".to_string(),
+        topic_partitions: 2,
+        operation_timeout: Duration::from_secs(30),
+        metrics_port: 0,
+        ..Config::default()
+    };
+
+    let wrapper = IggyClientWrapper::new(config)
+        .await
+        .expect("wrapper should connect");
+
+    // First call creates; second call must take the already-exists arms
+    // without error (two replicas starting concurrently must not crash-loop).
+    wrapper
+        .initialize_defaults()
+        .await
+        .expect("first initialize_defaults");
+    wrapper
+        .initialize_defaults()
+        .await
+        .expect("second initialize_defaults (idempotence)");
+
+    // Live health probe: ping succeeds and drives the connected flag.
+    assert!(wrapper.health_check().await, "live ping should succeed");
+    assert!(wrapper.is_connected());
+}
 
 #[tokio::test]
 async fn test_send_and_poll_message() {
@@ -1079,7 +1319,10 @@ impl SecureTestFixture {
             api_key: Some(api_key.to_string()),
             auth_bypass_paths: vec!["/health".to_string(), "/ready".to_string()],
             cors_allowed_origins: vec!["*".to_string()],
-            trusted_proxies: vec![], // Empty = trust all (test mode)
+            // Trusted-proxy enforcement ON: the test client's peer address is
+            // 127.0.0.1 (untrusted), so spoofed forwarded headers must be
+            // ignored - this makes the enforcement path itself wire-tested.
+            trusted_proxies: vec!["10.0.0.0/8".to_string()],
             log_level: "warn".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
             metrics_port: 0, // Disabled for tests
@@ -1101,9 +1344,14 @@ impl SecureTestFixture {
             .await
             .map_err(|e| format!("Failed to bind server: {}", e))?;
 
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| format!("Server failed: {}", e))?;
+        // Match production: ConnectInfo exposes the peer address for
+        // TRUSTED_PROXIES enforcement in the middleware stack.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| format!("Server failed: {}", e))?;
 
         Ok(())
     }
@@ -1117,8 +1365,15 @@ impl SecureTestFixture {
         let max_attempts = 60;
 
         for attempt in 1..=max_attempts {
-            if let Ok(Err(e)) = error_rx.try_recv() {
-                panic!("Server failed to start: {}", e);
+            // Fail fast if the server task died instead of polling a corpse
+            // for 30s and reporting a generic timeout (mirrors the standard
+            // fixture's handling).
+            match error_rx.try_recv() {
+                Ok(Err(e)) => panic!("Server failed to start: {}", e),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    panic!("Server task exited (panic or early return) before becoming ready");
+                }
+                Ok(Ok(())) | Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
 
             match client.get(&health_url).send().await {
@@ -1227,6 +1482,46 @@ async fn test_auth_invalid_api_key() {
         response.status().as_u16(),
         401,
         "Expected 401 Unauthorized with wrong API key"
+    );
+}
+
+// Note: valid-key-never-throttled and failure-budget-throttling semantics are
+// covered by deterministic unit tests in src/middleware/auth.rs (the secure
+// fixture's general rate limiter (5 RPS) would dominate a wire-level test).
+
+/// Wire-level proof that TRUSTED_PROXIES enforcement flows through the real
+/// axum serve path (ConnectInfo included): an untrusted peer (127.0.0.1)
+/// rotating spoofed X-Forwarded-For values must still hit the per-IP rate
+/// limit, because every request is keyed on the actual peer address. A
+/// regression that trusts headers again gives each spoofed value a fresh
+/// bucket and this test fails.
+#[tokio::test]
+async fn test_spoofed_xff_rotation_cannot_bypass_rate_limit() {
+    let fixture = SecureTestFixture::new().await;
+
+    // Quota is 5 RPS + burst 2; 30 rapid requests with rotating spoofed
+    // XFF values must trip the limiter if they share one bucket.
+    let mut saw_429 = false;
+    for i in 0..30 {
+        let response = fixture
+            .client
+            .get(fixture.url("/stats"))
+            .header("x-api-key", &fixture.api_key)
+            .header("x-forwarded-for", format!("203.0.113.{}", i + 1))
+            .send()
+            .await
+            .expect("Request failed");
+
+        if response.status().as_u16() == 429 {
+            saw_429 = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_429,
+        "rotating spoofed X-Forwarded-For values bypassed the per-IP rate \
+         limit despite TRUSTED_PROXIES enforcement"
     );
 }
 

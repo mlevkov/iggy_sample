@@ -44,6 +44,27 @@ async fn run() -> Result<(), exitcode::ExitCode> {
         "Configuration loaded"
     );
 
+    // Start the Prometheus metrics exporter FIRST (it depends only on
+    // config) so metrics recorded during connection/initialization are not
+    // silently dropped by the no-op default recorder. A bind failure fails
+    // startup: silently missing metrics would defeat alerting.
+    if let Some(metrics_addr) = config.metrics_addr() {
+        let metrics_addr: SocketAddr = metrics_addr.parse().map_err(|e| {
+            error!("Invalid metrics address: {e}");
+            exitcode::CONFIG
+        })?;
+        iggy_sample::metrics::init_metrics(metrics_addr).map_err(|e| {
+            error!("Failed to start metrics exporter: {e}");
+            exitcode::UNAVAILABLE
+        })?;
+        // Seed the gauges so every series exists from the first scrape -
+        // absent-series is otherwise indistinguishable from healthy.
+        iggy_sample::metrics::set_connection_status(false);
+        iggy_sample::metrics::set_circuit_breaker_state(0);
+    } else {
+        info!("Metrics exporter disabled (METRICS_PORT=0)");
+    }
+
     // Initialize Iggy client
     info!("Connecting to Iggy server...");
     let iggy_client = IggyClientWrapper::new(config.clone()).await.map_err(|e| {
@@ -51,6 +72,7 @@ async fn run() -> Result<(), exitcode::ExitCode> {
         exitcode::UNAVAILABLE
     })?;
     info!("Successfully connected to Iggy server");
+    iggy_sample::metrics::set_connection_status(true);
 
     // Initialize default stream and topic
     info!("Initializing default stream and topic...");
@@ -93,18 +115,25 @@ async fn run() -> Result<(), exitcode::ExitCode> {
     info!("  GET  /streams/{{name}}   - Get stream info");
     info!("  DELETE /streams/{{name}} - Delete stream");
 
-    // Start server with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(utils::shutdown_signal())
-        .await
-        .map_err(|e| {
-            error!("Server error: {e}");
-            exitcode::SOFTWARE
-        })?;
+    // Start server with graceful shutdown. ConnectInfo exposes the peer
+    // address to the middleware stack, which TRUSTED_PROXIES enforcement
+    // needs to decide whether forwarded headers can be honored.
+    let serve_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(utils::shutdown_signal())
+    .await;
 
-    // Gracefully shutdown background tasks
+    // Gracefully shutdown background tasks on BOTH exit paths - a serve
+    // error must not leave the stats/health tasks running un-awaited.
     info!("HTTP server stopped, shutting down background tasks...");
     state.shutdown().await;
+
+    serve_result.map_err(|e| {
+        error!("Server error: {e}");
+        exitcode::SOFTWARE
+    })?;
 
     info!("Server shutdown complete");
     Ok(())

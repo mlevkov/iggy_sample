@@ -13,7 +13,7 @@
 //! # Configuration
 //!
 //! - `rate_limit_rps`: Sustained requests per second per IP
-//! - `rate_limit_burst`: Additional burst capacity above RPS
+//! - `rate_limit_burst`: Instantaneous bucket capacity (governor's `allow_burst` REPLACES the default capacity; it is not added on top of RPS)
 //! - `trusted_proxies`: CIDR ranges of trusted reverse proxies
 //!
 //! # Response Headers
@@ -32,8 +32,11 @@
 //! 2. Ensure your proxy overwrites (not appends) client IP headers
 //! 3. Block direct access to this service from the internet
 //!
-//! When `trusted_proxies` is configured, the middleware logs warnings if
-//! X-Forwarded-For is received from an untrusted source.
+//! When `trusted_proxies` is configured, forwarded headers are only honored
+//! when the direct peer (via `ConnectInfo`) is inside a trusted range;
+//! requests from untrusted peers are keyed by their actual peer address and
+//! the ignored headers are noted at debug level. See `middleware::ip` for
+//! the full resolution rules (rightmost-untrusted X-Forwarded-For).
 
 use std::fmt;
 use std::net::IpAddr;
@@ -50,13 +53,17 @@ use governor::{Quota, RateLimiter};
 use tower::{Layer, Service};
 
 /// Error type for rate limit layer configuration.
-///
-/// This is a simple enum with no data, so it derives `Copy` for efficient
-/// pass-by-value semantics without cloning overhead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RateLimitError {
     /// RPS value cannot be zero.
     ZeroRps,
+    /// A TRUSTED_PROXIES entry could not be parsed as an IP or CIDR range.
+    ///
+    /// Startup fails instead of silently skipping the entry: a typo in the
+    /// trusted-proxy list would otherwise degrade to trusting spoofable
+    /// forwarded headers from everyone.
+    InvalidTrustedProxyCidr(String),
 }
 
 impl fmt::Display for RateLimitError {
@@ -66,6 +73,13 @@ impl fmt::Display for RateLimitError {
                 write!(
                     f,
                     "RPS must be greater than 0; use disabled() for no limiting"
+                )
+            }
+            RateLimitError::InvalidTrustedProxyCidr(entry) => {
+                write!(
+                    f,
+                    "Invalid TRUSTED_PROXIES entry '{}': expected an IP address or CIDR range (e.g. 10.0.0.0/8)",
+                    entry
                 )
             }
         }
@@ -179,20 +193,22 @@ pub struct TrustedProxyConfig {
 impl TrustedProxyConfig {
     /// Create a new trusted proxy configuration from CIDR strings.
     ///
-    /// Invalid CIDR strings are logged as warnings and skipped.
-    pub fn new(cidrs: &[String]) -> Self {
+    /// # Errors
+    ///
+    /// Returns [`RateLimitError::InvalidTrustedProxyCidr`] on the first entry
+    /// that fails to parse. Failing fast at startup is deliberate: silently
+    /// skipping a typo'd entry would degrade to trusting spoofable forwarded
+    /// headers from everyone (or, with a partial list, from unintended peers).
+    pub fn try_new(cidrs: &[String]) -> Result<Self, RateLimitError> {
         let ranges: Vec<CidrRange> = cidrs
             .iter()
-            .filter_map(|cidr| {
-                let parsed = CidrRange::parse(cidr);
-                if parsed.is_none() {
-                    warn!(cidr = %cidr, "Invalid CIDR range in TRUSTED_PROXIES, skipping");
-                }
-                parsed
+            .map(|cidr| {
+                CidrRange::parse(cidr)
+                    .ok_or_else(|| RateLimitError::InvalidTrustedProxyCidr(cidr.clone()))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
-        if !cidrs.is_empty() && !ranges.is_empty() {
+        if !ranges.is_empty() {
             debug!(
                 count = ranges.len(),
                 "Trusted proxy validation enabled with {} CIDR ranges",
@@ -200,7 +216,7 @@ impl TrustedProxyConfig {
             );
         }
 
-        Self { ranges }
+        Ok(Self { ranges })
     }
 
     /// Check if trusted proxy validation is enabled (any ranges configured).
@@ -212,23 +228,15 @@ impl TrustedProxyConfig {
     ///
     /// Returns `true` if the IP matches any configured CIDR range,
     /// or if no ranges are configured (trust all mode).
-    pub fn is_trusted(&self, ip_str: &str) -> bool {
-        // If no trusted proxies configured, trust all (backwards compatible)
+    /// Check if an IP address is from a trusted proxy.
+    ///
+    /// Returns `true` if the IP matches any configured CIDR range,
+    /// or if no ranges are configured (trust all mode).
+    pub fn is_trusted_ip(&self, ip: &IpAddr) -> bool {
         if self.ranges.is_empty() {
             return true;
         }
-
-        // Parse the IP address
-        let ip: IpAddr = match ip_str.parse() {
-            Ok(ip) => ip,
-            Err(_) => {
-                // Can't parse as IP, not trusted
-                return false;
-            }
-        };
-
-        // Check against all configured ranges
-        self.ranges.iter().any(|range| range.contains(&ip))
+        self.ranges.iter().any(|range| range.contains(ip))
     }
 }
 
@@ -260,23 +268,28 @@ impl RateLimitLayer {
     /// # Arguments
     ///
     /// * `rps` - Requests per second limit per IP (sustained rate)
-    /// * `burst` - Additional burst capacity per IP
+    /// * `burst` - Instantaneous bucket capacity per IP (replaces, not adds to, the default capacity)
     ///
     /// # Errors
     ///
     /// Returns `RateLimitError::ZeroRps` if `rps` is 0.
     /// Use `RateLimitLayer::disabled()` for no limiting.
     pub fn new(rps: u32, burst: u32) -> Result<Self, RateLimitError> {
-        Self::with_trusted_proxies(rps, burst, &[])
+        Self::with_trusted_proxies(rps, burst, Arc::new(TrustedProxyConfig::default()))
     }
 
     /// Create a new per-IP rate limit layer with trusted proxy configuration.
     ///
+    /// Takes the already-parsed configuration (see
+    /// [`TrustedProxyConfig::try_new`]) so a single shared instance can serve
+    /// both this layer and the auth middleware — the raw CIDR strings are
+    /// parsed exactly once, at startup.
+    ///
     /// # Arguments
     ///
     /// * `rps` - Requests per second limit per IP (sustained rate)
-    /// * `burst` - Additional burst capacity per IP
-    /// * `trusted_proxies` - CIDR ranges for trusted reverse proxies
+    /// * `burst` - Instantaneous bucket capacity per IP (replaces, not adds to, the default capacity)
+    /// * `trusted_proxies` - Shared trusted-proxy configuration
     ///
     /// # Errors
     ///
@@ -285,7 +298,7 @@ impl RateLimitLayer {
     pub fn with_trusted_proxies(
         rps: u32,
         burst: u32,
-        trusted_proxies: &[String],
+        trusted_proxies: Arc<TrustedProxyConfig>,
     ) -> Result<Self, RateLimitError> {
         // Validate rps is non-zero
         let rps_nonzero = NonZeroU32::new(rps).ok_or(RateLimitError::ZeroRps)?;
@@ -301,13 +314,10 @@ impl RateLimitLayer {
         // Create keyed rate limiter with custom hasher for efficiency
         let limiter = RateLimiter::keyed(quota);
 
-        // Parse trusted proxy configuration
-        let proxy_config = TrustedProxyConfig::new(trusted_proxies);
-
         Ok(Self {
             limiter: Arc::new(limiter),
             limit: rps,
-            trusted_proxies: Arc::new(proxy_config),
+            trusted_proxies,
         })
     }
 
@@ -473,29 +483,72 @@ mod tests {
         assert!(!cidr.contains(&"192.168.2.1".parse().unwrap()));
     }
 
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
     #[test]
     fn test_trusted_proxy_config_empty() {
-        let config = TrustedProxyConfig::new(&[]);
+        let config = TrustedProxyConfig::try_new(&[]).unwrap();
         assert!(!config.is_enabled());
         // Empty config trusts all
-        assert!(config.is_trusted("1.2.3.4"));
-        assert!(config.is_trusted("invalid"));
+        assert!(config.is_trusted_ip(&ip("1.2.3.4")));
     }
 
     #[test]
     fn test_trusted_proxy_config_with_ranges() {
         let config =
-            TrustedProxyConfig::new(&["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()]);
+            TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()])
+                .unwrap();
         assert!(config.is_enabled());
 
         // Should trust IPs in configured ranges
-        assert!(config.is_trusted("10.0.0.1"));
-        assert!(config.is_trusted("172.16.0.1"));
-        assert!(config.is_trusted("172.31.255.255"));
+        assert!(config.is_trusted_ip(&ip("10.0.0.1")));
+        assert!(config.is_trusted_ip(&ip("172.16.0.1")));
+        assert!(config.is_trusted_ip(&ip("172.31.255.255")));
 
         // Should not trust IPs outside ranges
-        assert!(!config.is_trusted("192.168.1.1"));
-        assert!(!config.is_trusted("8.8.8.8"));
-        assert!(!config.is_trusted("invalid"));
+        assert!(!config.is_trusted_ip(&ip("192.168.1.1")));
+        assert!(!config.is_trusted_ip(&ip("8.8.8.8")));
+    }
+
+    #[test]
+    fn test_trusted_proxy_config_invalid_entry_fails_fast() {
+        // A typo'd CIDR must fail startup, not silently degrade to trust-all
+        // (the exact security bug the round-1 remediation fixed).
+        let result = TrustedProxyConfig::try_new(&["10.0.0/8".to_string()]);
+        assert!(matches!(
+            result,
+            Err(RateLimitError::InvalidTrustedProxyCidr(_))
+        ));
+
+        // One bad entry among good ones still fails.
+        let result =
+            TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string(), "garbage".to_string()]);
+        assert!(matches!(
+            result,
+            Err(RateLimitError::InvalidTrustedProxyCidr(_))
+        ));
+    }
+
+    #[test]
+    fn test_cidr_ipv6_containment() {
+        // The u128 mask arithmetic had zero containment coverage.
+        let cidr = CidrRange::parse("2001:db8::/32").unwrap();
+        assert!(cidr.contains(&ip("2001:db8::1")));
+        assert!(cidr.contains(&ip("2001:db8:ffff::1")));
+        assert!(!cidr.contains(&ip("2001:db9::1")));
+        // IPv4 never matches an IPv6 range
+        assert!(!cidr.contains(&ip("10.0.0.1")));
+    }
+
+    #[test]
+    fn test_cidr_zero_prefix_matches_everything() {
+        let v4_all = CidrRange::parse("0.0.0.0/0").unwrap();
+        assert!(v4_all.contains(&ip("8.8.8.8")));
+        assert!(v4_all.contains(&ip("192.168.1.1")));
+
+        let v6_all = CidrRange::parse("::/0").unwrap();
+        assert!(v6_all.contains(&ip("2001:db8::1")));
     }
 }

@@ -223,6 +223,11 @@ impl AppState {
             let mut ticker = interval(interval_duration);
             ticker.tick().await; // Skip first immediate tick
 
+            // Track the previous probe result so the recovery transition is
+            // visible at info - operators should not have to infer recovery
+            // from the warnings going quiet.
+            let mut was_connected = true;
+
             loop {
                 tokio::select! {
                     biased;
@@ -232,12 +237,18 @@ impl AppState {
                         break;
                     }
                     _ = ticker.tick() => {
-                        let connected = iggy_client.is_connected();
-                        if !connected {
-                            warn!("Health check: Iggy connection is down");
-                        } else {
-                            trace!("Health check: Iggy connection OK");
+                        // Live ping (not just a flag read): the SDK's internal
+                        // transport reconnection hides most mid-operation
+                        // failures, so this probe is what keeps the connection
+                        // state - and therefore /health and /ready - truthful.
+                        let connected = iggy_client.health_check().await;
+                        match (was_connected, connected) {
+                            (true, false) => warn!("Health check: Iggy connection is down"),
+                            (false, false) => warn!("Health check: Iggy connection still down"),
+                            (false, true) => info!("Health check: Iggy connection restored"),
+                            (true, true) => trace!("Health check: Iggy connection OK"),
                         }
+                        was_connected = connected;
                     }
                 }
             }

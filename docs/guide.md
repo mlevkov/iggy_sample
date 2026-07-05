@@ -937,25 +937,25 @@ iggy -u iggy -p iggy topic get stream topic
 
 ```bash
 # Health check
-curl http://localhost:3000/
+curl http://localhost:8000/
 
 # Create stream
-curl -X POST http://localhost:3000/streams \
+curl -X POST http://localhost:8000/streams \
   -H "Content-Type: application/json" \
   -d '{"stream_id": 1, "name": "my-stream"}'
 
 # Create topic
-curl -X POST http://localhost:3000/streams/my-stream/topics \
+curl -X POST http://localhost:8000/streams/my-stream/topics \
   -H "Content-Type: application/json" \
   -d '{"topic_id": 1, "name": "events", "partitions_count": 3}'
 
 # Send message
-curl -X POST http://localhost:3000/streams/my-stream/topics/events/messages \
+curl -X POST http://localhost:8000/streams/my-stream/topics/events/messages \
   -H "Content-Type: application/json" \
   -d '{"partitioning": {"kind": "partition_id", "value": 1}, "messages": [{"payload": "aGVsbG8="}]}'
 
 # Poll messages
-curl "http://localhost:3000/streams/my-stream/topics/events/messages?consumer_id=1&partition_id=1&count=10"
+curl "http://localhost:8000/streams/my-stream/topics/events/messages?consumer_id=1&partition_id=1&count=10"
 ```
 
 ### Environment Variables (iggy_sample)

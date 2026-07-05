@@ -241,7 +241,7 @@ Client                Handler              Consumer             IggyClient      
   │─────────────────────▶│                    │                     │                 │
   │                      │ build poll params  │                     │                 │
   │                      │───────────────────▶│                     │                 │
-  │                      │                    │ poll_with_params()  │                 │
+  │                      │                    │ poll_messages()     │                 │
   │                      │                    │────────────────────▶│                 │
   │                      │                    │                     │ poll_messages() │
   │                      │                    │                     │────────────────▶│
@@ -357,7 +357,7 @@ Each request gets a unique ID (X-Request-Id header) for correlation.
 
 ```bash
 docker build -t iggy-sample .
-docker run -p 3000:3000 \
+docker run -p 8000:8000 \
   -e IGGY_CONNECTION_STRING=iggy://iggy:iggy@iggy-server:8090 \
   iggy-sample
 ```
@@ -382,11 +382,11 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 3000
+            port: 8000
         readinessProbe:
           httpGet:
             path: /ready
-            port: 3000
+            port: 8000
 ```
 
 ## Exit Codes

@@ -217,7 +217,7 @@ mod event_tests {
 mod api_tests {
     use super::*;
     use iggy_sample::models::{
-        CreateStreamRequest, CreateTopicRequest, HealthResponse, PollMessagesRequest, StatsResponse,
+        CreateStreamRequest, CreateTopicRequest, HealthResponse, StatsResponse,
     };
 
     #[test]
@@ -244,36 +244,6 @@ mod api_tests {
             serde_json::from_str(json).expect("Deserialization failed");
         assert_eq!(request.name, "my-topic");
         assert_eq!(request.partitions, 5);
-    }
-
-    #[test]
-    fn test_poll_messages_request_defaults() {
-        let json = r#"{}"#;
-        let request: PollMessagesRequest =
-            serde_json::from_str(json).expect("Deserialization failed");
-        assert_eq!(request.consumer_id, 1);
-        assert_eq!(request.count, 10);
-        assert!(!request.auto_commit);
-        assert!(request.partition_id.is_none());
-        assert!(request.offset.is_none());
-    }
-
-    #[test]
-    fn test_poll_messages_request_custom() {
-        let json = r#"{
-            "consumer_id": 5,
-            "partition_id": 2,
-            "offset": 100,
-            "count": 50,
-            "auto_commit": true
-        }"#;
-        let request: PollMessagesRequest =
-            serde_json::from_str(json).expect("Deserialization failed");
-        assert_eq!(request.consumer_id, 5);
-        assert_eq!(request.partition_id, Some(2));
-        assert_eq!(request.offset, Some(100));
-        assert_eq!(request.count, 50);
-        assert!(request.auto_commit);
     }
 
     #[test]

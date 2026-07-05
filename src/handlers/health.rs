@@ -71,7 +71,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
 /// readinessProbe:
 ///   httpGet:
 ///     path: /ready
-///     port: 3000
+///     port: 8000
 ///   initialDelaySeconds: 5
 ///   periodSeconds: 10
 /// ```

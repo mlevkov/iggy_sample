@@ -1,7 +1,8 @@
 services:
     # Apache Iggy message streaming server
+    # Pinned to the release paired with the Rust SDK 0.10 line (see Cargo.toml)
     iggy:
-        image: apache/iggy:latest
+        image: apache/iggy:0.8.0
         privileged: true
         container_name: iggy-server
         ports:
@@ -45,9 +46,13 @@ services:
         container_name: iggy-sample-app
         ports:
             - "8000:8000"
+            # App Prometheus metrics (host 9091; 9090 is Prometheus itself)
+            - "9091:9090"
         environment:
             - HOST=0.0.0.0
             - PORT=8000
+            # Dedicated Prometheus metrics listener (scraped as app:9090)
+            - METRICS_PORT=9090
             - IGGY_CONNECTION_STRING=iggy://iggy:iggy@iggy:8090
             - IGGY_STREAM=sample-stream
             - IGGY_TOPIC=events
