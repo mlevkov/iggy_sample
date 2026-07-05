@@ -1,6 +1,7 @@
 # Iggy Sample Application
 
 [![CI](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml/badge.svg)](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mlevkov/iggy_sample?sort=semver)](https://github.com/mlevkov/iggy_sample/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.93%2B-blue.svg)](https://www.rust-lang.org)
 
