@@ -79,7 +79,12 @@ jobs:
         image: apache/iggy:0.8.0
         ports:
           - 8090:8090
+        # --privileged: the io_uring-based server (0.6+) cannot create its
+        # runtime under the default seccomp profile ("Operation not
+        # permitted"); mirrors docker-compose's privileged: true and the
+        # integration tests' .with_privileged(true)
         options: >-
+          --privileged
           --health-cmd "curl -f http://localhost:3000/health || exit 1"
           --health-interval 10s
           --health-timeout 5s
