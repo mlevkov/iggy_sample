@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-07-05
+
 ### Security
 
 - Refreshed `Cargo.lock` to patch 10 RUSTSEC advisories in transitive
@@ -44,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI now fails on `cargo deny check advisories licenses` (previously
   licenses-only and non-blocking); weekly stress tests pin
   `apache/iggy:0.8.0` instead of `latest`
+- Crate marked `publish = false`: releases are repo-level only (GitHub
+  Releases + GitHub Pages docs) - cargo itself refuses to publish, so
+  the release pipeline's publish step is a harmless no-op
 - Updated `docker-compose.yaml` with full observability stack configuration
 - Simplified documentation section in README.md to reference `docs/`
   directory
@@ -125,5 +132,6 @@ triggers (`docs/tech-debt/`):
 - Trusted proxy configuration for X-Forwarded-For validation
 - Input validation to prevent injection attacks
 
-[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mlevkov/iggy_sample/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mlevkov/iggy_sample/releases/tag/v0.1.0

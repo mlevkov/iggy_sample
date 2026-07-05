@@ -793,7 +793,7 @@ Triggered on version tags (`v*.*.*`):
 - Multi-platform builds (Linux x86/ARM, macOS x86/ARM, Windows)
 - GitHub Release with changelog
 - Documentation deployment to GitHub Pages
-- Optional crates.io publishing
+- No crates.io publishing: the crate is `publish = false` (repo-level releases only)
 
 ### Extended Tests (`extended-tests.yml`)
 Weekly scheduled runs:

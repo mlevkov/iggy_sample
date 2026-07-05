@@ -1,13 +1,16 @@
 [package]
 name = "iggy_sample"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93.0"
 description = "A comprehensive demonstration of Apache Iggy message streaming with Axum"
 license = "MIT"
+# Repo-level releases only - never published to crates.io (enforced here,
+# not just in CI: cargo refuses to publish with this set)
+publish = false
 repository = "https://github.com/mlevkov/iggy_sample"
 homepage = "https://github.com/mlevkov/iggy_sample"
-documentation = "https://docs.rs/iggy_sample"
+documentation = "https://mlevkov.github.io/iggy_sample"
 authors = ["Maxim Levkov"]
 keywords = ["iggy", "message-streaming", "axum", "async", "event-driven"]
 categories = ["web-programming", "asynchronous", "network-programming"]
