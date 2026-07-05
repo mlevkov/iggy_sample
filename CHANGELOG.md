@@ -48,6 +48,9 @@ Nothing yet.
 - CI now fails on `cargo deny check advisories licenses` (previously
   licenses-only and non-blocking); weekly stress tests pin
   `apache/iggy:0.8.0` instead of `latest`
+- Crate marked `publish = false` and the crates.io publish job removed
+  from the release pipeline: releases are repo-level only (GitHub
+  Releases + GitHub Pages docs), by design
 - Updated `docker-compose.yaml` with full observability stack configuration
 - Simplified documentation section in README.md to reference `docs/`
   directory
