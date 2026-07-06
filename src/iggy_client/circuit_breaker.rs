@@ -20,8 +20,8 @@
 //! │       │ │                                    ▼                    │
 //! │       │ │                            ┌───────────────┐            │
 //! │       │ └─────────────────────────── │   HalfOpen    │            │
-//! │       │              success         │ (Probe with   │            │
-//! │       │                              │  one request) │            │
+//! │       │              success         │ (token-limited│            │
+//! │       │                              │    probes)    │            │
 //! │       │                              └───────┬───────┘            │
 //! │       │                                      │                    │
 //! │       │                                      │ failure            │
@@ -37,6 +37,15 @@
 //! - `failure_threshold`: Number of consecutive failures before opening
 //! - `success_threshold`: Number of consecutive successes in half-open to close
 //! - `open_duration`: How long to stay open before trying half-open
+//!
+//! # Half-Open Probe Limiting
+//!
+//! Entering half-open grants `success_threshold` probe tokens (minimum one);
+//! each allowed request consumes one, and requests beyond the budget are
+//! rejected so a recovering server never receives a thundering herd of
+//! probes. Tokens re-grant after `open_duration` elapses in half-open,
+//! guaranteeing the breaker cannot wedge if a probe's outcome is never
+//! recorded. See [`CircuitBreaker::allow_request`].
 //!
 //! # Usage
 //!
@@ -62,9 +71,12 @@
 //! ```
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::RwLock;
+// tokio's Instant (a thin wrapper over std's) so breaker timing follows the
+// pausable test clock; identical behavior in production.
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Circuit breaker state.
@@ -130,6 +142,10 @@ struct CircuitBreakerState {
     consecutive_failures: u32,
     /// Number of consecutive successes (in half-open state).
     consecutive_successes: u32,
+    /// Probe tokens remaining in the current half-open window.
+    half_open_probes_remaining: u32,
+    /// When the current half-open probe window was granted (for re-grant).
+    half_open_granted_at: Option<Instant>,
 }
 
 impl CircuitBreakerState {
@@ -139,6 +155,8 @@ impl CircuitBreakerState {
             opened_at: None,
             consecutive_failures: 0,
             consecutive_successes: 0,
+            half_open_probes_remaining: 0,
+            half_open_granted_at: None,
         }
     }
 }
@@ -177,14 +195,30 @@ impl CircuitBreaker {
     ///
     /// - **Closed**: Always allows requests
     /// - **Open**: Rejects requests; transitions to HalfOpen after timeout
-    /// - **HalfOpen**: Allows requests (for probing)
+    /// - **HalfOpen**: Allows a token-limited number of probes (see below)
+    ///
+    /// # Half-open probe limiting
+    ///
+    /// Entering HalfOpen grants `success_threshold` probe tokens (at least
+    /// one) — exactly the number of successes needed to close the circuit.
+    /// Each allowed request consumes a token; with no tokens left, requests
+    /// are rejected, which caps the probe load on a recovering server
+    /// instead of letting every concurrent caller through at once.
+    ///
+    /// Tokens re-grant after `open_duration` elapses in HalfOpen. This is
+    /// the anti-wedge guarantee: a probe whose outcome is never recorded
+    /// (e.g. the operation failed with a non-connection error, which by
+    /// design touches neither breaker counter) would otherwise leave the
+    /// breaker half-open with zero tokens forever.
     pub async fn allow_request(&self) -> bool {
-        // First, check with a read lock for the common case
+        // First, check with a read lock for the common cases that don't
+        // mutate state (Closed passes, still-Open rejects).
         {
             let state = self.state.read().await;
             match state.state {
                 CircuitState::Closed => return true,
-                CircuitState::HalfOpen => return true,
+                // Consuming a probe token requires the write lock below.
+                CircuitState::HalfOpen => {}
                 CircuitState::Open => {
                     // Check if timeout has expired
                     if let Some(opened_at) = state.opened_at
@@ -199,26 +233,61 @@ impl CircuitBreaker {
             }
         }
 
-        // Need write lock to transition from Open to HalfOpen
+        // Write lock: Open -> HalfOpen transition, or HalfOpen token use.
         let mut state = self.state.write().await;
 
-        // Re-check state in case another task already transitioned
-        if state.state == CircuitState::Open {
-            if let Some(opened_at) = state.opened_at
-                && opened_at.elapsed() >= self.config.open_duration
-            {
-                state.state = CircuitState::HalfOpen;
-                state.consecutive_successes = 0;
-                crate::metrics::set_circuit_breaker_state(1);
-                info!("Circuit breaker transitioning from Open to HalfOpen");
-                return true;
+        match state.state {
+            // Another task closed the circuit while we waited for the lock.
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                if let Some(opened_at) = state.opened_at
+                    && opened_at.elapsed() >= self.config.open_duration
+                {
+                    state.state = CircuitState::HalfOpen;
+                    state.consecutive_successes = 0;
+                    self.grant_probe_tokens(&mut state);
+                    // The transitioning caller takes the first probe token.
+                    state.half_open_probes_remaining -= 1;
+                    crate::metrics::set_circuit_breaker_state(1);
+                    info!(
+                        probes = state.half_open_probes_remaining + 1,
+                        "Circuit breaker transitioning from Open to HalfOpen"
+                    );
+                    return true;
+                }
+                self.requests_rejected.fetch_add(1, Ordering::Relaxed);
+                crate::metrics::record_circuit_breaker_rejection();
+                false
             }
-            self.requests_rejected.fetch_add(1, Ordering::Relaxed);
-            crate::metrics::record_circuit_breaker_rejection();
-            return false;
+            CircuitState::HalfOpen => {
+                if state.half_open_probes_remaining == 0 {
+                    // Re-grant after open_duration so leaked probes cannot
+                    // wedge the breaker in HalfOpen (see doc above).
+                    let window_expired = state
+                        .half_open_granted_at
+                        .is_none_or(|granted| granted.elapsed() >= self.config.open_duration);
+                    if !window_expired {
+                        self.requests_rejected.fetch_add(1, Ordering::Relaxed);
+                        crate::metrics::record_circuit_breaker_rejection();
+                        return false;
+                    }
+                    self.grant_probe_tokens(&mut state);
+                    debug!("Circuit breaker re-granted half-open probe tokens");
+                }
+                state.half_open_probes_remaining -= 1;
+                true
+            }
         }
+    }
 
-        true
+    /// Grant a fresh window of half-open probe tokens.
+    ///
+    /// `success_threshold` tokens (at least one, so a zero threshold cannot
+    /// deadlock the breaker) — exactly enough probes to close the circuit
+    /// if all of them succeed.
+    fn grant_probe_tokens(&self, state: &mut CircuitBreakerState) {
+        state.half_open_probes_remaining = self.config.success_threshold.max(1);
+        state.half_open_granted_at = Some(Instant::now());
     }
 
     /// Record a successful operation.
@@ -484,5 +553,100 @@ mod tests {
         cb.force_open().await;
         assert_eq!(cb.state().await, CircuitState::Open);
         assert!(!cb.allow_request().await);
+    }
+
+    // =========================================================================
+    // Half-open probe limiting (TD-2026-07-03)
+    // =========================================================================
+
+    #[tokio::test(start_paused = true)]
+    async fn test_half_open_limits_probes_to_success_threshold() {
+        let config = CircuitBreakerConfig::new(1, 2, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        assert_eq!(cb.state().await, CircuitState::Open);
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        // success_threshold = 2 probe tokens: two callers pass, the third
+        // is rejected instead of piling onto the recovering server.
+        assert!(cb.allow_request().await);
+        assert!(cb.allow_request().await);
+        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+
+        let rejected_before = cb.requests_rejected();
+        assert!(!cb.allow_request().await);
+        assert_eq!(cb.requests_rejected(), rejected_before + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_half_open_probe_tokens_regrant_after_open_duration() {
+        let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        // Single token consumed by the transitioning caller; its outcome is
+        // never recorded (the leaked-probe case) so the breaker sits in
+        // HalfOpen with zero tokens.
+        assert!(cb.allow_request().await);
+        assert!(!cb.allow_request().await);
+
+        // The re-grant window keeps the breaker from wedging permanently.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(cb.allow_request().await);
+        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_half_open_reentry_grants_fresh_probe_tokens() {
+        let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        // Consume the only token, then fail the probe: back to Open.
+        assert!(cb.allow_request().await);
+        cb.record_failure().await;
+        assert_eq!(cb.state().await, CircuitState::Open);
+
+        // Next half-open entry starts with a fresh token budget.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(cb.allow_request().await);
+        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_half_open_recovery_within_probe_budget() {
+        // The token budget equals success_threshold, so a healthy server
+        // can be probed back to Closed without any rejection in between.
+        let config = CircuitBreakerConfig::new(1, 2, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        assert!(cb.allow_request().await);
+        cb.record_success().await;
+        assert!(cb.allow_request().await);
+        cb.record_success().await;
+
+        assert_eq!(cb.state().await, CircuitState::Closed);
+        assert!(cb.allow_request().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_half_open_zero_success_threshold_still_grants_a_probe() {
+        // Degenerate config: success_threshold = 0 must not deadlock the
+        // breaker with a zero-token grant.
+        let config = CircuitBreakerConfig::new(1, 0, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        assert!(cb.allow_request().await);
     }
 }

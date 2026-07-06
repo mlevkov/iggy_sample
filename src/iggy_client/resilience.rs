@@ -234,10 +234,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn success_passes_through_and_records_breaker_success() {
         // Enter HalfOpen (success_threshold = 1) so record_success is
-        // observable: the single success must close the circuit. The breaker
-        // stamps opened_at with std Instant (not tokio's pausable clock), so
-        // a zero open_duration is what makes the Open->HalfOpen transition
-        // immediate and deterministic here.
+        // observable: the single success must close the circuit. Zero
+        // open_duration makes the Open->HalfOpen transition immediate.
         let breaker = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::ZERO));
         breaker.force_open().await;
         let reconnects = Arc::new(AtomicU32::new(0));

@@ -139,7 +139,9 @@ fn backoff_delay_ms(attempt: u32, base_ms: u64, max_ms: u64, jitter_unit: f64) -
 /// The client includes a circuit breaker that prevents request pile-up during outages:
 /// - **Closed** (normal): All requests pass through
 /// - **Open** (failing): Requests fail fast without attempting the operation
-/// - **Half-Open** (recovery): Limited requests allowed to test if service recovered
+/// - **Half-Open** (recovery): Probes limited to `success_threshold` tokens
+///   per `open_duration` window; excess requests fail fast (see
+///   `circuit_breaker` module docs for the token re-grant rules)
 ///
 /// # Performance Considerations
 ///
