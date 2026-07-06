@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use tracing::instrument;
 
@@ -14,12 +14,9 @@ use crate::validation::validate_resource_name;
 #[instrument(skip(state, timeout))]
 pub async fn list_streams(
     State(state): State<AppState>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
 ) -> AppResult<Json<Vec<StreamInfo>>> {
-    let streams = state
-        .iggy_scoped(timeout.map(|Extension(t)| t))
-        .list_streams()
-        .await?;
+    let streams = state.iggy_scoped(timeout).list_streams().await?;
 
     let stream_infos: Vec<StreamInfo> = streams
         .into_iter()
@@ -45,15 +42,12 @@ pub async fn list_streams(
 pub async fn get_stream(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
 ) -> AppResult<Json<StreamInfo>> {
     // Validate path parameter before use
     validate_resource_name(&name, "Stream")?;
 
-    let stream = state
-        .iggy_scoped(timeout.map(|Extension(t)| t))
-        .get_stream(&name)
-        .await?;
+    let stream = state.iggy_scoped(timeout).get_stream(&name).await?;
 
     let created_at =
         parse_timestamp_with_context(stream.created_at.as_micros() as i64, "stream", &stream.name);
@@ -72,13 +66,13 @@ pub async fn get_stream(
 #[instrument(skip(state, timeout, payload))]
 pub async fn create_stream(
     State(state): State<AppState>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
     Json(payload): Json<CreateStreamRequest>,
 ) -> AppResult<StatusCode> {
     validate_resource_name(&payload.name, "Stream")?;
 
     state
-        .iggy_scoped(timeout.map(|Extension(t)| t))
+        .iggy_scoped(timeout)
         .create_stream(&payload.name)
         .await?;
 
@@ -90,15 +84,12 @@ pub async fn create_stream(
 pub async fn delete_stream(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
 ) -> AppResult<StatusCode> {
     // Validate path parameter before use
     validate_resource_name(&name, "Stream")?;
 
-    state
-        .iggy_scoped(timeout.map(|Extension(t)| t))
-        .delete_stream(&name)
-        .await?;
+    state.iggy_scoped(timeout).delete_stream(&name).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

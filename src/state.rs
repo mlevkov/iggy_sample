@@ -147,7 +147,7 @@ impl AppState {
     /// Producer scoped to the request's effective timeout.
     pub fn producer_scoped(&self, timeout: Option<RequestTimeout>) -> ProducerService {
         match timeout {
-            Some(t) => self.producer.with_timeout(t.duration),
+            Some(t) => self.producer.with_timeout(t.duration()),
             None => self.producer.clone(),
         }
     }
@@ -155,7 +155,7 @@ impl AppState {
     /// Consumer scoped to the request's effective timeout.
     pub fn consumer_scoped(&self, timeout: Option<RequestTimeout>) -> ConsumerService {
         match timeout {
-            Some(t) => self.consumer.with_timeout(t.duration),
+            Some(t) => self.consumer.with_timeout(t.duration()),
             None => self.consumer.clone(),
         }
     }
@@ -163,7 +163,7 @@ impl AppState {
     /// Iggy client scoped to the request's effective timeout.
     pub fn iggy_scoped(&self, timeout: Option<RequestTimeout>) -> IggyClientWrapper {
         match timeout {
-            Some(t) => self.iggy_client.with_timeout(t.duration),
+            Some(t) => self.iggy_client.with_timeout(t.duration()),
             None => self.iggy_client.clone(),
         }
     }

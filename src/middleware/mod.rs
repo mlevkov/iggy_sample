@@ -36,5 +36,5 @@ pub use rate_limit::{RateLimitError, RateLimitLayer, TrustedProxyConfig};
 pub use request_id::RequestIdLayer;
 pub use timeout::{
     MAX_REQUEST_TIMEOUT_MS, MIN_REQUEST_TIMEOUT_MS, REQUEST_TIMEOUT_HEADER, RequestTimeout,
-    RequestTimeoutExt, extract_request_timeout,
+    extract_request_timeout,
 };

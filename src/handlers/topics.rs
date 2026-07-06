@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use tracing::instrument;
@@ -29,12 +29,12 @@ pub struct TopicPath {
 pub async fn list_topics(
     State(state): State<AppState>,
     Path(path): Path<StreamPath>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
 ) -> AppResult<Json<Vec<TopicInfo>>> {
     // Validate path parameter before use
     validate_resource_name(&path.stream, "Stream")?;
 
-    let client = state.iggy_scoped(timeout.map(|Extension(t)| t));
+    let client = state.iggy_scoped(timeout);
     let topics = client.list_topics(&path.stream).await?;
 
     let stream_details = client.get_stream(&path.stream).await?;
@@ -63,13 +63,13 @@ pub async fn list_topics(
 pub async fn get_topic(
     State(state): State<AppState>,
     Path(path): Path<TopicPath>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
 ) -> AppResult<Json<TopicInfo>> {
     // Validate path parameters before use
     validate_resource_name(&path.stream, "Stream")?;
     validate_resource_name(&path.topic, "Topic")?;
 
-    let client = state.iggy_scoped(timeout.map(|Extension(t)| t));
+    let client = state.iggy_scoped(timeout);
     let topic = client.get_topic(&path.stream, &path.topic).await?;
 
     let stream_details = client.get_stream(&path.stream).await?;
@@ -92,7 +92,7 @@ pub async fn get_topic(
 pub async fn create_topic(
     State(state): State<AppState>,
     Path(path): Path<StreamPath>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
     Json(payload): Json<CreateTopicRequest>,
 ) -> AppResult<StatusCode> {
     // Validate path parameter before use
@@ -102,7 +102,7 @@ pub async fn create_topic(
     validate_partition_count(payload.partitions, "Topic")?;
 
     state
-        .iggy_scoped(timeout.map(|Extension(t)| t))
+        .iggy_scoped(timeout)
         .create_topic(&path.stream, &payload.name, payload.partitions)
         .await?;
 
@@ -114,14 +114,14 @@ pub async fn create_topic(
 pub async fn delete_topic(
     State(state): State<AppState>,
     Path(path): Path<TopicPath>,
-    timeout: Option<Extension<RequestTimeout>>,
+    timeout: Option<RequestTimeout>,
 ) -> AppResult<StatusCode> {
     // Validate path parameters before use
     validate_resource_name(&path.stream, "Stream")?;
     validate_resource_name(&path.topic, "Topic")?;
 
     state
-        .iggy_scoped(timeout.map(|Extension(t)| t))
+        .iggy_scoped(timeout)
         .delete_topic(&path.stream, &path.topic)
         .await?;
 

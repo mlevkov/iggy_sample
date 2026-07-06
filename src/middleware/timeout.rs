@@ -10,16 +10,17 @@
 //! X-Request-Timeout: 5000  # 5 seconds in milliseconds
 //! ```
 //!
-//! Handlers extract the parsed value and scope their Iggy access to it:
+//! Handlers extract the parsed value (via the `OptionalFromRequestParts`
+//! impl below) and scope their Iggy access to it:
 //! ```rust,ignore
 //! async fn handler(
 //!     State(state): State<AppState>,
-//!     timeout: Option<Extension<RequestTimeout>>,
+//!     timeout: Option<RequestTimeout>,
 //! ) -> impl IntoResponse {
 //!     // Iggy operations bounded by the request deadline (clamped to the
 //!     // configured global OPERATION_TIMEOUT_SECS — clients may shorten,
 //!     // never extend).
-//!     let client = state.iggy_scoped(timeout.map(|Extension(t)| t));
+//!     let client = state.iggy_scoped(timeout);
 //!     client.list_streams().await
 //! }
 //! ```
@@ -43,15 +44,16 @@
 //! - Minimum and maximum timeout bounds are enforced to prevent abuse
 //! - The effective deadline is additionally clamped to the server's global
 //!   operation timeout — the header can never EXTEND server-side work
-//! - Invalid values are ignored (fall back to server default)
-//! - Zero or negative values are rejected
+//! - Invalid, zero, or out-of-range values are ignored: the request
+//!   proceeds under the global timeout (negative values never parse as
+//!   `u64` and are likewise ignored)
 
 use std::time::Duration;
 
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Minimum allowed request timeout (100ms).
 ///
@@ -70,13 +72,14 @@ pub const REQUEST_TIMEOUT_HEADER: &str = "x-request-timeout";
 
 /// Extracted request timeout from client header.
 ///
-/// This is stored in request extensions and can be extracted by handlers.
+/// Stored in request extensions by the middleware; handlers receive it via
+/// the `Option<RequestTimeout>` extractor. The field is private so
+/// [`RequestTimeout::from_millis`] is the only constructor — a value outside
+/// `[MIN_REQUEST_TIMEOUT_MS, MAX_REQUEST_TIMEOUT_MS]` is unrepresentable.
 #[derive(Debug, Clone, Copy)]
 pub struct RequestTimeout {
-    /// The timeout duration specified by the client.
-    pub duration: Duration,
-    /// The original value from the header (for logging).
-    pub original_ms: u64,
+    /// The timeout duration specified by the client (range-validated).
+    duration: Duration,
 }
 
 impl RequestTimeout {
@@ -89,8 +92,29 @@ impl RequestTimeout {
         }
         Some(Self {
             duration: Duration::from_millis(ms),
-            original_ms: ms,
         })
+    }
+
+    /// The client-requested timeout duration.
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+}
+
+/// Lets handlers declare `timeout: Option<RequestTimeout>` directly instead
+/// of unwrapping `Option<Extension<RequestTimeout>>` at every call site.
+/// Absence simply means the client sent no (valid) `X-Request-Timeout`.
+impl<S> axum::extract::OptionalFromRequestParts<S> for RequestTimeout
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(parts.extensions.get::<RequestTimeout>().copied())
     }
 }
 
@@ -119,7 +143,10 @@ pub async fn extract_request_timeout(mut request: Request, next: Next) -> Respon
                 );
             }
         } else {
-            debug!(
+            // warn: a malformed header is a client bug - the caller believes
+            // a deadline is in effect that is not (TD-2026-07-08 tracks
+            // echoing the effective deadline back to the client).
+            warn!(
                 value = value_str,
                 "Invalid X-Request-Timeout header value, ignoring"
             );
@@ -127,21 +154,6 @@ pub async fn extract_request_timeout(mut request: Request, next: Next) -> Respon
     }
 
     next.run(request).await
-}
-
-/// Extension trait for extracting request timeout from request extensions.
-pub trait RequestTimeoutExt {
-    /// Get the client-specified timeout, or fall back to the provided default.
-    fn effective_timeout(&self, default: Duration) -> Duration;
-}
-
-impl<B> RequestTimeoutExt for axum::http::Request<B> {
-    fn effective_timeout(&self, default: Duration) -> Duration {
-        self.extensions()
-            .get::<RequestTimeout>()
-            .map(|t| t.duration)
-            .unwrap_or(default)
-    }
 }
 
 #[cfg(test)]
@@ -152,15 +164,14 @@ mod tests {
     #[test]
     fn test_request_timeout_from_millis_valid() {
         let timeout = RequestTimeout::from_millis(5000).unwrap();
-        assert_eq!(timeout.duration, Duration::from_millis(5000));
-        assert_eq!(timeout.original_ms, 5000);
+        assert_eq!(timeout.duration(), Duration::from_millis(5000));
     }
 
     #[test]
     fn test_request_timeout_from_millis_minimum() {
         let timeout = RequestTimeout::from_millis(MIN_REQUEST_TIMEOUT_MS).unwrap();
         assert_eq!(
-            timeout.duration,
+            timeout.duration(),
             Duration::from_millis(MIN_REQUEST_TIMEOUT_MS)
         );
     }
@@ -169,7 +180,7 @@ mod tests {
     fn test_request_timeout_from_millis_maximum() {
         let timeout = RequestTimeout::from_millis(MAX_REQUEST_TIMEOUT_MS).unwrap();
         assert_eq!(
-            timeout.duration,
+            timeout.duration(),
             Duration::from_millis(MAX_REQUEST_TIMEOUT_MS)
         );
     }
