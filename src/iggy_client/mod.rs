@@ -58,6 +58,7 @@ mod circuit_breaker;
 mod connection;
 mod helpers;
 mod params;
+mod resilience;
 mod scopeguard;
 
 use std::str::FromStr;
@@ -453,151 +454,26 @@ impl IggyClientWrapper {
 
     /// Execute an operation with automatic reconnection on connection failure.
     ///
-    /// This is the core resilience mechanism. Features:
-    /// - **Circuit Breaker**: Fail fast when service is known to be unavailable
-    /// - **Timeout**: All operations are bounded by `config.operation_timeout`
-    /// - **Retry**: On connection failure, attempts reconnect and retries once
-    ///
-    /// # Worst-case latency
-    ///
-    /// A request on the reconnect path can take up to 3x the operation
-    /// timeout (first attempt + bounded reconnect + retry) - bounded, but
-    /// well above the typical single-operation expectation.
-    ///
-    /// # Breaker false positives
-    ///
-    /// Timeouts count as breaker failures because the SDK's internal
-    /// reconnection swallows outages into blocking retries (a timeout is
-    /// often the only signal). The cost: N consecutive merely-SLOW
-    /// operations (including the background stats refresher's) can open the
-    /// circuit without a real outage. Failures must be consecutive - any
-    /// success resets the count - which bounds the risk.
-    ///
-    /// # Circuit Breaker Integration
-    ///
-    /// Before attempting the operation, the circuit breaker is checked:
-    /// - If **Open**: Returns `CircuitOpen` error immediately (fail fast)
-    /// - If **Closed** or **HalfOpen**: Proceeds with the operation
-    ///
-    /// After the operation, the circuit breaker is updated:
-    /// - Success: Records success (may close circuit if in HalfOpen)
-    /// - Failure: Records failure (may open circuit if threshold exceeded)
-    ///
-    /// # Timeout vs Disconnection
-    ///
-    /// The function differentiates between:
-    /// - **Connection errors**: Trigger reconnection and retry
-    /// - **Timeouts**: Only trigger reconnection if connection state shows disconnected;
-    ///   otherwise return timeout error (slow operation != broken connection)
-    ///
-    /// This prevents unnecessary reconnection attempts under high latency conditions.
+    /// This is the core resilience mechanism: circuit-breaker gate, timeout
+    /// bound, and reconnect-plus-single-retry on classified connection
+    /// errors. The composition itself lives in [`resilience::run_resilient`]
+    /// (see its module docs for the full semantics, worst-case latency, and
+    /// breaker false-positive analysis); this method binds it to the
+    /// wrapper's breaker, configured operation timeout, tracked connection
+    /// state, and bounded reconnect session.
     async fn with_reconnect<F, Fut, T>(&self, operation: F) -> AppResult<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = AppResult<T>>,
     {
-        // Check circuit breaker before attempting operation
-        if !self.circuit_breaker.allow_request().await {
-            let state = self.circuit_breaker.state().await;
-            return Err(AppError::CircuitOpen(format!(
-                "Circuit breaker is {} - service temporarily unavailable",
-                state
-            )));
-        }
-
-        let timeout_duration = self.config.operation_timeout;
-
-        // First attempt with timeout
-        let result = tokio::time::timeout(timeout_duration, operation()).await;
-
-        match result {
-            Ok(Ok(value)) => {
-                self.circuit_breaker.record_success().await;
-                Ok(value)
-            }
-            Ok(Err(e)) if Self::is_connection_error(&e) => {
-                self.circuit_breaker.record_failure().await;
-                warn!(error = %e, "Operation failed due to connection error, attempting reconnect");
-                self.reconnect_bounded().await?;
-                self.retry_once(&operation).await
-            }
-            Ok(Err(e)) => {
-                // Non-connection error - don't record as circuit breaker failure
-                Err(e)
-            }
-            Err(_) => {
-                // Timeout on first attempt. The SDK's internal transport
-                // reconnection swallows most mid-operation connection failures
-                // into blocking retries, so a timeout is often the only outage
-                // signal we get - record it as a circuit-breaker failure.
-                self.circuit_breaker.record_failure().await;
-
-                // Only reconnect if we have evidence the connection is
-                // actually lost (the background health check drives this
-                // flag via live pings). A timeout alone could just be a slow
-                // operation.
-                if !self.state.is_connected() {
-                    warn!(
-                        timeout = ?timeout_duration,
-                        "Operation timed out and connection state is disconnected, attempting reconnect"
-                    );
-                    self.reconnect_bounded().await?;
-                    self.retry_once(&operation).await
-                } else {
-                    debug!(
-                        timeout = ?timeout_duration,
-                        "Operation timed out but connection state is healthy, not reconnecting"
-                    );
-                    Err(AppError::OperationTimeout(format!(
-                        "Operation timed out after {:?}",
-                        timeout_duration
-                    )))
-                }
-            }
-        }
-    }
-
-    /// Single post-reconnect retry with timeout and circuit-breaker
-    /// bookkeeping. Shared by both reconnect paths of [`Self::with_reconnect`].
-    async fn retry_once<F, Fut, T>(&self, operation: &F) -> AppResult<T>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = AppResult<T>>,
-    {
-        let timeout_duration = self.config.operation_timeout;
-        match tokio::time::timeout(timeout_duration, operation()).await {
-            Ok(Ok(value)) => {
-                self.circuit_breaker.record_success().await;
-                Ok(value)
-            }
-            Ok(Err(e)) => {
-                if Self::is_connection_error(&e) {
-                    self.circuit_breaker.record_failure().await;
-                }
-                Err(e)
-            }
-            Err(_) => {
-                self.circuit_breaker.record_failure().await;
-                Err(AppError::OperationTimeout(format!(
-                    "Operation timed out after {:?} on retry",
-                    timeout_duration
-                )))
-            }
-        }
-    }
-
-    /// Check if an error is a connection-related error that warrants reconnection.
-    ///
-    /// Uses explicit pattern matching on error variants rather than string matching,
-    /// which is more reliable and maintainable. Any error indicating connection
-    /// issues should trigger a reconnection attempt.
-    fn is_connection_error(error: &AppError) -> bool {
-        matches!(
-            error,
-            AppError::ConnectionFailed(_)
-                | AppError::Disconnected(_)
-                | AppError::ConnectionReset(_)
+        resilience::run_resilient(
+            &self.circuit_breaker,
+            self.config.operation_timeout,
+            || self.state.is_connected(),
+            || self.reconnect_bounded(),
+            operation,
         )
+        .await
     }
 
     // =========================================================================
@@ -1196,46 +1072,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_is_connection_error_connection_failed() {
-        let error = AppError::ConnectionFailed("test".to_string());
-        assert!(IggyClientWrapper::is_connection_error(&error));
-    }
-
-    #[test]
-    fn test_is_connection_error_disconnected() {
-        let error = AppError::Disconnected("connection lost".to_string());
-        assert!(IggyClientWrapper::is_connection_error(&error));
-    }
-
-    #[test]
-    fn test_is_connection_error_connection_reset() {
-        let error = AppError::ConnectionReset("reset by peer".to_string());
-        assert!(IggyClientWrapper::is_connection_error(&error));
-    }
-
-    #[test]
-    fn test_is_connection_error_unrelated_errors() {
-        // These errors should NOT trigger reconnection
-        let test_cases = vec![
-            AppError::BadRequest("invalid input".to_string()),
-            AppError::NotFound("resource missing".to_string()),
-            AppError::Internal("internal error".to_string()),
-            AppError::StreamError("stream issue".to_string()),
-            AppError::TopicError("topic issue".to_string()),
-            AppError::SendError("send failed".to_string()),
-            AppError::PollError("poll failed".to_string()),
-            AppError::ConfigError("config issue".to_string()),
-            AppError::OperationTimeout("timed out".to_string()),
-            AppError::CircuitOpen("circuit open".to_string()),
-        ];
-
-        for error in test_cases {
-            assert!(
-                !IggyClientWrapper::is_connection_error(&error),
-                "Error {:?} should not be treated as connection error",
-                error
-            );
-        }
-    }
 }
