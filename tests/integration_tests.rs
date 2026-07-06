@@ -1000,12 +1000,13 @@ async fn test_request_timeout_header_is_honored_end_to_end() {
         .expect("Send with timeout header failed");
     assert_eq!(response.status(), 201);
 
-    // Valid-but-minimum header on a poll: 100ms is plenty against a local
-    // container, and exercises the scoped consumer path.
+    // Short-but-CI-safe header on a poll exercises the scoped consumer
+    // path (the literal 100ms minimum invites flakes on saturated hosts;
+    // the parse bounds are unit-tested in the middleware).
     let response = fixture
         .client
         .get(fixture.url("/messages?partition_id=0&count=1&offset=0"))
-        .header("X-Request-Timeout", "100")
+        .header("X-Request-Timeout", "1000")
         .send()
         .await
         .expect("Poll with timeout header failed");

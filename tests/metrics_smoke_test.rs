@@ -37,10 +37,16 @@ async fn init_metrics_serves_recorded_counter_over_http() {
     metrics::set_connection_status(true);
 
     // Scrape /metrics, retrying briefly while the listener task comes up.
+    // The per-request timeout keeps an accepted-but-unanswered connection
+    // from hanging the test past the outer deadline.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("http client");
     let url = format!("http://{addr}/metrics");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let body = loop {
-        match reqwest::get(&url).await {
+        match client.get(&url).send().await {
             Ok(response) => {
                 assert!(
                     response.status().is_success(),

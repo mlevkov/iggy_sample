@@ -20,15 +20,16 @@
 //! │       │ │                                    ▼                    │
 //! │       │ │                            ┌───────────────┐            │
 //! │       │ └─────────────────────────── │   HalfOpen    │            │
-//! │       │              success         │ (token-limited│            │
-//! │       │                              │    probes)    │            │
+//! │       │    success_threshold         │ (token-limited│            │
+//! │       │    consecutive successes     │    probes)    │            │
 //! │       │                              └───────┬───────┘            │
 //! │       │                                      │                    │
 //! │       │                                      │ failure            │
 //! │       │                                      ▼                    │
 //! │       │                              ┌─────────┐                  │
 //! │       └───────────────────────────── │  Open   │ ◄────────────────┘
-//! │                    reset             └─────────┘                  │
+//! │         (after open_duration +       └─────────┘                  │
+//! │          successful probes)                                       │
 //! └────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -53,18 +54,24 @@
 //! let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
 //!
 //! // Check if request should be allowed
-//! if !cb.allow_request() {
+//! if !cb.allow_request().await {
 //!     return Err(AppError::CircuitOpen);
 //! }
 //!
-//! // Execute the operation
+//! // Execute the operation. Only CONNECTION-CLASS outcomes feed the
+//! // breaker (see `resilience::run_resilient` for the real composition):
 //! match operation().await {
 //!     Ok(result) => {
-//!         cb.record_success();
+//!         cb.record_success().await;
 //!         Ok(result)
 //!     }
+//!     Err(e) if is_connection_error(&e) => {
+//!         cb.record_failure().await;
+//!         Err(e)
+//!     }
+//!     // Other errors record neither; release any half-open probe token.
 //!     Err(e) => {
-//!         cb.record_failure();
+//!         cb.release_probe().await;
 //!         Err(e)
 //!     }
 //! }
@@ -224,9 +231,7 @@ impl CircuitBreaker {
                     if let Some(opened_at) = state.opened_at
                         && opened_at.elapsed() < self.config.open_duration
                     {
-                        self.requests_rejected.fetch_add(1, Ordering::Relaxed);
-                        crate::metrics::record_circuit_breaker_rejection();
-                        return false;
+                        return self.reject_request("open");
                     }
                     // Timeout expired - need to transition to half-open
                 }
@@ -246,18 +251,16 @@ impl CircuitBreaker {
                     state.state = CircuitState::HalfOpen;
                     state.consecutive_successes = 0;
                     self.grant_probe_tokens(&mut state);
+                    info!(
+                        probes = state.half_open_probes_remaining,
+                        "Circuit breaker transitioning from Open to HalfOpen"
+                    );
                     // The transitioning caller takes the first probe token.
                     state.half_open_probes_remaining -= 1;
                     crate::metrics::set_circuit_breaker_state(1);
-                    info!(
-                        probes = state.half_open_probes_remaining + 1,
-                        "Circuit breaker transitioning from Open to HalfOpen"
-                    );
                     return true;
                 }
-                self.requests_rejected.fetch_add(1, Ordering::Relaxed);
-                crate::metrics::record_circuit_breaker_rejection();
-                false
+                self.reject_request("open")
             }
             CircuitState::HalfOpen => {
                 if state.half_open_probes_remaining == 0 {
@@ -267,12 +270,15 @@ impl CircuitBreaker {
                         .half_open_granted_at
                         .is_none_or(|granted| granted.elapsed() >= self.config.open_duration);
                     if !window_expired {
-                        self.requests_rejected.fetch_add(1, Ordering::Relaxed);
-                        crate::metrics::record_circuit_breaker_rejection();
-                        return false;
+                        debug!(
+                            "Circuit breaker rejected request: half-open probe budget exhausted"
+                        );
+                        return self.reject_request("half_open");
                     }
+                    // info: a full probe window elapsed without a recorded
+                    // outcome - recovery is stalling, not progressing.
+                    info!("Circuit breaker re-granted half-open probe tokens");
                     self.grant_probe_tokens(&mut state);
-                    debug!("Circuit breaker re-granted half-open probe tokens");
                 }
                 state.half_open_probes_remaining -= 1;
                 true
@@ -288,6 +294,36 @@ impl CircuitBreaker {
     fn grant_probe_tokens(&self, state: &mut CircuitBreakerState) {
         state.half_open_probes_remaining = self.config.success_threshold.max(1);
         state.half_open_granted_at = Some(Instant::now());
+    }
+
+    /// Record a rejection (counter + state-labeled metric) and return `false`.
+    ///
+    /// Single site for the bookkeeping so no rejection path can forget the
+    /// metrics half; the label lets operators distinguish "circuit is open"
+    /// from "half-open probe budget exhausted" — materially different
+    /// situations.
+    fn reject_request(&self, state_label: &'static str) -> bool {
+        self.requests_rejected.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::record_circuit_breaker_rejection(state_label);
+        false
+    }
+
+    /// Hand back a half-open probe token whose outcome was deliberately not
+    /// recorded (non-connection errors touch neither breaker counter).
+    ///
+    /// Without this, probes completing with e.g. `NotFound` — a full
+    /// round-trip proving transport health — would permanently consume
+    /// tokens and starve recovery until the re-grant window. No-op outside
+    /// HalfOpen; capped at the granted budget.
+    pub(super) async fn release_probe(&self) {
+        let mut state = self.state.write().await;
+        if state.state == CircuitState::HalfOpen {
+            let cap = self.config.success_threshold.max(1);
+            if state.half_open_probes_remaining < cap {
+                state.half_open_probes_remaining += 1;
+                debug!("Circuit breaker released a half-open probe token (outcome not recorded)");
+            }
+        }
     }
 
     /// Record a successful operation.
@@ -318,8 +354,15 @@ impl CircuitBreaker {
                 }
             }
             CircuitState::Open => {
-                // Shouldn't happen - requests are rejected in Open state
-                warn!("Unexpected success recorded in Open state");
+                // Reachable through legitimate interleavings: a half-open
+                // probe (or its post-reconnect retry, which bypasses the
+                // gate) can complete successfully after another probe's
+                // failure reopened the circuit. The success is deliberately
+                // discarded - recovery restarts from the next half-open
+                // window's probes.
+                debug!(
+                    "Success recorded while Open (in-flight probe finished after reopen); discarded"
+                );
             }
         }
     }
@@ -385,14 +428,23 @@ impl CircuitBreaker {
         state.opened_at = None;
         state.consecutive_failures = 0;
         state.consecutive_successes = 0;
+        // Hygiene: half-open probe fields are re-granted on every HalfOpen
+        // entry, but stale values should not outlive a manual reset.
+        state.half_open_probes_remaining = 0;
+        state.half_open_granted_at = None;
         crate::metrics::set_circuit_breaker_state(0);
         info!("Circuit breaker forcibly closed");
     }
 
     /// Force the circuit to open (for testing or manual intervention).
+    ///
+    /// A no-op when already Open, preserving the no-refresh policy for
+    /// `opened_at` (see `record_failure`) and keeping `times_opened` honest.
     pub async fn force_open(&self) {
         let mut state = self.state.write().await;
-        self.open_now(&mut state);
+        if state.state != CircuitState::Open {
+            self.open_now(&mut state);
+        }
         warn!("Circuit breaker forcibly opened");
     }
 
@@ -455,7 +507,7 @@ mod tests {
         assert_eq!(cb.requests_rejected(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_circuit_transitions_to_half_open() {
         let config = CircuitBreakerConfig::new(1, 1, Duration::from_millis(10));
         let cb = CircuitBreaker::new(config);
@@ -463,22 +515,22 @@ mod tests {
         cb.record_failure().await;
         assert_eq!(cb.state().await, CircuitState::Open);
 
-        // Wait for timeout
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Advance the paused clock past the open window
+        tokio::time::advance(Duration::from_millis(20)).await;
 
         // Should allow request and transition to half-open
         assert!(cb.allow_request().await);
         assert_eq!(cb.state().await, CircuitState::HalfOpen);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_circuit_closes_after_success_in_half_open() {
         let config = CircuitBreakerConfig::new(1, 2, Duration::from_millis(10));
         let cb = CircuitBreaker::new(config);
 
         // Open the circuit
         cb.record_failure().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::advance(Duration::from_millis(20)).await;
 
         // Transition to half-open
         assert!(cb.allow_request().await);
@@ -492,14 +544,14 @@ mod tests {
         assert_eq!(cb.state().await, CircuitState::Closed);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_circuit_reopens_on_failure_in_half_open() {
         let config = CircuitBreakerConfig::new(1, 2, Duration::from_millis(10));
         let cb = CircuitBreaker::new(config);
 
         // Open the circuit
         cb.record_failure().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::advance(Duration::from_millis(20)).await;
 
         // Transition to half-open
         assert!(cb.allow_request().await);
@@ -593,8 +645,13 @@ mod tests {
         assert!(cb.allow_request().await);
         assert!(!cb.allow_request().await);
 
+        // Just below the window boundary the budget must stay exhausted -
+        // an unconditional re-grant would defeat the probe cap entirely.
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(!cb.allow_request().await);
+
         // The re-grant window keeps the breaker from wedging permanently.
-        tokio::time::advance(Duration::from_secs(30)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
         assert!(cb.allow_request().await);
         assert_eq!(cb.state().await, CircuitState::HalfOpen);
     }
@@ -648,5 +705,68 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
 
         assert!(cb.allow_request().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_half_open_concurrent_probes_admit_exactly_the_budget() {
+        // Two callers race allow_request at the Open->HalfOpen boundary with
+        // a single-token budget: exactly one may pass. On the deterministic
+        // paused single-thread runtime, join! interleaves both futures
+        // through the same write-lock protocol the production path uses.
+        let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let (a, b) = tokio::join!(cb.allow_request(), cb.allow_request());
+        assert!(
+            a ^ b,
+            "exactly one of two racing probes may pass, got ({a}, {b})"
+        );
+        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_release_probe_returns_token_capped_at_budget() {
+        let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        // No-op while Closed.
+        cb.release_probe().await;
+        assert!(cb.allow_request().await);
+
+        cb.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        // Consume the only token, release it, and it must admit again.
+        assert!(cb.allow_request().await);
+        assert!(!cb.allow_request().await);
+        cb.release_probe().await;
+        assert!(cb.allow_request().await);
+
+        // Releases never exceed the granted budget (single token here).
+        cb.release_probe().await;
+        cb.release_probe().await;
+        assert!(cb.allow_request().await);
+        assert!(
+            !cb.allow_request().await,
+            "budget cap must hold after over-release"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_force_open_when_already_open_does_not_double_count() {
+        let cb = CircuitBreaker::default();
+
+        cb.force_open().await;
+        cb.force_open().await;
+
+        assert_eq!(cb.state().await, CircuitState::Open);
+        assert_eq!(
+            cb.times_opened(),
+            1,
+            "repeat force_open must not inflate the counter"
+        );
     }
 }

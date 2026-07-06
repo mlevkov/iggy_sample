@@ -172,12 +172,26 @@ pub struct IggyClientWrapper {
     /// The underlying Iggy client (behind RwLock for reconnection)
     /// See struct-level docs for performance considerations.
     client: Arc<RwLock<IggyClient>>,
-    /// Application configuration
-    config: Config,
+    /// Application configuration (shared; never mutated after construction)
+    config: Arc<Config>,
+    /// Deadline applied to operations issued through THIS view.
+    ///
+    /// Equals `config.operation_timeout` on the root wrapper; request-scoped
+    /// views created by [`Self::with_timeout`] carry a shorter value. Kept
+    /// separate from `config` so a per-request deadline can never leak into
+    /// process-global machinery (reconnect sessions, health probes), which
+    /// always reads `config.operation_timeout`.
+    op_deadline: Duration,
     /// Connection state tracking
     state: Arc<ConnectionState>,
     /// Circuit breaker for fail-fast during outages
     circuit_breaker: Arc<CircuitBreaker>,
+}
+
+/// Clamp a requested per-request deadline to the configured global timeout:
+/// a client may SHORTEN the deadline, never extend it.
+fn clamp_deadline(requested: Duration, global: Duration) -> Duration {
+    requested.min(global)
 }
 
 impl IggyClientWrapper {
@@ -210,7 +224,8 @@ impl IggyClientWrapper {
 
         let wrapper = Self {
             client: Arc::new(RwLock::new(client)),
-            config,
+            op_deadline: config.operation_timeout,
+            config: Arc::new(config),
             state: Arc::new(ConnectionState::new()),
             circuit_breaker: Arc::new(CircuitBreaker::new(circuit_breaker_config)),
         };
@@ -376,11 +391,13 @@ impl IggyClientWrapper {
             match IggyClient::from_connection_string(&self.config.iggy_connection_string) {
                 Ok(new_client) => {
                     // Bound the connect: the SDK's internal reconnection would
-                    // otherwise retry inside connect() indefinitely. The bound
-                    // is HALF the operation timeout so a failed attempt exits
-                    // through the cleanup arms below before reconnect_bounded's
-                    // outer deadline aborts the whole session (an abort drops
-                    // the client mid-connect with no chance to shut it down).
+                    // otherwise retry inside connect() indefinitely. HALF the
+                    // GLOBAL operation timeout (never a request-scoped
+                    // deadline — see `with_timeout`) so that when a caller is
+                    // still waiting on this session, a failed attempt exits
+                    // through the cleanup arms below and reports before the
+                    // caller's own deadline elapses, instead of the caller
+                    // timing out mid-attempt and reading a stale outcome.
                     let attempt_timeout = self.config.operation_timeout / 2;
                     match tokio::time::timeout(attempt_timeout, new_client.connect()).await {
                         Ok(Ok(())) => {}
@@ -425,10 +442,10 @@ impl IggyClientWrapper {
         }
     }
 
-    /// Reconnect, bounded by the operation timeout from the caller's view.
+    /// Reconnect, bounded by this view's deadline from the caller's side.
     ///
     /// The session runs in a SPAWNED task and the caller awaits its
-    /// `JoinHandle` under the timeout. This is a cancellation-safety
+    /// `JoinHandle` under the deadline. This is a cancellation-safety
     /// requirement, not a style choice: dropping the reconnect future at
     /// its commit-point awaits (between `connect()` succeeding and the
     /// swap/shutdown completing) would leak a fully-connected client whose
@@ -439,8 +456,13 @@ impl IggyClientWrapper {
     /// keeps running in the background and completes (or fails) cleanly;
     /// the caller just reports the timeout, and waiters on a later attempt
     /// join the still-running session as followers.
+    ///
+    /// Only the caller's WAIT uses the (possibly request-scoped)
+    /// `op_deadline`; the session itself always runs at the global
+    /// `config.operation_timeout` (see `reconnect`), so a short-deadline
+    /// request can never cripple the shared reconnect session.
     async fn reconnect_bounded(&self) -> AppResult<()> {
-        let timeout = self.config.operation_timeout;
+        let timeout = self.op_deadline;
         let this = self.clone();
         let session = tokio::spawn(async move { this.reconnect().await });
 
@@ -463,16 +485,23 @@ impl IggyClientWrapper {
     /// errors. The composition itself lives in [`resilience::run_resilient`]
     /// (see its module docs for the full semantics, worst-case latency, and
     /// breaker false-positive analysis); this method binds it to the
-    /// wrapper's breaker, configured operation timeout, tracked connection
-    /// state, and bounded reconnect session.
+    /// wrapper's breaker, this view's deadline, tracked connection state,
+    /// and bounded reconnect session.
+    ///
+    /// A timeout counts as a circuit-breaker failure only when this view
+    /// runs at the global deadline: a client-shortened deadline expiring
+    /// says nothing about an outage, and letting it feed the shared breaker
+    /// would let one client open the circuit for everyone.
     async fn with_reconnect<F, Fut, T>(&self, operation: F) -> AppResult<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = AppResult<T>>,
     {
+        let timeout_is_outage_signal = self.op_deadline >= self.config.operation_timeout;
         resilience::run_resilient(
             &self.circuit_breaker,
-            self.config.operation_timeout,
+            self.op_deadline,
+            timeout_is_outage_signal,
             || self.state.is_connected(),
             || self.reconnect_bounded(),
             operation,
@@ -995,16 +1024,20 @@ impl IggyClientWrapper {
     /// bound is clamped to the configured global timeout — a client may
     /// SHORTEN the deadline, never extend it.
     ///
-    /// All `Arc`'d internals (SDK client, connection state, circuit
-    /// breaker) are shared with the parent, so breaker bookkeeping and
-    /// reconnection coordination stay global; only the deadline changes.
-    /// A reconnect session triggered under a scoped view has its caller
-    /// wait bounded by the same shortened deadline (the session itself
-    /// continues in the background — see `reconnect_bounded`).
+    /// All `Arc`'d internals (SDK client, config, connection state, circuit
+    /// breaker) are shared with the parent; the scoped view carries only a
+    /// different `op_deadline`, so the clone is cheap and process-global
+    /// machinery is untouched: a reconnect session triggered under a scoped
+    /// view has its caller wait bounded by the shortened deadline, but the
+    /// session itself (and health probes) always run at the global
+    /// `config.operation_timeout`. Timeouts observed under a shortened
+    /// deadline are NOT recorded as circuit-breaker failures (see
+    /// `with_reconnect`) — a client-chosen deadline expiring is not an
+    /// outage signal.
     #[must_use]
     pub fn with_timeout(&self, timeout: Duration) -> Self {
         let mut scoped = self.clone();
-        scoped.config.operation_timeout = timeout.min(self.config.operation_timeout);
+        scoped.op_deadline = clamp_deadline(timeout, self.config.operation_timeout);
         scoped
     }
 
@@ -1032,6 +1065,29 @@ impl IggyClientWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_clamp_deadline_shortens() {
+        // A client may shorten the deadline below the global bound.
+        assert_eq!(
+            clamp_deadline(Duration::from_millis(100), Duration::from_secs(30)),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn test_clamp_deadline_never_extends() {
+        // TD-2026-07-04 security property: the header (max 5 min) can never
+        // extend server-side work beyond the global operation timeout.
+        assert_eq!(
+            clamp_deadline(Duration::from_secs(300), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            clamp_deadline(Duration::from_secs(30), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
 
     #[test]
     fn test_backoff_first_attempt_is_base_delay() {

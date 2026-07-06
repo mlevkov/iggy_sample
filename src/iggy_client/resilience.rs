@@ -13,13 +13,31 @@
 //! 2. **First attempt**, bounded by `timeout`.
 //! 3. **Classified connection error** → record breaker failure, run the
 //!    `reconnect` step, then retry the operation exactly once.
-//! 4. **Non-connection error** → returned as-is; the breaker is NOT touched
-//!    (bad requests must not open the circuit).
-//! 5. **Timeout** → recorded as a breaker failure (the SDK's internal
-//!    transport reconnection swallows most outages into blocking retries, so
-//!    a timeout is often the only outage signal). Reconnect + single retry
-//!    happen only if `is_connected` reports the connection as lost — a
-//!    timeout alone could just be a slow operation.
+//! 4. **Non-connection error** → returned as-is; the breaker records
+//!    neither success nor failure (bad requests must not open the circuit),
+//!    but any half-open probe token the request consumed is RELEASED so an
+//!    unrecorded outcome cannot starve recovery (see
+//!    `CircuitBreaker::release_probe`).
+//! 5. **Timeout** → recorded as a breaker failure only when
+//!    `timeout_is_outage_signal` is true, i.e. the deadline is the global
+//!    operation timeout (the SDK's internal transport reconnection swallows
+//!    most outages into blocking retries, so such a timeout is often the
+//!    only outage signal). A client-shortened `X-Request-Timeout` deadline
+//!    expiring says nothing about an outage and must not feed the shared
+//!    breaker — otherwise one client could open the circuit for everyone.
+//!    Reconnect + single retry happen only if `is_connected` reports the
+//!    connection as lost — a timeout alone could just be a slow operation.
+//!
+//! # Retry and the breaker gate
+//!
+//! The single post-reconnect retry deliberately does NOT re-pass the
+//! breaker gate: a request whose reconnect just succeeded gets its one
+//! retry even if the first attempt's recorded failure opened the circuit.
+//! In half-open this means one probe token can cover up to two server
+//! operations (attempt + retry); the retry's outcome is still recorded, so
+//! the breaker converges on real evidence. A retry success that lands after
+//! another probe's failure reopened the circuit is discarded (see
+//! `CircuitBreaker::record_success`).
 //!
 //! # Worst-case latency
 //!
@@ -59,6 +77,8 @@ pub(super) fn is_connection_error(error: &AppError) -> bool {
 ///
 /// - `breaker` — gates the request and records the outcome
 /// - `timeout` — per-attempt bound (both the first attempt and the retry)
+/// - `timeout_is_outage_signal` — whether an expired `timeout` may be
+///   recorded as a breaker failure (false for client-shortened deadlines)
 /// - `is_connected` — consulted only on the timeout branch, to distinguish
 ///   "slow operation" from "lost connection"
 /// - `reconnect` — the bounded reconnect step; invoked at most once
@@ -66,6 +86,7 @@ pub(super) fn is_connection_error(error: &AppError) -> bool {
 pub(super) async fn run_resilient<T, F, Fut, C, R, RFut>(
     breaker: &CircuitBreaker,
     timeout: Duration,
+    timeout_is_outage_signal: bool,
     is_connected: C,
     reconnect: R,
     operation: F,
@@ -79,9 +100,12 @@ where
 {
     // Check circuit breaker before attempting operation
     if !breaker.allow_request().await {
+        // The state is re-read after the rejection, so under a concurrent
+        // transition it reports the CURRENT state, not necessarily the one
+        // that rejected the request.
         let state = breaker.state().await;
         return Err(AppError::CircuitOpen(format!(
-            "Circuit breaker is {} - service temporarily unavailable",
+            "Circuit breaker rejected the request (current state: {}) - service temporarily unavailable",
             state
         )));
     }
@@ -96,18 +120,35 @@ where
             breaker.record_failure().await;
             warn!(error = %e, "Operation failed due to connection error, attempting reconnect");
             reconnect().await?;
-            retry_once(breaker, timeout, &operation).await
+            retry_once(breaker, timeout, timeout_is_outage_signal, &operation).await
         }
         Ok(Err(e)) => {
-            // Non-connection error - don't record as circuit breaker failure
+            // Non-connection error - record neither success nor failure,
+            // but hand back any half-open probe token this request consumed
+            // so an unrecorded outcome cannot starve recovery.
+            breaker.release_probe().await;
             Err(e)
         }
         Err(_) => {
             // Timeout on first attempt. The SDK's internal transport
             // reconnection swallows most mid-operation connection failures
-            // into blocking retries, so a timeout is often the only outage
-            // signal we get - record it as a circuit-breaker failure.
-            breaker.record_failure().await;
+            // into blocking retries, so a GLOBAL-deadline timeout is often
+            // the only outage signal we get - record it as a breaker
+            // failure. A client-shortened deadline expiring is not outage
+            // evidence; hand back any consumed probe token instead.
+            if timeout_is_outage_signal {
+                breaker.record_failure().await;
+                warn!(
+                    timeout = ?timeout,
+                    "Operation timed out at the global deadline (recorded as circuit-breaker failure)"
+                );
+            } else {
+                breaker.release_probe().await;
+                debug!(
+                    timeout = ?timeout,
+                    "Operation timed out at a client-scoped deadline (not a breaker failure)"
+                );
+            }
 
             // Only reconnect if we have evidence the connection is actually
             // lost (the background health check drives this flag via live
@@ -118,7 +159,7 @@ where
                     "Operation timed out and connection state is disconnected, attempting reconnect"
                 );
                 reconnect().await?;
-                retry_once(breaker, timeout, &operation).await
+                retry_once(breaker, timeout, timeout_is_outage_signal, &operation).await
             } else {
                 debug!(
                     timeout = ?timeout,
@@ -134,10 +175,13 @@ where
 }
 
 /// Single post-reconnect retry with timeout and circuit-breaker bookkeeping.
-/// Shared by both reconnect paths of [`run_resilient`].
+/// Shared by both reconnect paths of [`run_resilient`]. Deliberately does
+/// not re-pass the breaker gate (see module docs, "Retry and the breaker
+/// gate").
 async fn retry_once<T, F, Fut>(
     breaker: &CircuitBreaker,
     timeout: Duration,
+    timeout_is_outage_signal: bool,
     operation: &F,
 ) -> AppResult<T>
 where
@@ -152,11 +196,18 @@ where
         Ok(Err(e)) => {
             if is_connection_error(&e) {
                 breaker.record_failure().await;
+            } else {
+                // Unrecorded outcome: hand back any consumed probe token.
+                breaker.release_probe().await;
             }
             Err(e)
         }
         Err(_) => {
-            breaker.record_failure().await;
+            if timeout_is_outage_signal {
+                breaker.record_failure().await;
+            } else {
+                breaker.release_probe().await;
+            }
             Err(AppError::OperationTimeout(format!(
                 "Operation timed out after {:?} on retry",
                 timeout
@@ -211,6 +262,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(&reconnects, Ok(())),
             move || {
@@ -241,6 +293,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(&reconnects, Ok(())),
             || async { Ok(42) },
@@ -260,6 +313,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true, // connected: slow operation, not an outage
             fake_reconnect(&reconnects, Ok(())),
             || async { std::future::pending().await },
@@ -282,6 +336,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || false, // health checks say the connection is lost
             fake_reconnect(&reconnects, Ok(())),
             move || {
@@ -312,6 +367,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(&reconnects, Ok(())),
             move || {
@@ -336,7 +392,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn connection_error_on_retry_does_not_loop() {
-        let breaker = breaker_with(5);
+        // Threshold 2: the first-attempt and retry connection errors are the
+        // two consecutive recorded failures - the retry's record_failure is
+        // load-bearing (the circuit must end Open).
+        let breaker = breaker_with(2);
         let calls = Arc::new(AtomicU32::new(0));
         let reconnects = Arc::new(AtomicU32::new(0));
 
@@ -344,6 +403,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(&reconnects, Ok(())),
             move || {
@@ -359,6 +419,7 @@ mod tests {
         assert!(matches!(result, Err(AppError::ConnectionFailed(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "single retry, no loop");
         assert_eq!(reconnects.load(Ordering::SeqCst), 1, "single reconnect");
+        assert_eq!(breaker.state().await, CircuitState::Open);
     }
 
     #[tokio::test(start_paused = true)]
@@ -373,6 +434,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(&reconnects, Ok(())),
             move || {
@@ -401,6 +463,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(
                 &reconnects,
@@ -439,6 +502,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(&reconnects, Ok(())),
             move || {
@@ -472,6 +536,7 @@ mod tests {
         let result: AppResult<u32> = run_resilient(
             &breaker,
             TIMEOUT,
+            true,
             || true,
             fake_reconnect(&reconnects, Ok(())),
             move || {
@@ -489,6 +554,99 @@ mod tests {
 
         assert!(matches!(result, Err(AppError::BadRequest(_))));
         assert_eq!(breaker.state().await, CircuitState::Closed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scoped_timeout_is_not_a_breaker_failure() {
+        // H2 (session-02 round 1): a client-shortened deadline expiring says
+        // nothing about an outage; with outage-signal false the breaker must
+        // stay Closed even at failure_threshold 1.
+        let breaker = breaker_with(1);
+        let reconnects = Arc::new(AtomicU32::new(0));
+
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            false, // client-scoped deadline
+            || true,
+            fake_reconnect(&reconnects, Ok(())),
+            || async { std::future::pending().await },
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::OperationTimeout(_))));
+        assert_eq!(breaker.state().await, CircuitState::Closed);
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_branch_reconnect_failure_propagates() {
+        // The timeout-while-disconnected branch has its own `reconnect().await?`;
+        // its failure must propagate without a retry.
+        let breaker = breaker_with(5);
+        let calls = Arc::new(AtomicU32::new(0));
+        let reconnects = Arc::new(AtomicU32::new(0));
+
+        let op_calls = Arc::clone(&calls);
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            true,
+            || false, // disconnected
+            fake_reconnect(
+                &reconnects,
+                Err(AppError::ConnectionFailed("reconnect exhausted".into())),
+            ),
+            move || {
+                let calls = Arc::clone(&op_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending().await
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(&result, Err(AppError::ConnectionFailed(msg)) if msg.contains("reconnect exhausted"))
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no retry after failed reconnect"
+        );
+        assert_eq!(reconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn half_open_probe_token_released_on_non_connection_error() {
+        // H3 (session-02 round 1): a probe completing with a non-connection
+        // error records neither counter but must hand its token back, or
+        // recovery starves until the re-grant window.
+        let breaker = breaker_with(1); // success_threshold 1 => single token
+        breaker.record_failure().await;
+        assert_eq!(breaker.state().await, CircuitState::Open);
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let reconnects = Arc::new(AtomicU32::new(0));
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            true,
+            || true,
+            fake_reconnect(&reconnects, Ok(())),
+            || async { Err(AppError::NotFound("no such topic".into())) },
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+        assert_eq!(breaker.state().await, CircuitState::HalfOpen);
+        // Without release_probe the single token would be gone and this
+        // would be rejected until the re-grant window.
+        assert!(
+            breaker.allow_request().await,
+            "released token must admit the next probe"
+        );
     }
 
     // =========================================================================
