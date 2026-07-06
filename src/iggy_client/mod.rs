@@ -25,9 +25,11 @@
 //!
 //! # Module Structure
 //!
+//! - `circuit_breaker` - Fail-fast state machine with token-limited probing
 //! - `connection` - Connection state tracking for reconnection coordination
 //! - `params` - Parameter types like `PollParams`
 //! - `helpers` - Utility functions for identifier conversion and jitter
+//! - `resilience` - Timeout/breaker/reconnect-retry composition (`run_resilient`)
 //! - `scopeguard` - RAII guard for cleanup on drop
 //!
 //! # Connection Resilience (two layers)
@@ -1094,5 +1096,4 @@ mod tests {
             );
         }
     }
-
 }
