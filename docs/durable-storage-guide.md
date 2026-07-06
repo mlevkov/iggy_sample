@@ -20,6 +20,7 @@ A comprehensive guide to configuring Apache Iggy for durable, production-ready m
 8. [Production Recommendations](#production-recommendations)
 9. [Current Limitations](#current-limitations)
 10. [Configuration Reference](#configuration-reference)
+11. [Sources and Further Reading](#sources-and-further-reading)
 
 ---
 
@@ -121,6 +122,12 @@ enforce_fsync = true
 interval = "30 s"
 ```
 
+> **Caveat (verified against 0.8.0 sources):** the saver task in server
+> 0.8.0 issues its periodic flush with `fsync: false` while merely logging
+> the `enforce_fsync` setting, so treat saver-based durability as
+> UNVERIFIED at this version — if you need a hard on-disk guarantee, use
+> per-message fsync (`[system.partition] enforce_fsync = true`) below.
+
 #### 2. Per-Message fsync (Maximum Durability)
 
 For the strongest durability guarantee, force fsync after every message:
@@ -151,7 +158,7 @@ export IGGY_SYSTEM_PARTITION_MESSAGES_REQUIRED_TO_SAVE=1
 |-------|---------------|---------|----------------|
 | **Maximum** | `[system.partition]` `enforce_fsync=true`, `messages_required_to_save=1` | ~9ms P99 | None (survives power loss) |
 | **High** | `[system.partition]` `enforce_fsync=true`, `messages_required_to_save=100` | ~1-2ms P99 | Up to 100 messages |
-| **Balanced** | `[system.partition]` `enforce_fsync=false` + `[message_saver]` `enforce_fsync=true`, `interval="1s"` | ~0.5ms P99 | Up to 1 saver interval of data |
+| **Balanced** | `[system.partition]` `enforce_fsync=false` + `[message_saver]` `enforce_fsync=true`, `interval="1s"` | ~0.5ms P99 | Up to 1 saver interval — see the saver fsync caveat above |
 | **Performance** | `enforce_fsync=false` everywhere | ~0.1ms P99 | Unbounded (OS-dependent) |
 
 ### Performance Benchmarks
@@ -165,6 +172,10 @@ With fsync-per-message enabled, Iggy achieves impressive durability performance:
 | P99 Consumer Latency | <3ms | Reading from durable storage |
 
 Single-digit millisecond latencies at P9999 for a fully durable workload is excellent performance, competitive with or exceeding many other streaming platforms.
+
+> These figures are Iggy's published benchmark numbers; they were NOT
+> re-measured as part of this guide's 0.8.0 key-by-key validation (which
+> covers configuration keys and behaviors only).
 
 ---
 
@@ -461,7 +472,7 @@ interval = "5s"
 - Latency: Sub-millisecond
 - Risk: May lose several seconds of data on crash
 
-#### Balanced (Most Applications)
+#### High (Most Applications)
 
 ```toml
 [system.partition]

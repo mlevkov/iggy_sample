@@ -12,3 +12,5 @@ condition under which the record MUST be resolved (not "someday").
 | [TD-2026-07-05](TD-2026-07-05.md) | Metrics exporter smoke test | Review session 01 (tests #7) | Next metrics-exporter-prometheus major/minor bump | resolved (session 02) |
 | [TD-2026-07-06](TD-2026-07-06.md) | Durable-storage guide config re-validation | Review session 01 (consistency #10) | Next server image bump past 0.8.x | resolved (session 02) |
 | [TD-2026-07-07](TD-2026-07-07.md) | Pin third-party GitHub Actions to commit SHAs | Security review on v0.2.0 release PR | Next CI-focused change, or any new repo secret | resolved (session 02) |
+| [TD-2026-07-08](TD-2026-07-08.md) | Client-visible feedback for X-Request-Timeout | Review session 02 (silentfail M3) | Before documenting the header in any external API reference | open |
+| [TD-2026-07-09](TD-2026-07-09.md) | Breaker per-state data as enum with payloads | Review session 02 (types MEDIUM) | Next behavioral change to CircuitBreakerState/allow_request | open |

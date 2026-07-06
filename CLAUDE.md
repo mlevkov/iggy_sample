@@ -720,7 +720,10 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 - Enforced end-to-end: all Iggy-touching handlers scope their client via
   `AppState::{producer,consumer,iggy}_scoped` →
   `IggyClientWrapper::with_timeout`, bounding every operation attempt by
-  the request deadline
+  the request deadline (worst case ~3x the deadline on the reconnect
+  path: first attempt + bounded reconnect wait + single retry)
+- Timeouts under a client-shortened deadline are NOT circuit-breaker
+  failures (a client's short deadline expiring is not outage evidence)
 - The effective deadline is clamped to the global `OPERATION_TIMEOUT_SECS`
   — clients may shorten a request's bound, never extend it
 - Requests without the header use the global timeout unchanged
