@@ -34,6 +34,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Production-Ready Features
 - **Connection resilience** with automatic reconnection and exponential backoff
+- **Circuit breaker** with fail-fast rejection and token-limited half-open recovery probing
 - **Rate limiting** with token bucket algorithm (configurable RPS and burst)
 - **API key authentication** with constant-time comparison (timing attack resistant)
 - **Request ID propagation** for distributed tracing
@@ -42,7 +43,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (159 unit tests, 29 integration tests, 18 model tests)
+- Comprehensive test suite (183 unit tests, 30 integration tests, 18 model tests, plus a metrics exporter smoke test)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
