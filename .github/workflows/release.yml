@@ -13,7 +13,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BINARY_NAME: iggy-sample
+  # Must match the crate name in Cargo.toml (cargo names the binary with
+  # the underscore, not a hyphen)
+  BINARY_NAME: iggy_sample
 
 permissions:
   contents: write
