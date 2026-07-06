@@ -985,6 +985,27 @@ impl IggyClientWrapper {
         &self.config
     }
 
+    /// Return a view of this wrapper whose operations are bounded by
+    /// `timeout` instead of the configured `OPERATION_TIMEOUT_SECS`.
+    ///
+    /// This is how the `X-Request-Timeout` header propagates into the Iggy
+    /// call path: handlers scope the client to the request's deadline. The
+    /// bound is clamped to the configured global timeout — a client may
+    /// SHORTEN the deadline, never extend it.
+    ///
+    /// All `Arc`'d internals (SDK client, connection state, circuit
+    /// breaker) are shared with the parent, so breaker bookkeeping and
+    /// reconnection coordination stay global; only the deadline changes.
+    /// A reconnect session triggered under a scoped view has its caller
+    /// wait bounded by the same shortened deadline (the session itself
+    /// continues in the background — see `reconnect_bounded`).
+    #[must_use]
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        let mut scoped = self.clone();
+        scoped.config.operation_timeout = timeout.min(self.config.operation_timeout);
+        scoped
+    }
+
     /// Get the current circuit breaker state.
     pub async fn circuit_breaker_state(&self) -> CircuitState {
         self.circuit_breaker.state().await

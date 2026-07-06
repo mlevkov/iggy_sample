@@ -711,12 +711,14 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 
 ### Request Timeout (`src/middleware/timeout.rs`)
 - Clients can specify `X-Request-Timeout: <milliseconds>` header
-- Bounded: 100ms minimum, 5 minutes maximum
-- Stored in request extensions for handler use
-- `RequestTimeoutExt` trait for easy extraction in handlers
-- **Note**: currently parsed and stored only — no handler consumes it yet, so
-  all Iggy operations are bounded by the global `OPERATION_TIMEOUT_SECS`.
-  Enforcement is tracked in `docs/tech-debt/TD-2026-07-04.md`.
+- Bounded: 100ms minimum, 5 minutes maximum (header parse acceptance)
+- Enforced end-to-end: all Iggy-touching handlers scope their client via
+  `AppState::{producer,consumer,iggy}_scoped` →
+  `IggyClientWrapper::with_timeout`, bounding every operation attempt by
+  the request deadline
+- The effective deadline is clamped to the global `OPERATION_TIMEOUT_SECS`
+  — clients may shorten a request's bound, never extend it
+- Requests without the header use the global timeout unchanged
 
 ## Deployment Security
 

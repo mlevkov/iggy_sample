@@ -30,6 +30,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::config::Config;
 use crate::iggy_client::IggyClientWrapper;
+use crate::middleware::RequestTimeout;
 use crate::services::{ConsumerService, ProducerService};
 
 /// Cached statistics for efficient `/stats` endpoint.
@@ -132,6 +133,39 @@ impl AppState {
         state.spawn_health_check_task();
 
         state
+    }
+
+    // =========================================================================
+    // Request-scoped views (X-Request-Timeout propagation)
+    // =========================================================================
+    //
+    // Handlers pass the optional client-supplied `RequestTimeout` (parsed by
+    // the timeout middleware) and receive a service view whose Iggy
+    // operations are bounded by that deadline, clamped to the configured
+    // global. Without a header the shared instance is used as-is.
+
+    /// Producer scoped to the request's effective timeout.
+    pub fn producer_scoped(&self, timeout: Option<RequestTimeout>) -> ProducerService {
+        match timeout {
+            Some(t) => self.producer.with_timeout(t.duration),
+            None => self.producer.clone(),
+        }
+    }
+
+    /// Consumer scoped to the request's effective timeout.
+    pub fn consumer_scoped(&self, timeout: Option<RequestTimeout>) -> ConsumerService {
+        match timeout {
+            Some(t) => self.consumer.with_timeout(t.duration),
+            None => self.consumer.clone(),
+        }
+    }
+
+    /// Iggy client scoped to the request's effective timeout.
+    pub fn iggy_scoped(&self, timeout: Option<RequestTimeout>) -> IggyClientWrapper {
+        match timeout {
+            Some(t) => self.iggy_client.with_timeout(t.duration),
+            None => self.iggy_client.clone(),
+        }
     }
 
     /// Get the current cached statistics.

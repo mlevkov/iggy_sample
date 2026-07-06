@@ -1,18 +1,25 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use tracing::instrument;
 
 use super::util::parse_timestamp_with_context;
 use crate::error::AppResult;
+use crate::middleware::RequestTimeout;
 use crate::models::{CreateStreamRequest, StreamInfo};
 use crate::state::AppState;
 use crate::validation::validate_resource_name;
 
 /// List all streams.
-#[instrument(skip(state))]
-pub async fn list_streams(State(state): State<AppState>) -> AppResult<Json<Vec<StreamInfo>>> {
-    let streams = state.iggy_client.list_streams().await?;
+#[instrument(skip(state, timeout))]
+pub async fn list_streams(
+    State(state): State<AppState>,
+    timeout: Option<Extension<RequestTimeout>>,
+) -> AppResult<Json<Vec<StreamInfo>>> {
+    let streams = state
+        .iggy_scoped(timeout.map(|Extension(t)| t))
+        .list_streams()
+        .await?;
 
     let stream_infos: Vec<StreamInfo> = streams
         .into_iter()
@@ -34,15 +41,19 @@ pub async fn list_streams(State(state): State<AppState>) -> AppResult<Json<Vec<S
 }
 
 /// Get a specific stream by name.
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout))]
 pub async fn get_stream(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    timeout: Option<Extension<RequestTimeout>>,
 ) -> AppResult<Json<StreamInfo>> {
     // Validate path parameter before use
     validate_resource_name(&name, "Stream")?;
 
-    let stream = state.iggy_client.get_stream(&name).await?;
+    let stream = state
+        .iggy_scoped(timeout.map(|Extension(t)| t))
+        .get_stream(&name)
+        .await?;
 
     let created_at =
         parse_timestamp_with_context(stream.created_at.as_micros() as i64, "stream", &stream.name);
@@ -58,28 +69,36 @@ pub async fn get_stream(
 }
 
 /// Create a new stream.
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout, payload))]
 pub async fn create_stream(
     State(state): State<AppState>,
+    timeout: Option<Extension<RequestTimeout>>,
     Json(payload): Json<CreateStreamRequest>,
 ) -> AppResult<StatusCode> {
     validate_resource_name(&payload.name, "Stream")?;
 
-    state.iggy_client.create_stream(&payload.name).await?;
+    state
+        .iggy_scoped(timeout.map(|Extension(t)| t))
+        .create_stream(&payload.name)
+        .await?;
 
     Ok(StatusCode::CREATED)
 }
 
 /// Delete a stream by name.
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout))]
 pub async fn delete_stream(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    timeout: Option<Extension<RequestTimeout>>,
 ) -> AppResult<StatusCode> {
     // Validate path parameter before use
     validate_resource_name(&name, "Stream")?;
 
-    state.iggy_client.delete_stream(&name).await?;
+    state
+        .iggy_scoped(timeout.map(|Extension(t)| t))
+        .delete_stream(&name)
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

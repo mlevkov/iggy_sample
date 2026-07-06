@@ -10,18 +10,27 @@
 //! X-Request-Timeout: 5000  # 5 seconds in milliseconds
 //! ```
 //!
-//! Handlers can then extract this timeout:
+//! Handlers extract the parsed value and scope their Iggy access to it:
 //! ```rust,ignore
 //! async fn handler(
+//!     State(state): State<AppState>,
 //!     timeout: Option<Extension<RequestTimeout>>,
-//!     // ...
 //! ) -> impl IntoResponse {
-//!     let effective_timeout = timeout
-//!         .map(|t| t.0.duration)
-//!         .unwrap_or(default_timeout);
-//!     // Use effective_timeout for operations
+//!     // Iggy operations bounded by the request deadline (clamped to the
+//!     // configured global OPERATION_TIMEOUT_SECS — clients may shorten,
+//!     // never extend).
+//!     let client = state.iggy_scoped(timeout.map(|Extension(t)| t));
+//!     client.list_streams().await
 //! }
 //! ```
+//!
+//! # Enforcement path
+//!
+//! All Iggy-touching handlers pass the extracted timeout through
+//! `AppState::{producer_scoped, consumer_scoped, iggy_scoped}` into
+//! `IggyClientWrapper::with_timeout`, which bounds every operation attempt
+//! (and the caller's wait on any reconnect) by the request deadline.
+//! Requests without the header use the global `OPERATION_TIMEOUT_SECS`.
 //!
 //! # Benefits
 //!
@@ -32,6 +41,8 @@
 //! # Security Considerations
 //!
 //! - Minimum and maximum timeout bounds are enforced to prevent abuse
+//! - The effective deadline is additionally clamped to the server's global
+//!   operation timeout — the header can never EXTEND server-side work
 //! - Invalid values are ignored (fall back to server default)
 //! - Zero or negative values are rejected
 

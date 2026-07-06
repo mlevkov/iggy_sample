@@ -1,11 +1,12 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use tracing::instrument;
 
 use super::util::parse_timestamp_with_context;
 use crate::error::AppResult;
+use crate::middleware::RequestTimeout;
 use crate::models::{CreateTopicRequest, TopicInfo};
 use crate::state::AppState;
 use crate::validation::{validate_partition_count, validate_resource_name};
@@ -24,17 +25,19 @@ pub struct TopicPath {
 }
 
 /// List all topics in a stream.
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout))]
 pub async fn list_topics(
     State(state): State<AppState>,
     Path(path): Path<StreamPath>,
+    timeout: Option<Extension<RequestTimeout>>,
 ) -> AppResult<Json<Vec<TopicInfo>>> {
     // Validate path parameter before use
     validate_resource_name(&path.stream, "Stream")?;
 
-    let topics = state.iggy_client.list_topics(&path.stream).await?;
+    let client = state.iggy_scoped(timeout.map(|Extension(t)| t));
+    let topics = client.list_topics(&path.stream).await?;
 
-    let stream_details = state.iggy_client.get_stream(&path.stream).await?;
+    let stream_details = client.get_stream(&path.stream).await?;
     let topic_infos: Vec<TopicInfo> = topics
         .into_iter()
         .map(|t| {
@@ -56,21 +59,20 @@ pub async fn list_topics(
 }
 
 /// Get a specific topic by name.
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout))]
 pub async fn get_topic(
     State(state): State<AppState>,
     Path(path): Path<TopicPath>,
+    timeout: Option<Extension<RequestTimeout>>,
 ) -> AppResult<Json<TopicInfo>> {
     // Validate path parameters before use
     validate_resource_name(&path.stream, "Stream")?;
     validate_resource_name(&path.topic, "Topic")?;
 
-    let topic = state
-        .iggy_client
-        .get_topic(&path.stream, &path.topic)
-        .await?;
+    let client = state.iggy_scoped(timeout.map(|Extension(t)| t));
+    let topic = client.get_topic(&path.stream, &path.topic).await?;
 
-    let stream_details = state.iggy_client.get_stream(&path.stream).await?;
+    let stream_details = client.get_stream(&path.stream).await?;
     let created_at =
         parse_timestamp_with_context(topic.created_at.as_micros() as i64, "topic", &topic.name);
 
@@ -86,10 +88,11 @@ pub async fn get_topic(
 }
 
 /// Create a new topic in a stream.
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout, payload))]
 pub async fn create_topic(
     State(state): State<AppState>,
     Path(path): Path<StreamPath>,
+    timeout: Option<Extension<RequestTimeout>>,
     Json(payload): Json<CreateTopicRequest>,
 ) -> AppResult<StatusCode> {
     // Validate path parameter before use
@@ -99,7 +102,7 @@ pub async fn create_topic(
     validate_partition_count(payload.partitions, "Topic")?;
 
     state
-        .iggy_client
+        .iggy_scoped(timeout.map(|Extension(t)| t))
         .create_topic(&path.stream, &payload.name, payload.partitions)
         .await?;
 
@@ -107,17 +110,18 @@ pub async fn create_topic(
 }
 
 /// Delete a topic from a stream.
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout))]
 pub async fn delete_topic(
     State(state): State<AppState>,
     Path(path): Path<TopicPath>,
+    timeout: Option<Extension<RequestTimeout>>,
 ) -> AppResult<StatusCode> {
     // Validate path parameters before use
     validate_resource_name(&path.stream, "Stream")?;
     validate_resource_name(&path.topic, "Topic")?;
 
     state
-        .iggy_client
+        .iggy_scoped(timeout.map(|Extension(t)| t))
         .delete_topic(&path.stream, &path.topic)
         .await?;
 
