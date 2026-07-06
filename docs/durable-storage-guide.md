@@ -113,9 +113,9 @@ The top-level `[message_saver]` section controls background persistence
 # Enable the background process that saves buffered data to disk
 enabled = true
 
-# Force synchronous writes to disk
-# true  = durable but slower (data guaranteed on disk)
-# false = faster but data may be lost on crash
+# Force synchronous writes to disk on each save
+# (see the caveat below: the 0.8.0 saver's actual flush behavior does not
+# honor this setting - treat it as intent, not a guarantee)
 enforce_fsync = true
 
 # Interval for running the message saver (default: 30 s)

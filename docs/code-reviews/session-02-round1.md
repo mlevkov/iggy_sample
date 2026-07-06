@@ -1,6 +1,6 @@
 # Session 02 — Code Review, Round 1
 
-**Target:** branch `tech-debt/session-02` vs `main` (10 commits, 27 files) — resilience
+**Target:** branch `tech-debt/session-02` vs `main` (9 commits, 27 files) — resilience
 executor extraction + paused-clock matrix, half-open probe token limiting,
 X-Request-Timeout end-to-end enforcement, metrics exporter smoke test, SHA-pinned
 workflows, durable-storage guide re-validation, TD registry updates.
@@ -8,7 +8,7 @@ workflows, durable-storage guide re-validation, TD registry updates.
 **Provenance:** config: full (Fable 5, high effort, feature-dev + pr-review-toolkit
 installed; all 8 agents + verifier pinned to the strongest model; attested by Maxim
 via the step-0 gate). Agent fallbacks: none — all eight roster agents ran as their
-native types. Verification tally: 18 themes verified, **18 kept / 0 discarded**
+native types. Verification tally: 18 claims verified, **18 kept / 0 discarded**
 (one sub-point of theme 10 trimmed as overstated: `messages_required_to_save`
 placement is consistent between the two guides).
 
@@ -69,7 +69,7 @@ consumed and never returned, although a completed round-trip is transport-health
 evidence. If the first `success_threshold` callers after recovery hit such errors,
 all traffic is rejected 503 for a full `open_duration`, and the cycle can repeat
 indefinitely. During that window there is no log above debug and rejections share
-one unlabeled counter with open-state rejections (H5).
+one unlabeled counter with open-state rejections (see M2).
 
 **Remediation:** release the probe token when the outcome is deliberately
 unrecorded (`CircuitBreaker::release_probe()` called from both non-connection

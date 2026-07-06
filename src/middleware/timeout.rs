@@ -103,7 +103,9 @@ impl RequestTimeout {
 
 /// Lets handlers declare `timeout: Option<RequestTimeout>` directly instead
 /// of unwrapping `Option<Extension<RequestTimeout>>` at every call site.
-/// Absence simply means the client sent no (valid) `X-Request-Timeout`.
+/// Absence means the client sent no (valid) `X-Request-Timeout` — or the
+/// route is not behind the timeout middleware, which degrades safely to
+/// the global deadline.
 impl<S> axum::extract::OptionalFromRequestParts<S> for RequestTimeout
 where
     S: Send + Sync,
@@ -135,7 +137,9 @@ pub async fn extract_request_timeout(mut request: Request, next: Next) -> Respon
                 );
                 request.extensions_mut().insert(timeout);
             } else {
-                debug!(
+                // Same silence class as a malformed value: the caller
+                // believes a deadline is in effect that is not.
+                warn!(
                     timeout_ms = ms,
                     min = MIN_REQUEST_TIMEOUT_MS,
                     max = MAX_REQUEST_TIMEOUT_MS,
@@ -201,5 +205,29 @@ mod tests {
     fn test_request_timeout_from_millis_zero() {
         let timeout = RequestTimeout::from_millis(0);
         assert!(timeout.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_optional_extractor_reads_extension_presence() {
+        use axum::extract::OptionalFromRequestParts;
+
+        let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+
+        let absent =
+            <RequestTimeout as OptionalFromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert!(absent.is_none(), "no extension => None (global timeout)");
+
+        let inserted = RequestTimeout::from_millis(5000).unwrap();
+        parts.extensions.insert(inserted);
+        let present =
+            <RequestTimeout as OptionalFromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert_eq!(
+            present.map(|t| t.duration()),
+            Some(Duration::from_millis(5000))
+        );
     }
 }

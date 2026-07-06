@@ -45,12 +45,30 @@
 //! attempt + bounded reconnect + retry) — bounded, but well above the
 //! typical single-operation expectation.
 //!
-//! # Breaker false positives
+//! # Breaker false positives — and who feeds the breaker
 //!
-//! Timeouts count as breaker failures, so N consecutive merely-SLOW
-//! operations (including the background stats refresher's) can open the
-//! circuit without a real outage. Failures must be consecutive — any
-//! success resets the count — which bounds the risk.
+//! GLOBAL-deadline timeouts count as breaker failures, so N consecutive
+//! merely-SLOW operations (including the background stats refresher's) can
+//! open the circuit without a real outage. Failures must be consecutive —
+//! any success resets the count — which bounds the risk. (Client-scoped
+//! deadlines are exempt per semantics #5, which SHRINKS this
+//! false-positive surface.)
+//!
+//! The flip side of that exemption: during a pure-hang outage where ALL
+//! request traffic carries short client deadlines, the only guaranteed
+//! breaker feeder is the background stats refresher, which runs on the
+//! root (global-deadline) wrapper — health-check pings keep `is_connected`
+//! truthful but never touch the breaker. Convergence to Open is therefore
+//! minutes-scale (≈ failure_threshold × (global timeout + refresh
+//! interval)) instead of seconds. Scoped CONNECTION errors still record
+//! immediately. This is the accepted trade against the one-client-DoS the
+//! exemption prevents.
+//!
+//! Note also that a single request may release its probe token twice
+//! (scoped first-attempt timeout, then an unrecorded retry outcome); the
+//! budget cap bounds the effect to transiently admitting one extra
+//! concurrent probe — the same order of slack as the documented
+//! retry-gate bypass.
 
 use std::time::Duration;
 
@@ -196,6 +214,7 @@ where
         Ok(Err(e)) => {
             if is_connection_error(&e) {
                 breaker.record_failure().await;
+                warn!(error = %e, "Retry failed with a connection error (recorded as breaker failure)");
             } else {
                 // Unrecorded outcome: hand back any consumed probe token.
                 breaker.release_probe().await;
@@ -205,6 +224,10 @@ where
         Err(_) => {
             if timeout_is_outage_signal {
                 breaker.record_failure().await;
+                warn!(
+                    timeout = ?timeout,
+                    "Retry timed out at the global deadline (recorded as breaker failure)"
+                );
             } else {
                 breaker.release_probe().await;
             }
@@ -646,6 +669,45 @@ mod tests {
         assert!(
             breaker.allow_request().await,
             "released token must admit the next probe"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scoped_timeout_while_disconnected_still_reconnects_without_breaker_failures() {
+        // The H2 exemption suppresses breaker RECORDING for scoped
+        // deadlines, not RECOVERY: a scoped request finding the connection
+        // down must still trigger the reconnect, and neither its
+        // first-attempt timeout nor its retry timeout may feed the breaker.
+        let breaker = breaker_with(1); // any recorded failure would open it
+        let calls = Arc::new(AtomicU32::new(0));
+        let reconnects = Arc::new(AtomicU32::new(0));
+
+        let op_calls = Arc::clone(&calls);
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            false,    // client-scoped deadline
+            || false, // health checks say the connection is lost
+            fake_reconnect(&reconnects, Ok(())),
+            move || {
+                let calls = Arc::clone(&op_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending().await
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(&result, Err(AppError::OperationTimeout(msg)) if msg.contains("on retry"))
+        );
+        assert_eq!(reconnects.load(Ordering::SeqCst), 1, "recovery still fires");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "single retry");
+        assert_eq!(
+            breaker.state().await,
+            CircuitState::Closed,
+            "scoped timeouts on both attempts must not feed the breaker"
         );
     }
 

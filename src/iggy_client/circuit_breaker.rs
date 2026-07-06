@@ -16,7 +16,7 @@
 //! │  └────┬────┘                            │  Fast)  │               │
 //! │       │ ▲                               └────┬────┘               │
 //! │       │ │                                    │                    │
-//! │       │ │ success                            │ timeout expires    │
+//! │       │ │                                    │ timeout expires    │
 //! │       │ │                                    ▼                    │
 //! │       │ │                            ┌───────────────┐            │
 //! │       │ └─────────────────────────── │   HalfOpen    │            │
@@ -47,6 +47,10 @@
 //! probes. Tokens re-grant after `open_duration` elapses in half-open,
 //! guaranteeing the breaker cannot wedge if a probe's outcome is never
 //! recorded. See [`CircuitBreaker::allow_request`].
+//!
+//! One consumed token can cover up to two server operations: the
+//! post-reconnect retry in `resilience::run_resilient` deliberately does
+//! not re-pass this gate (see that module's "Retry and the breaker gate").
 //!
 //! # Usage
 //!
@@ -292,8 +296,15 @@ impl CircuitBreaker {
     /// deadlock the breaker) — exactly enough probes to close the circuit
     /// if all of them succeed.
     fn grant_probe_tokens(&self, state: &mut CircuitBreakerState) {
-        state.half_open_probes_remaining = self.config.success_threshold.max(1);
+        state.half_open_probes_remaining = self.probe_budget();
         state.half_open_granted_at = Some(Instant::now());
+    }
+
+    /// Half-open probe budget: `success_threshold`, floored at one so a
+    /// zero threshold cannot deadlock the breaker. Single definition shared
+    /// by the grant and release paths so the cap cannot drift.
+    fn probe_budget(&self) -> u32 {
+        self.config.success_threshold.max(1)
     }
 
     /// Record a rejection (counter + state-labeled metric) and return `false`.
@@ -318,7 +329,7 @@ impl CircuitBreaker {
     pub(super) async fn release_probe(&self) {
         let mut state = self.state.write().await;
         if state.state == CircuitState::HalfOpen {
-            let cap = self.config.success_threshold.max(1);
+            let cap = self.probe_budget();
             if state.half_open_probes_remaining < cap {
                 state.half_open_probes_remaining += 1;
                 debug!("Circuit breaker released a half-open probe token (outcome not recorded)");
@@ -444,8 +455,8 @@ impl CircuitBreaker {
         let mut state = self.state.write().await;
         if state.state != CircuitState::Open {
             self.open_now(&mut state);
+            warn!("Circuit breaker forcibly opened");
         }
-        warn!("Circuit breaker forcibly opened");
     }
 
     /// Transition to Open, keeping internal counters and Prometheus metrics

@@ -177,7 +177,8 @@ pub struct IggyClientWrapper {
     /// Deadline applied to operations issued through THIS view.
     ///
     /// Equals `config.operation_timeout` on the root wrapper; request-scoped
-    /// views created by [`Self::with_timeout`] carry a shorter value. Kept
+    /// views created by [`Self::with_timeout`] carry a shorter (or equal,
+    /// when the header matches the global) value. Kept
     /// separate from `config` so a per-request deadline can never leak into
     /// process-global machinery (reconnect sessions, health probes), which
     /// always reads `config.operation_timeout`.
@@ -393,11 +394,12 @@ impl IggyClientWrapper {
                     // Bound the connect: the SDK's internal reconnection would
                     // otherwise retry inside connect() indefinitely. HALF the
                     // GLOBAL operation timeout (never a request-scoped
-                    // deadline — see `with_timeout`) so that when a caller is
-                    // still waiting on this session, a failed attempt exits
-                    // through the cleanup arms below and reports before the
-                    // caller's own deadline elapses, instead of the caller
-                    // timing out mid-attempt and reading a stale outcome.
+                    // deadline — see `with_timeout`) so that a caller waiting
+                    // at the global deadline sees a failed attempt exit
+                    // through the cleanup arms below before its own deadline
+                    // elapses. (Callers on a SHORTER scoped deadline may
+                    // still time out mid-attempt; they just report the
+                    // timeout while the session continues.)
                     let attempt_timeout = self.config.operation_timeout / 2;
                     match tokio::time::timeout(attempt_timeout, new_client.connect()).await {
                         Ok(Ok(())) => {}
@@ -458,9 +460,11 @@ impl IggyClientWrapper {
     /// join the still-running session as followers.
     ///
     /// Only the caller's WAIT uses the (possibly request-scoped)
-    /// `op_deadline`; the session itself always runs at the global
-    /// `config.operation_timeout` (see `reconnect`), so a short-deadline
-    /// request can never cripple the shared reconnect session.
+    /// `op_deadline`; the session itself derives its per-attempt connect
+    /// bound from the global `config.operation_timeout` (see `reconnect`)
+    /// and, at the default infinite-retry setting, is unbounded as a whole
+    /// — so a short-deadline request can never cripple the shared
+    /// reconnect session.
     async fn reconnect_bounded(&self) -> AppResult<()> {
         let timeout = self.op_deadline;
         let this = self.clone();
@@ -1037,7 +1041,10 @@ impl IggyClientWrapper {
     #[must_use]
     pub fn with_timeout(&self, timeout: Duration) -> Self {
         let mut scoped = self.clone();
-        scoped.op_deadline = clamp_deadline(timeout, self.config.operation_timeout);
+        // Clamp against THIS view's deadline (not just the global) so
+        // re-scoping is shrink-only: a view scoped to 1s can never be
+        // widened back toward the global by a second with_timeout call.
+        scoped.op_deadline = clamp_deadline(timeout, self.op_deadline);
         scoped
     }
 
@@ -1065,6 +1072,49 @@ impl IggyClientWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a wrapper without connecting (from_connection_string only
+    /// parses). Lets the tests below pin the with_timeout WIRING — the
+    /// round-2 review mutation-proved that deleting the clamp passed the
+    /// entire suite when only the free function was tested.
+    #[allow(clippy::expect_used)]
+    fn unconnected_wrapper() -> IggyClientWrapper {
+        let config = Config::default();
+        let client = IggyClient::from_connection_string(&config.iggy_connection_string)
+            .expect("default connection string parses");
+        IggyClientWrapper {
+            client: Arc::new(RwLock::new(client)),
+            op_deadline: config.operation_timeout,
+            config: Arc::new(config),
+            state: Arc::new(ConnectionState::new()),
+            circuit_breaker: Arc::new(CircuitBreaker::default()),
+        }
+    }
+
+    #[test]
+    fn test_with_timeout_wiring_clamps_and_is_shrink_only() {
+        let root = unconnected_wrapper();
+        let global = root.config.operation_timeout;
+        assert_eq!(root.op_deadline, global, "root runs at the global deadline");
+
+        // Shorten: honored.
+        let scoped = root.with_timeout(Duration::from_millis(100));
+        assert_eq!(scoped.op_deadline, Duration::from_millis(100));
+
+        // Extend: clamped to the global (TD-2026-07-04 security property,
+        // now pinned at the wiring level, not just the free function).
+        let extended = root.with_timeout(global + Duration::from_secs(270));
+        assert_eq!(extended.op_deadline, global);
+
+        // Re-scoping a scoped view is shrink-only: it can never widen back
+        // toward the global.
+        let rescoped = scoped.with_timeout(Duration::from_secs(10));
+        assert_eq!(rescoped.op_deadline, Duration::from_millis(100));
+
+        // The outage-signal predicate derives correctly from the wiring.
+        assert!(root.op_deadline >= root.config.operation_timeout);
+        assert!(scoped.op_deadline < scoped.config.operation_timeout);
+    }
 
     #[test]
     fn test_clamp_deadline_shortens() {
