@@ -106,6 +106,7 @@ src/
 │   ├── connection.rs # Connection state management
 │   ├── helpers.rs    # Utility functions
 │   ├── params.rs     # PollParams builder
+│   ├── resilience.rs # Timeout/breaker/retry composition (run_resilient)
 │   └── scopeguard.rs # Scope guard utilities
 ├── validation.rs     # Input validation utilities
 ├── middleware/
@@ -135,6 +136,7 @@ tests/
 ├── integration_tests.rs  # End-to-end API tests with testcontainers
 │   ├── Standard fixture tests (basic CRUD, messages)
 │   └── Security boundary tests (auth, rate limiting)
+├── metrics_smoke_test.rs # Prometheus exporter smoke test (own process)
 └── model_tests.rs        # Unit tests for models
 
 fuzz/
@@ -427,11 +429,14 @@ environment:
 ### Running Tests
 
 ```bash
-# Unit tests (159 tests)
+# Unit tests (172 tests)
 cargo test --lib
 
-# Integration tests (29 tests, requires Docker for testcontainers)
+# Integration tests (30 tests, requires Docker for testcontainers)
 cargo test --test integration_tests
+
+# Metrics exporter smoke test (1 test)
+cargo test --test metrics_smoke_test
 
 # Model tests (18 tests)
 cargo test --test model_tests
