@@ -13,9 +13,9 @@
 //! - `BATCH_MAX_SIZE` - Maximum messages per batch send (default: 1000)
 //! - `POLL_MAX_COUNT` - Maximum messages per poll (default: 100)
 
+use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
 use tracing::instrument;
 

@@ -48,9 +48,7 @@ use crate::error::{AppError, AppResult};
 pub(super) fn is_connection_error(error: &AppError) -> bool {
     matches!(
         error,
-        AppError::ConnectionFailed(_)
-            | AppError::Disconnected(_)
-            | AppError::ConnectionReset(_)
+        AppError::ConnectionFailed(_) | AppError::Disconnected(_) | AppError::ConnectionReset(_)
     )
 }
 
@@ -421,7 +419,11 @@ mod tests {
         assert!(
             matches!(&result, Err(AppError::ConnectionFailed(msg)) if msg.contains("reconnect exhausted"))
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry after failed reconnect");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no retry after failed reconnect"
+        );
         assert_eq!(reconnects.load(Ordering::SeqCst), 1);
     }
 
