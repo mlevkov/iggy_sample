@@ -1,6 +1,6 @@
 [package]
 name = "iggy_sample"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.93.0"
 description = "A comprehensive demonstration of Apache Iggy message streaming with Axum"

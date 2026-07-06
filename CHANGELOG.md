@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [0.3.0] - 2026-07-05
+
+Session-02 tech-debt sweep (PR #26): six registry records resolved, one
+parked, two filed. Full eight-agent double review (Round 1 + Round 2);
+artifacts under `docs/code-reviews/`.
+
+### Added
+
+- Token-limited half-open circuit-breaker probing: entering half-open
+  grants `success_threshold` probe tokens per `open_duration` window
+  (thundering-herd protection), with an anti-wedge re-grant and probe-token
+  release for outcomes that deliberately record neither success nor
+  failure; rejections are now labeled by breaker state in Prometheus
+- End-to-end enforcement of client request deadlines: the parsed
+  `X-Request-Timeout` extension (previously stored but unused) now bounds
+  every Iggy operation through request-scoped client views, clamped so a
+  client may shorten but never extend the global operation timeout;
+  client-visible feedback (echoing the effective deadline) is tracked in
+  TD-2026-07-08 before the header joins the external API reference
+- Resilience composition test matrix: the timeout/breaker/reconnect-retry
+  logic is extracted to `iggy_client::resilience::run_resilient` and
+  covered by a paused-clock test per branch, plus a Prometheus exporter
+  smoke test in its own test binary (183 unit / 30 integration / 18 model
+  / 1 smoke tests)
+
+### Changed
+
+- Client-shortened deadlines no longer feed the shared circuit breaker
+  (a single client could previously open the circuit for everyone), and
+  request-scoped views no longer leak their deadline into the global
+  reconnect session or health probes (`Arc<Config>` + separate
+  per-view deadline; scoped clones are cheap)
+- All third-party GitHub Actions pinned to full 40-char commit SHAs with
+  version comments; toolchain/tool selector tags converted to explicit
+  `with:` inputs
+- Durable-storage guide re-validated key-by-key against upstream
+  `server-0.8.0`: the disk/S3 archiver section now documents a feature
+  removed upstream, retention is correctly attributed to the
+  default-disabled `data_maintenance.messages` cleaner, `message_saver`
+  defaults corrected (30 s interval, 1024-message threshold), and the
+  partitioning guide was reconciled to the same schema
+- **Breaking**: `RequestTimeout`'s fields are private — `from_millis` is
+  the sole constructor and `duration()` the accessor — and
+  `metrics::record_circuit_breaker_rejection` takes a state label
+
+### Removed
+
+- **Breaking**: the unused `RequestTimeoutExt` trait and
+  `RequestTimeout::original_ms` (handlers extract `Option<RequestTimeout>`
+  directly via a new `OptionalFromRequestParts` impl)
+
+### Fixed
+
+- Half-open probes completing with non-connection errors no longer
+  permanently consume probe tokens (recovery-starvation cycle against a
+  healthy server)
+- `force_open` on an already-open breaker no longer refreshes the open
+  window or inflates the times-opened counter
+
 ## [0.2.0] - 2026-07-05
 
 ### Security
@@ -132,6 +191,7 @@ triggers (`docs/tech-debt/`):
 - Trusted proxy configuration for X-Forwarded-For validation
 - Input validation to prevent injection attacks
 
-[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mlevkov/iggy_sample/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mlevkov/iggy_sample/releases/tag/v0.1.0
