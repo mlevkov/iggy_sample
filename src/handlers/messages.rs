@@ -21,6 +21,7 @@ use tracing::instrument;
 
 use crate::error::{AppError, AppResult};
 use crate::iggy_client::PollParams;
+use crate::middleware::RequestTimeout;
 use crate::models::{Event, PollMessagesResponse, SendMessageRequest, SendMessageResponse};
 use crate::state::AppState;
 use crate::validation::{
@@ -43,16 +44,17 @@ use crate::validation::{
 ///   "partition_key": "optional-key"
 /// }
 /// ```
-#[instrument(skip(state, payload))]
+#[instrument(skip(state, timeout, payload))]
 pub async fn send_message(
     State(state): State<AppState>,
+    timeout: Option<RequestTimeout>,
     Json(payload): Json<SendMessageRequest>,
 ) -> AppResult<(StatusCode, Json<SendMessageResponse>)> {
     // Validate event type before processing
     validate_event_type(&payload.event.event_type)?;
 
     let response = state
-        .producer
+        .producer_scoped(timeout)
         .send(&payload.event, payload.partition_key.as_deref())
         .await?;
 
@@ -90,9 +92,10 @@ pub struct SendBatchRequest {
 ///   "partition_key": "optional-key"
 /// }
 /// ```
-#[instrument(skip(state, payload), fields(batch_size = payload.events.len()))]
+#[instrument(skip(state, timeout, payload), fields(batch_size = payload.events.len()))]
 pub async fn send_batch(
     State(state): State<AppState>,
+    timeout: Option<RequestTimeout>,
     Json(payload): Json<SendBatchRequest>,
 ) -> AppResult<(StatusCode, Json<Vec<SendMessageResponse>>)> {
     let max_batch_size = state.config.batch_max_size;
@@ -118,7 +121,7 @@ pub async fn send_batch(
     }
 
     let responses = state
-        .producer
+        .producer_scoped(timeout)
         .send_batch(&payload.events, payload.partition_key.as_deref())
         .await?;
 
@@ -167,9 +170,10 @@ fn default_count() -> u32 {
 /// ```bash
 /// curl "http://localhost:8000/messages?partition_id=1&count=10&offset=0"
 /// ```
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout))]
 pub async fn poll_messages(
     State(state): State<AppState>,
+    timeout: Option<RequestTimeout>,
     Query(query): Query<PollQuery>,
 ) -> AppResult<Json<PollMessagesResponse>> {
     // Validate poll parameters
@@ -189,7 +193,7 @@ pub async fn poll_messages(
         None => params,
     };
 
-    let response = state.consumer.poll(params).await?;
+    let response = state.consumer_scoped(timeout).poll(params).await?;
 
     Ok(Json(response))
 }
@@ -209,10 +213,11 @@ pub struct StreamTopicPath {
 ///
 /// - `stream` - Target stream name
 /// - `topic` - Target topic name
-#[instrument(skip(state, payload))]
+#[instrument(skip(state, timeout, payload))]
 pub async fn send_message_to(
     State(state): State<AppState>,
     Path(path): Path<StreamTopicPath>,
+    timeout: Option<RequestTimeout>,
     Json(payload): Json<SendMessageRequest>,
 ) -> AppResult<(StatusCode, Json<SendMessageResponse>)> {
     // Validate path parameters before use
@@ -222,7 +227,7 @@ pub async fn send_message_to(
     validate_event_type(&payload.event.event_type)?;
 
     let response = state
-        .producer
+        .producer_scoped(timeout)
         .send_to(
             &path.stream,
             &path.topic,
@@ -240,10 +245,11 @@ pub async fn send_message_to(
 ///
 /// - `stream` - Source stream name
 /// - `topic` - Source topic name
-#[instrument(skip(state))]
+#[instrument(skip(state, timeout))]
 pub async fn poll_messages_from(
     State(state): State<AppState>,
     Path(path): Path<StreamTopicPath>,
+    timeout: Option<RequestTimeout>,
     Query(query): Query<PollQuery>,
 ) -> AppResult<Json<PollMessagesResponse>> {
     // Validate path parameters before use
@@ -268,7 +274,7 @@ pub async fn poll_messages_from(
     };
 
     let response = state
-        .consumer
+        .consumer_scoped(timeout)
         .poll_from(&path.stream, &path.topic, params)
         .await?;
 

@@ -10,7 +10,7 @@
 //! - `iggy_messages_polled_total` - Total messages polled (with labels: stream, topic)
 //! - `iggy_connection_reconnects_total` - Total reconnection attempts
 //! - `iggy_circuit_breaker_opens_total` - Times the circuit breaker opened
-//! - `iggy_circuit_breaker_rejections_total` - Requests rejected by circuit breaker
+//! - `iggy_circuit_breaker_rejections_total` - Requests rejected by circuit breaker (label: state = open | half_open)
 //!
 //! ## Histograms
 //! - `iggy_send_duration_seconds` - Message send duration
@@ -147,8 +147,12 @@ pub fn record_circuit_breaker_open() {
 }
 
 /// Record circuit breaker rejection.
-pub fn record_circuit_breaker_rejection() {
-    counter!(names::CIRCUIT_BREAKER_REJECTIONS_TOTAL).increment(1);
+///
+/// `state` labels which breaker state rejected the request (`"open"` or
+/// `"half_open"`), so operators can distinguish a hard-open circuit from an
+/// exhausted half-open probe budget during recovery.
+pub fn record_circuit_breaker_rejection(state: &'static str) {
+    counter!(names::CIRCUIT_BREAKER_REJECTIONS_TOTAL, "state" => state).increment(1);
 }
 
 // =============================================================================

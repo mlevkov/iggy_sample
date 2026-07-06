@@ -25,9 +25,11 @@
 //!
 //! # Module Structure
 //!
+//! - `circuit_breaker` - Fail-fast state machine with token-limited probing
 //! - `connection` - Connection state tracking for reconnection coordination
 //! - `params` - Parameter types like `PollParams`
 //! - `helpers` - Utility functions for identifier conversion and jitter
+//! - `resilience` - Timeout/breaker/reconnect-retry composition (`run_resilient`)
 //! - `scopeguard` - RAII guard for cleanup on drop
 //!
 //! # Connection Resilience (two layers)
@@ -58,6 +60,7 @@ mod circuit_breaker;
 mod connection;
 mod helpers;
 mod params;
+mod resilience;
 mod scopeguard;
 
 use std::str::FromStr;
@@ -138,7 +141,9 @@ fn backoff_delay_ms(attempt: u32, base_ms: u64, max_ms: u64, jitter_unit: f64) -
 /// The client includes a circuit breaker that prevents request pile-up during outages:
 /// - **Closed** (normal): All requests pass through
 /// - **Open** (failing): Requests fail fast without attempting the operation
-/// - **Half-Open** (recovery): Limited requests allowed to test if service recovered
+/// - **Half-Open** (recovery): Probes limited to `success_threshold` tokens
+///   per `open_duration` window; excess requests fail fast (see
+///   `circuit_breaker` module docs for the token re-grant rules)
 ///
 /// # Performance Considerations
 ///
@@ -167,12 +172,27 @@ pub struct IggyClientWrapper {
     /// The underlying Iggy client (behind RwLock for reconnection)
     /// See struct-level docs for performance considerations.
     client: Arc<RwLock<IggyClient>>,
-    /// Application configuration
-    config: Config,
+    /// Application configuration (shared; never mutated after construction)
+    config: Arc<Config>,
+    /// Deadline applied to operations issued through THIS view.
+    ///
+    /// Equals `config.operation_timeout` on the root wrapper; request-scoped
+    /// views created by [`Self::with_timeout`] carry a shorter (or equal,
+    /// when the header matches the global) value. Kept
+    /// separate from `config` so a per-request deadline can never leak into
+    /// process-global machinery (reconnect sessions, health probes), which
+    /// always reads `config.operation_timeout`.
+    op_deadline: Duration,
     /// Connection state tracking
     state: Arc<ConnectionState>,
     /// Circuit breaker for fail-fast during outages
     circuit_breaker: Arc<CircuitBreaker>,
+}
+
+/// Clamp a requested per-request deadline to the configured global timeout:
+/// a client may SHORTEN the deadline, never extend it.
+fn clamp_deadline(requested: Duration, global: Duration) -> Duration {
+    requested.min(global)
 }
 
 impl IggyClientWrapper {
@@ -205,7 +225,8 @@ impl IggyClientWrapper {
 
         let wrapper = Self {
             client: Arc::new(RwLock::new(client)),
-            config,
+            op_deadline: config.operation_timeout,
+            config: Arc::new(config),
             state: Arc::new(ConnectionState::new()),
             circuit_breaker: Arc::new(CircuitBreaker::new(circuit_breaker_config)),
         };
@@ -371,11 +392,14 @@ impl IggyClientWrapper {
             match IggyClient::from_connection_string(&self.config.iggy_connection_string) {
                 Ok(new_client) => {
                     // Bound the connect: the SDK's internal reconnection would
-                    // otherwise retry inside connect() indefinitely. The bound
-                    // is HALF the operation timeout so a failed attempt exits
-                    // through the cleanup arms below before reconnect_bounded's
-                    // outer deadline aborts the whole session (an abort drops
-                    // the client mid-connect with no chance to shut it down).
+                    // otherwise retry inside connect() indefinitely. HALF the
+                    // GLOBAL operation timeout (never a request-scoped
+                    // deadline — see `with_timeout`) so that a caller waiting
+                    // at the global deadline sees a failed attempt exit
+                    // through the cleanup arms below before its own deadline
+                    // elapses. (Callers on a SHORTER scoped deadline may
+                    // still time out mid-attempt; they just report the
+                    // timeout while the session continues.)
                     let attempt_timeout = self.config.operation_timeout / 2;
                     match tokio::time::timeout(attempt_timeout, new_client.connect()).await {
                         Ok(Ok(())) => {}
@@ -420,10 +444,10 @@ impl IggyClientWrapper {
         }
     }
 
-    /// Reconnect, bounded by the operation timeout from the caller's view.
+    /// Reconnect, bounded by this view's deadline from the caller's side.
     ///
     /// The session runs in a SPAWNED task and the caller awaits its
-    /// `JoinHandle` under the timeout. This is a cancellation-safety
+    /// `JoinHandle` under the deadline. This is a cancellation-safety
     /// requirement, not a style choice: dropping the reconnect future at
     /// its commit-point awaits (between `connect()` succeeding and the
     /// swap/shutdown completing) would leak a fully-connected client whose
@@ -434,8 +458,15 @@ impl IggyClientWrapper {
     /// keeps running in the background and completes (or fails) cleanly;
     /// the caller just reports the timeout, and waiters on a later attempt
     /// join the still-running session as followers.
+    ///
+    /// Only the caller's WAIT uses the (possibly request-scoped)
+    /// `op_deadline`; the session itself derives its per-attempt connect
+    /// bound from the global `config.operation_timeout` (see `reconnect`)
+    /// and, at the default infinite-retry setting, is unbounded as a whole
+    /// — so a short-deadline request can never cripple the shared
+    /// reconnect session.
     async fn reconnect_bounded(&self) -> AppResult<()> {
-        let timeout = self.config.operation_timeout;
+        let timeout = self.op_deadline;
         let this = self.clone();
         let session = tokio::spawn(async move { this.reconnect().await });
 
@@ -453,151 +484,33 @@ impl IggyClientWrapper {
 
     /// Execute an operation with automatic reconnection on connection failure.
     ///
-    /// This is the core resilience mechanism. Features:
-    /// - **Circuit Breaker**: Fail fast when service is known to be unavailable
-    /// - **Timeout**: All operations are bounded by `config.operation_timeout`
-    /// - **Retry**: On connection failure, attempts reconnect and retries once
+    /// This is the core resilience mechanism: circuit-breaker gate, timeout
+    /// bound, and reconnect-plus-single-retry on classified connection
+    /// errors. The composition itself lives in [`resilience::run_resilient`]
+    /// (see its module docs for the full semantics, worst-case latency, and
+    /// breaker false-positive analysis); this method binds it to the
+    /// wrapper's breaker, this view's deadline, tracked connection state,
+    /// and bounded reconnect session.
     ///
-    /// # Worst-case latency
-    ///
-    /// A request on the reconnect path can take up to 3x the operation
-    /// timeout (first attempt + bounded reconnect + retry) - bounded, but
-    /// well above the typical single-operation expectation.
-    ///
-    /// # Breaker false positives
-    ///
-    /// Timeouts count as breaker failures because the SDK's internal
-    /// reconnection swallows outages into blocking retries (a timeout is
-    /// often the only signal). The cost: N consecutive merely-SLOW
-    /// operations (including the background stats refresher's) can open the
-    /// circuit without a real outage. Failures must be consecutive - any
-    /// success resets the count - which bounds the risk.
-    ///
-    /// # Circuit Breaker Integration
-    ///
-    /// Before attempting the operation, the circuit breaker is checked:
-    /// - If **Open**: Returns `CircuitOpen` error immediately (fail fast)
-    /// - If **Closed** or **HalfOpen**: Proceeds with the operation
-    ///
-    /// After the operation, the circuit breaker is updated:
-    /// - Success: Records success (may close circuit if in HalfOpen)
-    /// - Failure: Records failure (may open circuit if threshold exceeded)
-    ///
-    /// # Timeout vs Disconnection
-    ///
-    /// The function differentiates between:
-    /// - **Connection errors**: Trigger reconnection and retry
-    /// - **Timeouts**: Only trigger reconnection if connection state shows disconnected;
-    ///   otherwise return timeout error (slow operation != broken connection)
-    ///
-    /// This prevents unnecessary reconnection attempts under high latency conditions.
+    /// A timeout counts as a circuit-breaker failure only when this view
+    /// runs at the global deadline: a client-shortened deadline expiring
+    /// says nothing about an outage, and letting it feed the shared breaker
+    /// would let one client open the circuit for everyone.
     async fn with_reconnect<F, Fut, T>(&self, operation: F) -> AppResult<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = AppResult<T>>,
     {
-        // Check circuit breaker before attempting operation
-        if !self.circuit_breaker.allow_request().await {
-            let state = self.circuit_breaker.state().await;
-            return Err(AppError::CircuitOpen(format!(
-                "Circuit breaker is {} - service temporarily unavailable",
-                state
-            )));
-        }
-
-        let timeout_duration = self.config.operation_timeout;
-
-        // First attempt with timeout
-        let result = tokio::time::timeout(timeout_duration, operation()).await;
-
-        match result {
-            Ok(Ok(value)) => {
-                self.circuit_breaker.record_success().await;
-                Ok(value)
-            }
-            Ok(Err(e)) if Self::is_connection_error(&e) => {
-                self.circuit_breaker.record_failure().await;
-                warn!(error = %e, "Operation failed due to connection error, attempting reconnect");
-                self.reconnect_bounded().await?;
-                self.retry_once(&operation).await
-            }
-            Ok(Err(e)) => {
-                // Non-connection error - don't record as circuit breaker failure
-                Err(e)
-            }
-            Err(_) => {
-                // Timeout on first attempt. The SDK's internal transport
-                // reconnection swallows most mid-operation connection failures
-                // into blocking retries, so a timeout is often the only outage
-                // signal we get - record it as a circuit-breaker failure.
-                self.circuit_breaker.record_failure().await;
-
-                // Only reconnect if we have evidence the connection is
-                // actually lost (the background health check drives this
-                // flag via live pings). A timeout alone could just be a slow
-                // operation.
-                if !self.state.is_connected() {
-                    warn!(
-                        timeout = ?timeout_duration,
-                        "Operation timed out and connection state is disconnected, attempting reconnect"
-                    );
-                    self.reconnect_bounded().await?;
-                    self.retry_once(&operation).await
-                } else {
-                    debug!(
-                        timeout = ?timeout_duration,
-                        "Operation timed out but connection state is healthy, not reconnecting"
-                    );
-                    Err(AppError::OperationTimeout(format!(
-                        "Operation timed out after {:?}",
-                        timeout_duration
-                    )))
-                }
-            }
-        }
-    }
-
-    /// Single post-reconnect retry with timeout and circuit-breaker
-    /// bookkeeping. Shared by both reconnect paths of [`Self::with_reconnect`].
-    async fn retry_once<F, Fut, T>(&self, operation: &F) -> AppResult<T>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = AppResult<T>>,
-    {
-        let timeout_duration = self.config.operation_timeout;
-        match tokio::time::timeout(timeout_duration, operation()).await {
-            Ok(Ok(value)) => {
-                self.circuit_breaker.record_success().await;
-                Ok(value)
-            }
-            Ok(Err(e)) => {
-                if Self::is_connection_error(&e) {
-                    self.circuit_breaker.record_failure().await;
-                }
-                Err(e)
-            }
-            Err(_) => {
-                self.circuit_breaker.record_failure().await;
-                Err(AppError::OperationTimeout(format!(
-                    "Operation timed out after {:?} on retry",
-                    timeout_duration
-                )))
-            }
-        }
-    }
-
-    /// Check if an error is a connection-related error that warrants reconnection.
-    ///
-    /// Uses explicit pattern matching on error variants rather than string matching,
-    /// which is more reliable and maintainable. Any error indicating connection
-    /// issues should trigger a reconnection attempt.
-    fn is_connection_error(error: &AppError) -> bool {
-        matches!(
-            error,
-            AppError::ConnectionFailed(_)
-                | AppError::Disconnected(_)
-                | AppError::ConnectionReset(_)
+        let timeout_is_outage_signal = self.op_deadline >= self.config.operation_timeout;
+        resilience::run_resilient(
+            &self.circuit_breaker,
+            self.op_deadline,
+            timeout_is_outage_signal,
+            || self.state.is_connected(),
+            || self.reconnect_bounded(),
+            operation,
         )
+        .await
     }
 
     // =========================================================================
@@ -1107,6 +1020,34 @@ impl IggyClientWrapper {
         &self.config
     }
 
+    /// Return a view of this wrapper whose operations are bounded by
+    /// `timeout` instead of the configured `OPERATION_TIMEOUT_SECS`.
+    ///
+    /// This is how the `X-Request-Timeout` header propagates into the Iggy
+    /// call path: handlers scope the client to the request's deadline. The
+    /// bound is clamped to the configured global timeout — a client may
+    /// SHORTEN the deadline, never extend it.
+    ///
+    /// All `Arc`'d internals (SDK client, config, connection state, circuit
+    /// breaker) are shared with the parent; the scoped view carries only a
+    /// different `op_deadline`, so the clone is cheap and process-global
+    /// machinery is untouched: a reconnect session triggered under a scoped
+    /// view has its caller wait bounded by the shortened deadline, but the
+    /// session itself (and health probes) always run at the global
+    /// `config.operation_timeout`. Timeouts observed under a shortened
+    /// deadline are NOT recorded as circuit-breaker failures (see
+    /// `with_reconnect`) — a client-chosen deadline expiring is not an
+    /// outage signal.
+    #[must_use]
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        let mut scoped = self.clone();
+        // Clamp against THIS view's deadline (not just the global) so
+        // re-scoping is shrink-only: a view scoped to 1s can never be
+        // widened back toward the global by a second with_timeout call.
+        scoped.op_deadline = clamp_deadline(timeout, self.op_deadline);
+        scoped
+    }
+
     /// Get the current circuit breaker state.
     pub async fn circuit_breaker_state(&self) -> CircuitState {
         self.circuit_breaker.state().await
@@ -1131,6 +1072,72 @@ impl IggyClientWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a wrapper without connecting (from_connection_string only
+    /// parses). Lets the tests below pin the with_timeout WIRING — the
+    /// round-2 review mutation-proved that deleting the clamp passed the
+    /// entire suite when only the free function was tested.
+    #[allow(clippy::expect_used)]
+    fn unconnected_wrapper() -> IggyClientWrapper {
+        let config = Config::default();
+        let client = IggyClient::from_connection_string(&config.iggy_connection_string)
+            .expect("default connection string parses");
+        IggyClientWrapper {
+            client: Arc::new(RwLock::new(client)),
+            op_deadline: config.operation_timeout,
+            config: Arc::new(config),
+            state: Arc::new(ConnectionState::new()),
+            circuit_breaker: Arc::new(CircuitBreaker::default()),
+        }
+    }
+
+    #[test]
+    fn test_with_timeout_wiring_clamps_and_is_shrink_only() {
+        let root = unconnected_wrapper();
+        let global = root.config.operation_timeout;
+        assert_eq!(root.op_deadline, global, "root runs at the global deadline");
+
+        // Shorten: honored.
+        let scoped = root.with_timeout(Duration::from_millis(100));
+        assert_eq!(scoped.op_deadline, Duration::from_millis(100));
+
+        // Extend: clamped to the global (TD-2026-07-04 security property,
+        // now pinned at the wiring level, not just the free function).
+        let extended = root.with_timeout(global + Duration::from_secs(270));
+        assert_eq!(extended.op_deadline, global);
+
+        // Re-scoping a scoped view is shrink-only: it can never widen back
+        // toward the global.
+        let rescoped = scoped.with_timeout(Duration::from_secs(10));
+        assert_eq!(rescoped.op_deadline, Duration::from_millis(100));
+
+        // The outage-signal predicate derives correctly from the wiring.
+        assert!(root.op_deadline >= root.config.operation_timeout);
+        assert!(scoped.op_deadline < scoped.config.operation_timeout);
+    }
+
+    #[test]
+    fn test_clamp_deadline_shortens() {
+        // A client may shorten the deadline below the global bound.
+        assert_eq!(
+            clamp_deadline(Duration::from_millis(100), Duration::from_secs(30)),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn test_clamp_deadline_never_extends() {
+        // TD-2026-07-04 security property: the header (max 5 min) can never
+        // extend server-side work beyond the global operation timeout.
+        assert_eq!(
+            clamp_deadline(Duration::from_secs(300), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            clamp_deadline(Duration::from_secs(30), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
 
     #[test]
     fn test_backoff_first_attempt_is_base_delay() {
@@ -1192,49 +1199,6 @@ mod tests {
             assert!(
                 (100..=30_000).contains(&delay),
                 "attempt {attempt} -> {delay}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_is_connection_error_connection_failed() {
-        let error = AppError::ConnectionFailed("test".to_string());
-        assert!(IggyClientWrapper::is_connection_error(&error));
-    }
-
-    #[test]
-    fn test_is_connection_error_disconnected() {
-        let error = AppError::Disconnected("connection lost".to_string());
-        assert!(IggyClientWrapper::is_connection_error(&error));
-    }
-
-    #[test]
-    fn test_is_connection_error_connection_reset() {
-        let error = AppError::ConnectionReset("reset by peer".to_string());
-        assert!(IggyClientWrapper::is_connection_error(&error));
-    }
-
-    #[test]
-    fn test_is_connection_error_unrelated_errors() {
-        // These errors should NOT trigger reconnection
-        let test_cases = vec![
-            AppError::BadRequest("invalid input".to_string()),
-            AppError::NotFound("resource missing".to_string()),
-            AppError::Internal("internal error".to_string()),
-            AppError::StreamError("stream issue".to_string()),
-            AppError::TopicError("topic issue".to_string()),
-            AppError::SendError("send failed".to_string()),
-            AppError::PollError("poll failed".to_string()),
-            AppError::ConfigError("config issue".to_string()),
-            AppError::OperationTimeout("timed out".to_string()),
-            AppError::CircuitOpen("circuit open".to_string()),
-        ];
-
-        for error in test_cases {
-            assert!(
-                !IggyClientWrapper::is_connection_error(&error),
-                "Error {:?} should not be treated as connection error",
-                error
             );
         }
     }

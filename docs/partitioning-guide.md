@@ -708,16 +708,6 @@ size_of_messages_required_to_save = "1 MiB"  # minimum: 512 B
 # Smaller = more files, faster deletion; Larger = fewer files, better sequential I/O
 size = "1 GiB"  # maximum: 1 GiB
 
-# Message expiration time (retention policy)
-# "none" = keep forever
-# Time format: "7 days", "24 hours", "30 minutes"
-message_expiry = "none"
-
-# What happens when segments expire
-# true = move to archive directory
-# false = delete permanently
-archive_expired = false
-
 # Index caching strategy
 # "all" = cache all indexes (fastest reads, most memory)
 # "open_segment" = cache only active segment (balanced)
@@ -738,10 +728,19 @@ server_confirmation = "wait"
 # "unlimited" or size like "100 GiB"
 max_size = "unlimited"
 
-# Auto-delete oldest segments when max_size is reached
-# Only takes effect if max_size is set
-delete_oldest_segments = false
+# Message expiration time (retention policy)
+# "none" = keep forever
+# Time format: "7 days", "24 hours", "30 minutes"
+message_expiry = "none"
 ```
+
+Size-based cleanup is automatic in server 0.8.0: once a topic reaches 90% of
+`max_size`, the oldest **sealed** segments are deleted (there is no separate
+`delete_oldest_segments` switch). Note that BOTH expiry- and size-based
+retention are enforced by the `[data_maintenance.messages]` cleaner, which
+is **disabled by default** — see the
+[durable-storage guide](durable-storage-guide.md#data-retention-policies)
+for the full retention configuration.
 
 ### Message Deduplication
 
@@ -765,7 +764,7 @@ expiry = "1 m"
 | **Maximum throughput** | `enforce_fsync = false`, `messages_required_to_save = 5000` |
 | **Low memory** | `cache_indexes = "none"`, smaller `messages_required_to_save` |
 | **Fast reads** | `cache_indexes = "all"` |
-| **Auto-cleanup** | `message_expiry = "7 days"`, `delete_oldest_segments = true` |
+| **Auto-cleanup** | `[system.topic] message_expiry = "7 days"` + `[data_maintenance.messages] cleaner_enabled = true` |
 
 ---
 

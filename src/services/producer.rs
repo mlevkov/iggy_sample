@@ -36,6 +36,18 @@ impl ProducerService {
         }
     }
 
+    /// Return a view of this service whose Iggy operations are bounded by
+    /// `timeout` (clamped to the configured global — see
+    /// [`IggyClientWrapper::with_timeout`]). The sent-messages counter is
+    /// shared with the parent, so stats stay global.
+    #[must_use]
+    pub fn with_timeout(&self, timeout: std::time::Duration) -> Self {
+        Self {
+            client: self.client.with_timeout(timeout),
+            messages_sent: Arc::clone(&self.messages_sent),
+        }
+    }
+
     /// Send an event to the default stream and topic.
     #[instrument(skip(self, event), fields(event_id = %event.id))]
     pub async fn send(

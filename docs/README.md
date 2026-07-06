@@ -8,7 +8,7 @@ This directory contains comprehensive guides for understanding and working with 
 |-------|-------------|
 | [Event-Driven Architecture Guide](guide.md) | Core concepts, streams/topics/partitions, consumer groups, error handling patterns, and production patterns (outbox, saga, idempotency) |
 | [Partitioning Guide](partitioning-guide.md) | Deep dive into partition keys, ordering guarantees, and partition selection strategies |
-| [Durable Storage Guide](durable-storage-guide.md) | Storage architecture, fsync configuration, backup/archiving to S3, recovery procedures, and production recommendations |
+| [Durable Storage Guide](durable-storage-guide.md) | Storage architecture, fsync configuration, retention, backup strategies (the built-in archiver was removed before server 0.8.0), recovery procedures, and production recommendations |
 | [Structured Concurrency](structured-concurrency.md) | Task lifecycle management, cancellation tokens, and graceful shutdown patterns |
 
 ## Quick Navigation
@@ -26,7 +26,7 @@ This directory contains comprehensive guides for understanding and working with 
 
 **Data Durability**
 - [Durability Configuration](durable-storage-guide.md#durability-configuration) - fsync settings and trade-offs
-- [Backup and Archiving](durable-storage-guide.md#backup-and-archiving) - S3 and disk archival
+- [Backup and Archiving](durable-storage-guide.md#backup-and-archiving) - backup strategies (built-in archiver removed in 0.8.0)
 - [Recovery](durable-storage-guide.md#recovery-and-data-integrity) - Disaster recovery procedures
 
 **Message Ordering**

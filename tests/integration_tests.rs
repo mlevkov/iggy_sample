@@ -981,6 +981,59 @@ async fn test_message_with_partition_key() {
     assert!(response.status().is_success());
 }
 
+/// X-Request-Timeout propagation (TD-2026-07-04): a valid header must flow
+/// through the scoped producer/consumer path and still serve the request; a
+/// malformed header is ignored (falls back to the global operation timeout)
+/// rather than rejected.
+#[tokio::test]
+async fn test_request_timeout_header_is_honored_end_to_end() {
+    let fixture = TestFixture::new().await;
+
+    // Valid header on a send: bounded by 5s instead of the 30s global.
+    let response = fixture
+        .client
+        .post(fixture.url("/messages"))
+        .header("X-Request-Timeout", "5000")
+        .json(&generic_event("request-timeout-send", None))
+        .send()
+        .await
+        .expect("Send with timeout header failed");
+    assert_eq!(response.status(), 201);
+
+    // Short-but-CI-safe header on a poll exercises the scoped consumer
+    // path (the literal 100ms minimum invites flakes on saturated hosts;
+    // the parse bounds are unit-tested in the middleware).
+    let response = fixture
+        .client
+        .get(fixture.url("/messages?partition_id=0&count=1&offset=0"))
+        .header("X-Request-Timeout", "1000")
+        .send()
+        .await
+        .expect("Poll with timeout header failed");
+    assert!(response.status().is_success());
+
+    // Malformed header: ignored, request served under the global timeout.
+    let response = fixture
+        .client
+        .post(fixture.url("/messages"))
+        .header("X-Request-Timeout", "not-a-number")
+        .json(&generic_event("request-timeout-malformed", None))
+        .send()
+        .await
+        .expect("Send with malformed timeout header failed");
+    assert_eq!(response.status(), 201);
+
+    // Scoped stream management path (iggy_scoped).
+    let response = fixture
+        .client
+        .get(fixture.url("/streams"))
+        .header("X-Request-Timeout", "2000")
+        .send()
+        .await
+        .expect("List streams with timeout header failed");
+    assert!(response.status().is_success());
+}
+
 #[tokio::test]
 async fn test_send_to_specific_stream_topic() {
     let fixture = TestFixture::new().await;

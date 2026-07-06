@@ -106,6 +106,7 @@ src/
 │   ├── connection.rs # Connection state management
 │   ├── helpers.rs    # Utility functions
 │   ├── params.rs     # PollParams builder
+│   ├── resilience.rs # Timeout/breaker/retry composition (run_resilient)
 │   └── scopeguard.rs # Scope guard utilities
 ├── validation.rs     # Input validation utilities
 ├── middleware/
@@ -135,6 +136,7 @@ tests/
 ├── integration_tests.rs  # End-to-end API tests with testcontainers
 │   ├── Standard fixture tests (basic CRUD, messages)
 │   └── Security boundary tests (auth, rate limiting)
+├── metrics_smoke_test.rs # Prometheus exporter smoke test (own process)
 └── model_tests.rs        # Unit tests for models
 
 fuzz/
@@ -427,11 +429,14 @@ environment:
 ### Running Tests
 
 ```bash
-# Unit tests (159 tests)
+# Unit tests (183 tests)
 cargo test --lib
 
-# Integration tests (29 tests, requires Docker for testcontainers)
+# Integration tests (30 tests, requires Docker for testcontainers)
 cargo test --test integration_tests
+
+# Metrics exporter smoke test (1 test)
+cargo test --test metrics_smoke_test
 
 # Model tests (18 tests)
 cargo test --test model_tests
@@ -711,12 +716,17 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 
 ### Request Timeout (`src/middleware/timeout.rs`)
 - Clients can specify `X-Request-Timeout: <milliseconds>` header
-- Bounded: 100ms minimum, 5 minutes maximum
-- Stored in request extensions for handler use
-- `RequestTimeoutExt` trait for easy extraction in handlers
-- **Note**: currently parsed and stored only — no handler consumes it yet, so
-  all Iggy operations are bounded by the global `OPERATION_TIMEOUT_SECS`.
-  Enforcement is tracked in `docs/tech-debt/TD-2026-07-04.md`.
+- Bounded: 100ms minimum, 5 minutes maximum (header parse acceptance)
+- Enforced end-to-end: all Iggy-touching handlers scope their client via
+  `AppState::{producer,consumer,iggy}_scoped` →
+  `IggyClientWrapper::with_timeout`, bounding every operation attempt by
+  the request deadline (worst case ~3x the deadline on the reconnect
+  path: first attempt + bounded reconnect wait + single retry)
+- Timeouts under a client-shortened deadline are NOT circuit-breaker
+  failures (a client's short deadline expiring is not outage evidence)
+- The effective deadline is clamped to the global `OPERATION_TIMEOUT_SECS`
+  — clients may shorten a request's bound, never extend it
+- Requests without the header use the global timeout unchanged
 
 ## Deployment Security
 
