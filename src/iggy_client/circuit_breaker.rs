@@ -173,6 +173,43 @@ impl CircuitBreakerState {
     }
 }
 
+/// What a completed state transition should report, emitted once the state
+/// guard has been released.
+///
+/// Logging reaches a global `tracing` subscriber and the metrics recorder takes
+/// a registry shard lock and allocates a label key; neither belongs inside the
+/// mutex that gates every Iggy operation. Everything carried here is a log line
+/// or a **monotonic counter**, so reordering two concurrent transitions'
+/// emissions is harmless.
+///
+/// The Prometheus state gauge is deliberately NOT here — see
+/// [`CircuitBreaker::set_gauge`].
+enum Effect {
+    /// Nothing to report.
+    None,
+    /// Open -> HalfOpen. `probes` is the budget as granted, captured before the
+    /// transitioning caller takes its own token.
+    EnteredHalfOpen { probes: u32 },
+    /// A request was turned away. The label separates "circuit is open" from
+    /// "half-open probe budget exhausted" — materially different situations.
+    Rejected {
+        label: &'static str,
+        budget_exhausted: bool,
+    },
+    /// A probe window elapsed with no recorded outcome and was re-granted.
+    RegrantedProbes,
+    /// A probe token was handed back because its outcome was never recorded.
+    ReleasedProbe,
+    /// A success landed in HalfOpen; `closed` if it reached the threshold.
+    HalfOpenSuccess { successes: u32, closed: bool },
+    /// A success arrived after another probe's failure had reopened the circuit.
+    SuccessWhileOpen,
+    /// A failure landed in Closed; `opened` if it reached the threshold.
+    Failure { failures: u32, opened: bool },
+    /// A failure in HalfOpen reopened the circuit.
+    ReopenedFromHalfOpen,
+}
+
 /// Thread-safe circuit breaker implementation.
 ///
 /// Prevents cascading failures by failing fast when a service is unavailable.
@@ -226,6 +263,101 @@ impl CircuitBreaker {
         })
     }
 
+    /// Write the Prometheus state gauge. Called **while the guard is held**.
+    ///
+    /// This is the one emission that cannot be hoisted out of the critical
+    /// section. The gauge is a last-writer-wins register, so if two racing
+    /// transitions each computed a value and emitted it after releasing the
+    /// guard, the older value could land second and the gauge would disagree
+    /// with the breaker until the next transition — which, during a stalled
+    /// recovery, may never come. Holding the guard makes the write order match
+    /// the transition order by construction.
+    ///
+    /// The single exhaustive mapping also replaces four hand-written `0`/`1`/`2`
+    /// literals, so a new state cannot be added without deciding its gauge value.
+    fn set_gauge(&self, state: CircuitState) {
+        crate::metrics::set_circuit_breaker_state(match state {
+            CircuitState::Closed => 0,
+            CircuitState::HalfOpen => 1,
+            CircuitState::Open => 2,
+        });
+    }
+
+    /// Monotonic bookkeeping for an Open transition, emitted after the guard is
+    /// released. Both are counters, so ordering against other transitions is
+    /// immaterial.
+    fn count_open(&self) {
+        self.times_opened.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::record_circuit_breaker_open();
+    }
+
+    /// Emit the logs and monotonic counters for a completed transition.
+    ///
+    /// Always called with the state guard already dropped.
+    fn emit(&self, effect: Effect) {
+        match effect {
+            Effect::None => {}
+            Effect::EnteredHalfOpen { probes } => {
+                info!(
+                    probes,
+                    "Circuit breaker transitioning from Open to HalfOpen"
+                );
+            }
+            Effect::Rejected {
+                label,
+                budget_exhausted,
+            } => {
+                if budget_exhausted {
+                    debug!("Circuit breaker rejected request: half-open probe budget exhausted");
+                }
+                self.requests_rejected.fetch_add(1, Ordering::Relaxed);
+                crate::metrics::record_circuit_breaker_rejection(label);
+            }
+            Effect::RegrantedProbes => {
+                // info: a full probe window elapsed without a recorded outcome
+                // - recovery is stalling, not progressing.
+                info!("Circuit breaker re-granted half-open probe tokens");
+            }
+            Effect::ReleasedProbe => {
+                debug!("Circuit breaker released a half-open probe token (outcome not recorded)");
+            }
+            Effect::HalfOpenSuccess { successes, closed } => {
+                debug!(
+                    consecutive_successes = successes,
+                    threshold = self.config.success_threshold,
+                    "Circuit breaker recorded success in HalfOpen state"
+                );
+                if closed {
+                    info!("Circuit breaker closed after successful recovery");
+                }
+            }
+            Effect::SuccessWhileOpen => {
+                debug!(
+                    "Success recorded while Open (in-flight probe finished after reopen); discarded"
+                );
+            }
+            Effect::Failure { failures, opened } => {
+                debug!(
+                    consecutive_failures = failures,
+                    threshold = self.config.failure_threshold,
+                    "Circuit breaker recorded failure"
+                );
+                if opened {
+                    self.count_open();
+                    warn!(
+                        failures,
+                        open_duration = ?self.config.open_duration,
+                        "Circuit breaker opened due to consecutive failures"
+                    );
+                }
+            }
+            Effect::ReopenedFromHalfOpen => {
+                self.count_open();
+                warn!("Circuit breaker reopened after failure in HalfOpen state");
+            }
+        }
+    }
+
     /// Check if a request should be allowed through the circuit breaker.
     ///
     /// Returns `true` if the request can proceed, `false` if it should be rejected.
@@ -255,50 +387,64 @@ impl CircuitBreaker {
         // path; a synchronous mutex makes it unnecessary, and dropping it also
         // removes the read->write upgrade race that forced the state to be
         // re-matched after the second acquisition.
-        let mut state = self.lock();
+        // Single-tail: every arm yields (allowed, effect) rather than returning
+        // early, so no path can skip the emit below.
+        let (allowed, effect) = {
+            let mut state = self.lock();
 
-        match state.state {
-            CircuitState::Closed => true,
-            CircuitState::Open => {
-                if let Some(opened_at) = state.opened_at
-                    && opened_at.elapsed() >= self.config.open_duration
-                {
-                    state.state = CircuitState::HalfOpen;
-                    state.consecutive_successes = 0;
-                    self.grant_probe_tokens(&mut state);
-                    info!(
-                        probes = state.half_open_probes_remaining,
-                        "Circuit breaker transitioning from Open to HalfOpen"
-                    );
-                    // The transitioning caller takes the first probe token.
-                    state.half_open_probes_remaining -= 1;
-                    crate::metrics::set_circuit_breaker_state(1);
-                    return true;
-                }
-                self.reject_request("open")
-            }
-            CircuitState::HalfOpen => {
-                if state.half_open_probes_remaining == 0 {
-                    // Re-grant after open_duration so leaked probes cannot
-                    // wedge the breaker in HalfOpen (see doc above).
-                    let window_expired = state
-                        .half_open_granted_at
-                        .is_none_or(|granted| granted.elapsed() >= self.config.open_duration);
-                    if !window_expired {
-                        debug!(
-                            "Circuit breaker rejected request: half-open probe budget exhausted"
-                        );
-                        return self.reject_request("half_open");
+            match state.state {
+                CircuitState::Closed => (true, Effect::None),
+                CircuitState::Open => {
+                    if let Some(opened_at) = state.opened_at
+                        && opened_at.elapsed() >= self.config.open_duration
+                    {
+                        state.state = CircuitState::HalfOpen;
+                        state.consecutive_successes = 0;
+                        self.grant_probe_tokens(&mut state);
+                        // Captured before the transitioning caller takes its
+                        // token, so the log reports the budget as granted.
+                        let probes = state.half_open_probes_remaining;
+                        state.half_open_probes_remaining -= 1;
+                        self.set_gauge(CircuitState::HalfOpen);
+                        (true, Effect::EnteredHalfOpen { probes })
+                    } else {
+                        (
+                            false,
+                            Effect::Rejected {
+                                label: "open",
+                                budget_exhausted: false,
+                            },
+                        )
                     }
-                    // info: a full probe window elapsed without a recorded
-                    // outcome - recovery is stalling, not progressing.
-                    info!("Circuit breaker re-granted half-open probe tokens");
-                    self.grant_probe_tokens(&mut state);
                 }
-                state.half_open_probes_remaining -= 1;
-                true
+                CircuitState::HalfOpen => {
+                    if state.half_open_probes_remaining > 0 {
+                        state.half_open_probes_remaining -= 1;
+                        (true, Effect::None)
+                    } else if state
+                        .half_open_granted_at
+                        .is_none_or(|granted| granted.elapsed() >= self.config.open_duration)
+                    {
+                        // Re-grant after open_duration so leaked probes cannot
+                        // wedge the breaker in HalfOpen (see doc above).
+                        self.grant_probe_tokens(&mut state);
+                        state.half_open_probes_remaining -= 1;
+                        (true, Effect::RegrantedProbes)
+                    } else {
+                        (
+                            false,
+                            Effect::Rejected {
+                                label: "half_open",
+                                budget_exhausted: true,
+                            },
+                        )
+                    }
+                }
             }
-        }
+        };
+
+        self.emit(effect);
+        allowed
     }
 
     /// Grant a fresh window of half-open probe tokens.
@@ -333,18 +479,6 @@ impl CircuitBreaker {
         self.grant_probe_tokens(&mut state);
     }
 
-    /// Record a rejection (counter + state-labeled metric) and return `false`.
-    ///
-    /// Single site for the bookkeeping so no rejection path can forget the
-    /// metrics half; the label lets operators distinguish "circuit is open"
-    /// from "half-open probe budget exhausted" — materially different
-    /// situations.
-    fn reject_request(&self, state_label: &'static str) -> bool {
-        self.requests_rejected.fetch_add(1, Ordering::Relaxed);
-        crate::metrics::record_circuit_breaker_rejection(state_label);
-        false
-    }
-
     /// Hand back a half-open probe token whose outcome was deliberately not
     /// recorded (non-connection errors touch neither breaker counter).
     ///
@@ -353,55 +487,57 @@ impl CircuitBreaker {
     /// tokens and starve recovery until the re-grant window. No-op outside
     /// HalfOpen; capped at the granted budget.
     pub(super) fn release_probe(&self) {
-        let mut state = self.lock();
-        if state.state == CircuitState::HalfOpen {
-            let cap = self.probe_budget();
-            if state.half_open_probes_remaining < cap {
+        let effect = {
+            let mut state = self.lock();
+            if state.state == CircuitState::HalfOpen
+                && state.half_open_probes_remaining < self.probe_budget()
+            {
                 state.half_open_probes_remaining += 1;
-                debug!("Circuit breaker released a half-open probe token (outcome not recorded)");
+                Effect::ReleasedProbe
+            } else {
+                Effect::None
             }
-        }
+        };
+        self.emit(effect);
     }
 
     /// Record a successful operation.
     ///
     /// In HalfOpen state, consecutive successes can close the circuit.
     pub fn record_success(&self) {
-        let mut state = self.lock();
+        let effect = {
+            let mut state = self.lock();
 
-        match state.state {
-            CircuitState::Closed => {
-                // Reset failure counter on success
-                state.consecutive_failures = 0;
-            }
-            CircuitState::HalfOpen => {
-                state.consecutive_successes += 1;
-                debug!(
-                    consecutive_successes = state.consecutive_successes,
-                    threshold = self.config.success_threshold,
-                    "Circuit breaker recorded success in HalfOpen state"
-                );
-
-                if state.consecutive_successes >= self.config.success_threshold {
-                    state.state = CircuitState::Closed;
-                    state.opened_at = None;
+            match state.state {
+                CircuitState::Closed => {
+                    // Reset failure counter on success
                     state.consecutive_failures = 0;
-                    crate::metrics::set_circuit_breaker_state(0);
-                    info!("Circuit breaker closed after successful recovery");
+                    Effect::None
+                }
+                CircuitState::HalfOpen => {
+                    state.consecutive_successes += 1;
+                    let successes = state.consecutive_successes;
+                    let closed = successes >= self.config.success_threshold;
+                    if closed {
+                        state.state = CircuitState::Closed;
+                        state.opened_at = None;
+                        state.consecutive_failures = 0;
+                        self.set_gauge(CircuitState::Closed);
+                    }
+                    Effect::HalfOpenSuccess { successes, closed }
+                }
+                CircuitState::Open => {
+                    // Reachable through legitimate interleavings: a half-open
+                    // probe (or its post-reconnect retry, which bypasses the
+                    // gate) can complete successfully after another probe's
+                    // failure reopened the circuit. The success is deliberately
+                    // discarded - recovery restarts from the next half-open
+                    // window's probes.
+                    Effect::SuccessWhileOpen
                 }
             }
-            CircuitState::Open => {
-                // Reachable through legitimate interleavings: a half-open
-                // probe (or its post-reconnect retry, which bypasses the
-                // gate) can complete successfully after another probe's
-                // failure reopened the circuit. The success is deliberately
-                // discarded - recovery restarts from the next half-open
-                // window's probes.
-                debug!(
-                    "Success recorded while Open (in-flight probe finished after reopen); discarded"
-                );
-            }
-        }
+        };
+        self.emit(effect);
     }
 
     /// Record a failed operation.
@@ -409,38 +545,38 @@ impl CircuitBreaker {
     /// In Closed state, consecutive failures can open the circuit.
     /// In HalfOpen state, any failure reopens the circuit.
     pub fn record_failure(&self) {
-        let mut state = self.lock();
+        let effect = {
+            let mut state = self.lock();
 
-        match state.state {
-            CircuitState::Closed => {
-                state.consecutive_failures += 1;
-                debug!(
-                    consecutive_failures = state.consecutive_failures,
-                    threshold = self.config.failure_threshold,
-                    "Circuit breaker recorded failure"
-                );
-
-                if state.consecutive_failures >= self.config.failure_threshold {
+            match state.state {
+                CircuitState::Closed => {
+                    state.consecutive_failures += 1;
+                    // Captured before open_now: the state enum this refactor is
+                    // preparing for carries no failure count in its Open
+                    // variant, so reading it after the transition would not
+                    // survive that change.
+                    let failures = state.consecutive_failures;
+                    let opened = failures >= self.config.failure_threshold;
+                    if opened {
+                        self.open_now(&mut state);
+                    }
+                    Effect::Failure { failures, opened }
+                }
+                CircuitState::HalfOpen => {
+                    // Any failure in half-open state reopens the circuit
+                    state.consecutive_successes = 0;
                     self.open_now(&mut state);
-                    warn!(
-                        failures = state.consecutive_failures,
-                        open_duration = ?self.config.open_duration,
-                        "Circuit breaker opened due to consecutive failures"
-                    );
+                    Effect::ReopenedFromHalfOpen
+                }
+                CircuitState::Open => {
+                    // Already open. Deliberately do NOT refresh opened_at:
+                    // straggler failures from in-flight requests would otherwise
+                    // extend the open window indefinitely and delay recovery.
+                    Effect::None
                 }
             }
-            CircuitState::HalfOpen => {
-                // Any failure in half-open state reopens the circuit
-                state.consecutive_successes = 0;
-                self.open_now(&mut state);
-                warn!("Circuit breaker reopened after failure in HalfOpen state");
-            }
-            CircuitState::Open => {
-                // Already open. Deliberately do NOT refresh opened_at:
-                // straggler failures from in-flight requests would otherwise
-                // extend the open window indefinitely and delay recovery.
-            }
-        }
+        };
+        self.emit(effect);
     }
 
     /// Get the current circuit state.
@@ -472,16 +608,18 @@ impl CircuitBreaker {
     /// only callers are tests staging a known state.
     #[cfg(test)]
     pub fn force_close(&self) {
-        let mut state = self.lock();
-        state.state = CircuitState::Closed;
-        state.opened_at = None;
-        state.consecutive_failures = 0;
-        state.consecutive_successes = 0;
-        // Hygiene: half-open probe fields are re-granted on every HalfOpen
-        // entry, but stale values should not outlive a manual reset.
-        state.half_open_probes_remaining = 0;
-        state.half_open_granted_at = None;
-        crate::metrics::set_circuit_breaker_state(0);
+        {
+            let mut state = self.lock();
+            state.state = CircuitState::Closed;
+            state.opened_at = None;
+            state.consecutive_failures = 0;
+            state.consecutive_successes = 0;
+            // Hygiene: half-open probe fields are re-granted on every HalfOpen
+            // entry, but stale values should not outlive a manual reset.
+            state.half_open_probes_remaining = 0;
+            state.half_open_granted_at = None;
+            self.set_gauge(CircuitState::Closed);
+        }
         info!("Circuit breaker forcibly closed");
     }
 
@@ -492,22 +630,35 @@ impl CircuitBreaker {
     /// and keeping `times_opened` honest.
     #[cfg(test)]
     pub fn force_open(&self) {
-        let mut state = self.lock();
-        if state.state != CircuitState::Open {
-            self.open_now(&mut state);
+        let opened = {
+            let mut state = self.lock();
+            let changed = state.state != CircuitState::Open;
+            if changed {
+                self.open_now(&mut state);
+            }
+            changed
+        };
+        if opened {
+            self.count_open();
             warn!("Circuit breaker forcibly opened");
         }
     }
 
-    /// Transition to Open, keeping internal counters and Prometheus metrics
-    /// in lockstep. Shared by the threshold, half-open-failure, and forced
-    /// open transitions so the gauge cannot drift from the atomics.
+    /// Transition to Open under the state guard.
+    ///
+    /// Shared by the threshold, half-open-failure and forced-open paths so the
+    /// gauge cannot drift from the state: [`Self::set_gauge`] runs here, still
+    /// holding the guard, which is what keeps gauge writes ordered with
+    /// transitions.
+    ///
+    /// The `times_opened` atomic and the `circuit_breaker_open` counter are
+    /// deliberately NOT bumped here — they are monotonic, so they move to
+    /// [`Self::count_open`] and are emitted after the guard is released.
+    /// Callers must pair this with the matching [`Effect`].
     fn open_now(&self, state: &mut CircuitBreakerState) {
         state.state = CircuitState::Open;
         state.opened_at = Some(Instant::now());
-        self.times_opened.fetch_add(1, Ordering::Relaxed);
-        crate::metrics::record_circuit_breaker_open();
-        crate::metrics::set_circuit_breaker_state(2);
+        self.set_gauge(CircuitState::Open);
     }
 }
 
