@@ -668,6 +668,48 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_half_open_regrant_preserves_consecutive_successes() {
+        // TD-2026-07-09 pin. `grant_probe_tokens` is shared by two callers
+        // with different intent: the HalfOpen ENTRY path zeroes
+        // `consecutive_successes` in a separate statement before calling it,
+        // while the RE-GRANT path must PRESERVE the count. Replacing those
+        // loose field writes with whole-variant construction makes the
+        // obvious port zero the count at both sites, silently discarding a
+        // recorded probe success. Pinned here before the shape changes.
+        let config = CircuitBreakerConfig::new(1, 2, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        // Entry consumes one of the two tokens; record a success against it.
+        assert!(cb.allow_request().await);
+        cb.record_success().await;
+        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+
+        // Spend the second token, then exhaust the budget. Without this the
+        // re-grant branch is never reached and the rest passes vacuously.
+        assert!(cb.allow_request().await);
+        assert!(
+            !cb.allow_request().await,
+            "budget must be exhausted for the re-grant branch to be exercised"
+        );
+
+        // Window expiry re-grants; the success recorded above must survive.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(cb.allow_request().await);
+
+        // This second success reaches success_threshold only if the first one
+        // survived the re-grant - a resetting re-grant leaves it HalfOpen.
+        cb.record_success().await;
+        assert_eq!(
+            cb.state().await,
+            CircuitState::Closed,
+            "re-grant must preserve consecutive_successes"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_half_open_reentry_grants_fresh_probe_tokens() {
         let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
