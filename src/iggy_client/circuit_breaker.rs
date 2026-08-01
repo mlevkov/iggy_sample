@@ -112,6 +112,24 @@ impl std::fmt::Display for CircuitState {
     }
 }
 
+impl CircuitState {
+    /// Value for the `iggy_circuit_breaker_state` Prometheus gauge.
+    ///
+    /// The single mapping for what used to be four hand-written `0`/`1`/`2`
+    /// literals; exhaustive with no `_` arm, so a new state cannot be added
+    /// without deciding what operators should see.
+    ///
+    /// Deliberately not [`Display`], whose rendering is user-facing prose
+    /// (`"half-open"`, hyphenated) and differs from the metric vocabulary.
+    fn gauge(self) -> u8 {
+        match self {
+            CircuitState::Closed => 0,
+            CircuitState::HalfOpen => 1,
+            CircuitState::Open => 2,
+        }
+    }
+}
+
 /// Configuration for the circuit breaker.
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerConfig {
@@ -144,31 +162,64 @@ impl CircuitBreakerConfig {
     }
 }
 
-/// Internal state for the circuit breaker.
-struct CircuitBreakerState {
-    /// Current circuit state.
-    state: CircuitState,
-    /// When the circuit was opened (for timeout calculation).
-    opened_at: Option<Instant>,
-    /// Number of consecutive failures (in closed state).
-    consecutive_failures: u32,
-    /// Number of consecutive successes (in half-open state).
-    consecutive_successes: u32,
-    /// Probe tokens remaining in the current half-open window.
-    half_open_probes_remaining: u32,
-    /// When the current half-open probe window was granted (for re-grant).
-    half_open_granted_at: Option<Instant>,
+/// Internal state, with each variant owning exactly the data that is
+/// meaningful while the breaker is in it.
+///
+/// The flat struct this replaces kept every field in every state, so
+/// `opened_at` was `Some` only in Open, the two half-open fields only in
+/// HalfOpen, and `consecutive_failures` only in Closed — invariants maintained
+/// by convention at each mutation site, and re-established by hand on every
+/// transition. Payload variants make a stale field unrepresentable instead.
+///
+/// # Entering versus re-granting a probe window
+///
+/// Both paths refill `probes_remaining` and stamp `granted_at`, and they differ
+/// on exactly one field:
+///
+/// | field | enter (Open -> HalfOpen) | re-grant (within HalfOpen) |
+/// |---|---|---|
+/// | `probes_remaining` | budget | budget |
+/// | `granted_at` | now | now |
+/// | `consecutive_successes` | **0** | **preserved** |
+///
+/// Entering is a new recovery attempt, so probes recorded against the previous
+/// one must not count toward closing. A re-grant is the *same* attempt
+/// continuing — its window simply expired with probes unaccounted for — so a
+/// success already recorded still counts. Zeroing it there would silently
+/// discard a probe success and force a full fresh run after every window
+/// expiry. Pinned by `test_half_open_regrant_preserves_consecutive_successes`.
+enum State {
+    /// Normal operation. Consecutive failures accumulate toward the threshold.
+    Closed { consecutive_failures: u32 },
+    /// Failing fast until `open_duration` elapses from `opened_at`.
+    Open { opened_at: Instant },
+    /// Token-limited recovery probing.
+    HalfOpen {
+        probes_remaining: u32,
+        granted_at: Instant,
+        consecutive_successes: u32,
+    },
 }
 
-impl CircuitBreakerState {
-    fn new() -> Self {
-        Self {
-            state: CircuitState::Closed,
-            opened_at: None,
+impl State {
+    /// The initial state: closed, with no failures recorded.
+    fn initial() -> Self {
+        State::Closed {
             consecutive_failures: 0,
-            consecutive_successes: 0,
-            half_open_probes_remaining: 0,
-            half_open_granted_at: None,
+        }
+    }
+}
+
+/// Projection to the public, data-less state.
+///
+/// Deliberately exhaustive with no `_` arm, so adding an internal variant is a
+/// compile error here rather than a silent mis-projection.
+impl From<&State> for CircuitState {
+    fn from(state: &State) -> Self {
+        match state {
+            State::Closed { .. } => CircuitState::Closed,
+            State::Open { .. } => CircuitState::Open,
+            State::HalfOpen { .. } => CircuitState::HalfOpen,
         }
     }
 }
@@ -223,7 +274,7 @@ pub struct CircuitBreaker {
     /// Configuration parameters.
     config: CircuitBreakerConfig,
     /// Internal state protected by a synchronous mutex.
-    state: Mutex<CircuitBreakerState>,
+    state: Mutex<State>,
     /// Total number of times the circuit has been opened (for metrics).
     times_opened: AtomicU32,
     /// Total number of requests rejected due to open circuit (for metrics).
@@ -235,7 +286,7 @@ impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             config,
-            state: Mutex::new(CircuitBreakerState::new()),
+            state: Mutex::new(State::initial()),
             times_opened: AtomicU32::new(0),
             requests_rejected: AtomicU64::new(0),
         }
@@ -253,7 +304,7 @@ impl CircuitBreaker {
     /// The `panicking()` guard is load-bearing: poisoning implies an in-flight
     /// unwind, and asserting during unwind double-panics straight to abort,
     /// destroying the very test report the assertion exists to sharpen.
-    fn lock(&self) -> MutexGuard<'_, CircuitBreakerState> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|poisoned| {
             if !std::thread::panicking() {
                 debug_assert!(false, "circuit breaker state lock poisoned");
@@ -273,14 +324,10 @@ impl CircuitBreaker {
     /// recovery, may never come. Holding the guard makes the write order match
     /// the transition order by construction.
     ///
-    /// The single exhaustive mapping also replaces four hand-written `0`/`1`/`2`
-    /// literals, so a new state cannot be added without deciding its gauge value.
+    /// The value itself comes from [`CircuitState::gauge`], the single
+    /// exhaustive mapping that replaced four hand-written literals.
     fn set_gauge(&self, state: CircuitState) {
-        crate::metrics::set_circuit_breaker_state(match state {
-            CircuitState::Closed => 0,
-            CircuitState::HalfOpen => 1,
-            CircuitState::Open => 2,
-        });
+        crate::metrics::set_circuit_breaker_state(state.gauge());
     }
 
     /// Monotonic bookkeeping for an Open transition, emitted after the guard is
@@ -390,23 +437,26 @@ impl CircuitBreaker {
         // Single-tail: every arm yields (allowed, effect) rather than returning
         // early, so no path can skip the emit below.
         let (allowed, effect) = {
-            let mut state = self.lock();
+            let mut guard = self.lock();
+            let budget = self.probe_budget();
 
-            match state.state {
-                CircuitState::Closed => (true, Effect::None),
-                CircuitState::Open => {
-                    if let Some(opened_at) = state.opened_at
-                        && opened_at.elapsed() >= self.config.open_duration
-                    {
-                        state.state = CircuitState::HalfOpen;
-                        state.consecutive_successes = 0;
-                        self.grant_probe_tokens(&mut state);
-                        // Captured before the transitioning caller takes its
-                        // token, so the log reports the budget as granted.
-                        let probes = state.half_open_probes_remaining;
-                        state.half_open_probes_remaining -= 1;
+            match &mut *guard {
+                State::Closed { .. } => (true, Effect::None),
+                State::Open { opened_at } => {
+                    if opened_at.elapsed() >= self.config.open_duration {
+                        // A NEW recovery attempt: the success count starts at
+                        // zero (contrast the re-grant arm below). The
+                        // transitioning caller takes the first of the granted
+                        // tokens as it passes, so the window opens at
+                        // budget - 1; probe_budget() floors at 1, so this
+                        // cannot underflow.
+                        *guard = State::HalfOpen {
+                            probes_remaining: budget - 1,
+                            granted_at: Instant::now(),
+                            consecutive_successes: 0,
+                        };
                         self.set_gauge(CircuitState::HalfOpen);
-                        (true, Effect::EnteredHalfOpen { probes })
+                        (true, Effect::EnteredHalfOpen { probes: budget })
                     } else {
                         (
                             false,
@@ -417,18 +467,21 @@ impl CircuitBreaker {
                         )
                     }
                 }
-                CircuitState::HalfOpen => {
-                    if state.half_open_probes_remaining > 0 {
-                        state.half_open_probes_remaining -= 1;
+                State::HalfOpen {
+                    probes_remaining,
+                    granted_at,
+                    ..
+                } => {
+                    if *probes_remaining > 0 {
+                        *probes_remaining -= 1;
                         (true, Effect::None)
-                    } else if state
-                        .half_open_granted_at
-                        .is_none_or(|granted| granted.elapsed() >= self.config.open_duration)
-                    {
+                    } else if granted_at.elapsed() >= self.config.open_duration {
                         // Re-grant after open_duration so leaked probes cannot
-                        // wedge the breaker in HalfOpen (see doc above).
-                        self.grant_probe_tokens(&mut state);
-                        state.half_open_probes_remaining -= 1;
+                        // wedge the breaker in HalfOpen (see doc above). This
+                        // is the SAME recovery attempt continuing, so
+                        // consecutive_successes is deliberately untouched.
+                        *probes_remaining = budget - 1;
+                        *granted_at = Instant::now();
                         (true, Effect::RegrantedProbes)
                     } else {
                         (
@@ -447,16 +500,6 @@ impl CircuitBreaker {
         allowed
     }
 
-    /// Grant a fresh window of half-open probe tokens.
-    ///
-    /// `success_threshold` tokens (at least one, so a zero threshold cannot
-    /// deadlock the breaker) — exactly enough probes to close the circuit
-    /// if all of them succeed.
-    fn grant_probe_tokens(&self, state: &mut CircuitBreakerState) {
-        state.half_open_probes_remaining = self.probe_budget();
-        state.half_open_granted_at = Some(Instant::now());
-    }
-
     /// Half-open probe budget: `success_threshold`, floored at one so a
     /// zero threshold cannot deadlock the breaker. Single definition shared
     /// by the grant and release paths so the cap cannot drift.
@@ -473,10 +516,12 @@ impl CircuitBreaker {
     /// leaves the budget as the only contended resource.
     #[cfg(test)]
     fn force_half_open(&self) {
-        let mut state = self.lock();
-        state.state = CircuitState::HalfOpen;
-        state.consecutive_successes = 0;
-        self.grant_probe_tokens(&mut state);
+        let mut guard = self.lock();
+        *guard = State::HalfOpen {
+            probes_remaining: self.probe_budget(),
+            granted_at: Instant::now(),
+            consecutive_successes: 0,
+        };
     }
 
     /// Hand back a half-open probe token whose outcome was deliberately not
@@ -488,11 +533,14 @@ impl CircuitBreaker {
     /// HalfOpen; capped at the granted budget.
     pub(super) fn release_probe(&self) {
         let effect = {
-            let mut state = self.lock();
-            if state.state == CircuitState::HalfOpen
-                && state.half_open_probes_remaining < self.probe_budget()
+            let mut guard = self.lock();
+            let budget = self.probe_budget();
+            if let State::HalfOpen {
+                probes_remaining, ..
+            } = &mut *guard
+                && *probes_remaining < budget
             {
-                state.half_open_probes_remaining += 1;
+                *probes_remaining += 1;
                 Effect::ReleasedProbe
             } else {
                 Effect::None
@@ -506,27 +554,32 @@ impl CircuitBreaker {
     /// In HalfOpen state, consecutive successes can close the circuit.
     pub fn record_success(&self) {
         let effect = {
-            let mut state = self.lock();
+            let mut guard = self.lock();
 
-            match state.state {
-                CircuitState::Closed => {
+            match &mut *guard {
+                State::Closed {
+                    consecutive_failures,
+                } => {
                     // Reset failure counter on success
-                    state.consecutive_failures = 0;
+                    *consecutive_failures = 0;
                     Effect::None
                 }
-                CircuitState::HalfOpen => {
-                    state.consecutive_successes += 1;
-                    let successes = state.consecutive_successes;
+                State::HalfOpen {
+                    consecutive_successes,
+                    ..
+                } => {
+                    *consecutive_successes += 1;
+                    let successes = *consecutive_successes;
                     let closed = successes >= self.config.success_threshold;
                     if closed {
-                        state.state = CircuitState::Closed;
-                        state.opened_at = None;
-                        state.consecutive_failures = 0;
+                        *guard = State::Closed {
+                            consecutive_failures: 0,
+                        };
                         self.set_gauge(CircuitState::Closed);
                     }
                     Effect::HalfOpenSuccess { successes, closed }
                 }
-                CircuitState::Open => {
+                State::Open { .. } => {
                     // Reachable through legitimate interleavings: a half-open
                     // probe (or its post-reconnect retry, which bypasses the
                     // gate) can complete successfully after another probe's
@@ -546,29 +599,31 @@ impl CircuitBreaker {
     /// In HalfOpen state, any failure reopens the circuit.
     pub fn record_failure(&self) {
         let effect = {
-            let mut state = self.lock();
+            let mut guard = self.lock();
 
-            match state.state {
-                CircuitState::Closed => {
-                    state.consecutive_failures += 1;
+            match &mut *guard {
+                State::Closed {
+                    consecutive_failures,
+                } => {
+                    *consecutive_failures += 1;
                     // Captured before open_now: the state enum this refactor is
                     // preparing for carries no failure count in its Open
                     // variant, so reading it after the transition would not
                     // survive that change.
-                    let failures = state.consecutive_failures;
+                    let failures = *consecutive_failures;
                     let opened = failures >= self.config.failure_threshold;
                     if opened {
-                        self.open_now(&mut state);
+                        self.open_now(&mut guard);
                     }
                     Effect::Failure { failures, opened }
                 }
-                CircuitState::HalfOpen => {
-                    // Any failure in half-open state reopens the circuit
-                    state.consecutive_successes = 0;
-                    self.open_now(&mut state);
+                State::HalfOpen { .. } => {
+                    // Any failure in half-open state reopens the circuit; the
+                    // accumulated success count dies with the variant.
+                    self.open_now(&mut guard);
                     Effect::ReopenedFromHalfOpen
                 }
-                CircuitState::Open => {
+                State::Open { .. } => {
                     // Already open. Deliberately do NOT refresh opened_at:
                     // straggler failures from in-flight requests would otherwise
                     // extend the open window indefinitely and delay recovery.
@@ -581,7 +636,7 @@ impl CircuitBreaker {
 
     /// Get the current circuit state.
     pub fn state(&self) -> CircuitState {
-        self.lock().state
+        CircuitState::from(&*self.lock())
     }
 
     /// Get the number of times the circuit has been opened.
@@ -609,15 +664,13 @@ impl CircuitBreaker {
     #[cfg(test)]
     pub fn force_close(&self) {
         {
-            let mut state = self.lock();
-            state.state = CircuitState::Closed;
-            state.opened_at = None;
-            state.consecutive_failures = 0;
-            state.consecutive_successes = 0;
-            // Hygiene: half-open probe fields are re-granted on every HalfOpen
-            // entry, but stale values should not outlive a manual reset.
-            state.half_open_probes_remaining = 0;
-            state.half_open_granted_at = None;
+            let mut guard = self.lock();
+            // One assignment replaces six field resets. The old flat struct
+            // needed explicit hygiene so stale half-open values could not
+            // outlive the reset; the enum drops them with the variant.
+            *guard = State::Closed {
+                consecutive_failures: 0,
+            };
             self.set_gauge(CircuitState::Closed);
         }
         info!("Circuit breaker forcibly closed");
@@ -631,10 +684,10 @@ impl CircuitBreaker {
     #[cfg(test)]
     pub fn force_open(&self) {
         let opened = {
-            let mut state = self.lock();
-            let changed = state.state != CircuitState::Open;
+            let mut guard = self.lock();
+            let changed = !matches!(*guard, State::Open { .. });
             if changed {
-                self.open_now(&mut state);
+                self.open_now(&mut guard);
             }
             changed
         };
@@ -655,9 +708,10 @@ impl CircuitBreaker {
     /// deliberately NOT bumped here — they are monotonic, so they move to
     /// [`Self::count_open`] and are emitted after the guard is released.
     /// Callers must pair this with the matching [`Effect`].
-    fn open_now(&self, state: &mut CircuitBreakerState) {
-        state.state = CircuitState::Open;
-        state.opened_at = Some(Instant::now());
+    fn open_now(&self, state: &mut State) {
+        *state = State::Open {
+            opened_at: Instant::now(),
+        };
         self.set_gauge(CircuitState::Open);
     }
 }
@@ -860,13 +914,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_half_open_regrant_preserves_consecutive_successes() {
-        // TD-2026-07-09 pin. `grant_probe_tokens` is shared by two callers
-        // with different intent: the HalfOpen ENTRY path zeroes
-        // `consecutive_successes` in a separate statement before calling it,
-        // while the RE-GRANT path must PRESERVE the count. Replacing those
-        // loose field writes with whole-variant construction makes the
-        // obvious port zero the count at both sites, silently discarding a
-        // recorded probe success. Pinned here before the shape changes.
+        // TD-2026-07-09. Entering HalfOpen resets `consecutive_successes`;
+        // re-granting an expired window inside HalfOpen must PRESERVE it. The
+        // two paths sat one statement apart in the flat struct and are now two
+        // arms of the state enum, and in both shapes the tempting port writes
+        // a zero at both sites - silently discarding a recorded probe success
+        // and forcing a full fresh run after every window expiry. Written
+        // before the enum landed so it pins the behavior across that change;
+        // see the `State` docs for the full disposition table.
         let config = CircuitBreakerConfig::new(1, 2, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
