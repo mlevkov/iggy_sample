@@ -332,10 +332,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn success_passes_through_and_records_breaker_success() {
         // Enter HalfOpen (success_threshold = 1) so record_success is
-        // observable: the single success must close the circuit. Zero
-        // open_duration makes the Open->HalfOpen transition immediate.
-        let breaker = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::ZERO));
+        // observable: the single success must close the circuit.
+        //
+        // A real 30s window plus an advance, rather than a zero window: zero is
+        // a configuration Config::validate now rejects, and a test resting on
+        // one production refuses would drift from reality.
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::from_secs(30)));
         breaker.force_open();
+        tokio::time::advance(Duration::from_secs(30)).await;
         let reconnects = Arc::new(AtomicU32::new(0));
 
         let result: AppResult<u32> = run_resilient(

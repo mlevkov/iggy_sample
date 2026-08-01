@@ -283,10 +283,11 @@ fn grant_window(
 }
 
 /// How a half-open probe token ended.
+///
+/// Every minted token ends in exactly one of these, so they partition the
+/// admissions that carried a permit. That totality is the point: `consumed` is
+/// only usable as a denominator if nothing ends uncounted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Every minted token ends in exactly one of these, so the four together
-/// partition the admissions that carried a permit. That totality is the point:
-/// `consumed` is only usable as a denominator if nothing ends uncounted.
 enum Disposition {
     /// The outcome was recorded, so the token was not handed back.
     Consumed,
@@ -299,6 +300,11 @@ enum Disposition {
     /// The common shape during recovery: a sibling probe closes or reopens the
     /// circuit while this one is still running.
     Abandoned,
+    /// A token came back to a window that was already whole. Unreachable
+    /// unless the accounting is wrong, and kept as its own label precisely so
+    /// it cannot hide inside the routine `abandoned` volume — this one is
+    /// alertable, that one is not.
+    Inconsistent,
 }
 
 impl Disposition {
@@ -308,6 +314,7 @@ impl Disposition {
             Disposition::Released => "released",
             Disposition::Stale => "stale",
             Disposition::Abandoned => "abandoned",
+            Disposition::Inconsistent => "inconsistent",
         }
     }
 }
@@ -594,12 +601,21 @@ impl CircuitBreaker {
                 debug!("Circuit breaker probe ended after its window closed");
             }
             Effect::ProbeOverRelease => {
-                self.record_disposition(Disposition::Abandoned);
-                debug_assert!(false, "probe token released into a full window");
+                self.record_disposition(Disposition::Inconsistent);
+                // The structured line first: in a debug build the assert below
+                // ends the process, and this is the diagnostic worth keeping.
                 warn!(
                     "Circuit breaker saw a probe token released into a full window; \
                      token accounting is inconsistent"
                 );
+                // Same reasoning as `lock()`: this is reachable from
+                // `ProbePermit::drop`, so under test a panic elsewhere can drop
+                // a live permit mid-unwind and land here. Asserting during an
+                // unwind double-panics straight to abort, taking the whole test
+                // report with it - including the failure that started it.
+                if !std::thread::panicking() {
+                    debug_assert!(false, "probe token released into a full window");
+                }
             }
             Effect::StaleProbeDiscarded { minted, current } => {
                 // The token outlived its window. Bounded and self-correcting,
@@ -815,10 +831,12 @@ impl CircuitBreaker {
                     *probes_remaining += 1;
                     Effect::ReleasedProbe
                 }
-                // Same window, already at full budget. Since remaining plus
-                // outstanding always equals the budget, no permit can exist to
-                // reach this arm - getting here means the token accounting is
-                // broken, not that a release was merely redundant.
+                // Same window, already at full budget. The real invariant is
+                // remaining + outstanding + consumed == budget (a consumed
+                // token never comes back), so remaining == budget implies
+                // outstanding == 0 - there is no permit left that could reach
+                // this arm. Getting here means the accounting is broken, not
+                // that a release was merely redundant.
                 State::HalfOpen { .. } => Effect::ProbeOverRelease,
                 // The breaker left HalfOpen while this probe was in flight: a
                 // sibling probe closed or reopened the circuit. The window died
@@ -829,8 +847,10 @@ impl CircuitBreaker {
         self.emit(effect);
     }
 
-    /// Count how a probe token ended. Touches no state and takes no lock, so
-    /// it is safe from [`ProbePermit::consume`], which may run anywhere.
+    /// Count how a probe token ended. Touches no breaker state and takes no
+    /// breaker lock, so it is safe from [`ProbePermit::consume`], which may run
+    /// anywhere. (The metrics recorder takes its own registry lock — that is
+    /// why this is called outside the state guard, not why it is safe.)
     fn record_disposition(&self, disposition: Disposition) {
         crate::metrics::record_circuit_breaker_probe_disposition(disposition.label());
     }
@@ -1382,7 +1402,12 @@ mod tests {
     }
 
     // =========================================================================
-    // TD-2026-07-09: the three probe-accounting leaks, one test each
+    // TD-2026-07-09: the three probe-accounting leaks.
+    //
+    // Not one test each. Leak 1 (phantom release) is closed by construction -
+    // Ungated carries no permit - so there is no state of affairs left to
+    // assert; its slot here holds the successor hazard, a permit outliving its
+    // window. See the record's Resolution.
     // =========================================================================
 
     #[tokio::test(start_paused = true)]
@@ -1509,6 +1534,7 @@ mod tests {
         assert_eq!(Disposition::Released.label(), "released");
         assert_eq!(Disposition::Stale.label(), "stale");
         assert_eq!(Disposition::Abandoned.label(), "abandoned");
+        assert_eq!(Disposition::Inconsistent.label(), "inconsistent");
 
         // The distinction is the point: Display is user-facing prose and
         // renders a hyphen, while the exported Prometheus label uses an

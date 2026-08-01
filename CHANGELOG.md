@@ -26,10 +26,12 @@ mis-sequenced rather than merely mis-specified.
   disconnecting during an outage — returns its token instead of stranding it
   until the re-grant window
 - `iggy_circuit_breaker_probe_dispositions_total{disposition}` — how probe
-  tokens end, as `consumed` / `released` / `stale` / `abandoned`. The four
-  labels partition every admitted token, which is what makes `consumed` usable
-  as a denominator; an abandoned-only counter could not distinguish a healthy
-  system from a dead release path
+  tokens end, as `consumed` / `released` / `stale` / `abandoned` /
+  `inconsistent`. The labels partition every admitted token, which is what
+  makes `consumed` usable as a denominator; an abandoned-only counter could not
+  distinguish a healthy system from a dead release path. `inconsistent` is
+  separate on purpose — it means the token accounting is wrong, and it must not
+  hide inside the routine `abandoned` volume
 
 ### Changed
 

@@ -11,7 +11,7 @@
 //! - `iggy_connection_reconnects_total` - Total reconnection attempts
 //! - `iggy_circuit_breaker_opens_total` - Times the circuit breaker opened
 //! - `iggy_circuit_breaker_rejections_total` - Requests rejected by circuit breaker (label: state = open | half_open)
-//! - `iggy_circuit_breaker_probe_dispositions_total` - How half-open probe tokens ended (label: disposition = consumed | released | stale)
+//! - `iggy_circuit_breaker_probe_dispositions_total` - How half-open probe tokens ended (label: disposition = consumed | released | stale | abandoned | inconsistent)
 //!
 //! ## Histograms
 //! - `iggy_send_duration_seconds` - Message send duration
@@ -97,7 +97,11 @@ pub fn init_metrics(metrics_addr: SocketAddr) -> Result<(), String> {
     describe_counter!(
         names::CIRCUIT_BREAKER_PROBE_DISPOSITIONS_TOTAL,
         "How half-open probe tokens ended: consumed (outcome recorded), \
-         released (returned unrecorded), or stale (dropped into a later window)"
+         released (returned unrecorded), stale (dropped into a later window), \
+         abandoned (the window closed while the probe was still running), or \
+         inconsistent (returned to a window that was already whole - a bug). \
+         The labels partition every admitted token, so consumed is usable as a \
+         denominator."
     );
 
     describe_histogram!(
