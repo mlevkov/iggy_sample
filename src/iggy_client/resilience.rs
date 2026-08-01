@@ -773,6 +773,60 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn rejection_message_names_the_state_that_actually_rejected() {
+        // The whole point of returning Rejection instead of re-reading state()
+        // is that the message names the state that made the decision. Nothing
+        // asserted on the message before, so mapping ProbeBudgetExhausted to
+        // the wrong state left every test green.
+        let breaker = breaker_with(1);
+        let calls = Arc::new(AtomicU32::new(0));
+        let reconnects = Arc::new(AtomicU32::new(0));
+
+        // Hard-open: the request never runs.
+        breaker.force_open();
+        let op_calls = Arc::clone(&calls);
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            true,
+            || true,
+            fake_reconnect(&reconnects, Ok(())),
+            move || {
+                let calls = Arc::clone(&op_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(1)
+                }
+            },
+        )
+        .await;
+        let Err(AppError::CircuitOpen(message)) = result else {
+            panic!("an open circuit must reject");
+        };
+        assert!(message.contains("open"), "got: {message}");
+        assert!(!message.contains("half-open"), "got: {message}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "operation must not run");
+
+        // Half-open with the budget spent: a different rejection reason, and
+        // the message must say so rather than reporting the enclosing state.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let _probe = breaker.admit().expect("the single probe token");
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            true,
+            || true,
+            fake_reconnect(&reconnects, Ok(())),
+            || async { Ok(2) },
+        )
+        .await;
+        let Err(AppError::CircuitOpen(message)) = result else {
+            panic!("an exhausted probe budget must reject");
+        };
+        assert!(message.contains("half-open"), "got: {message}");
+    }
+
     // =========================================================================
     // Error classifier
     // =========================================================================

@@ -26,9 +26,10 @@ mis-sequenced rather than merely mis-specified.
   disconnecting during an outage — returns its token instead of stranding it
   until the re-grant window
 - `iggy_circuit_breaker_probe_dispositions_total{disposition}` — how probe
-  tokens end, as `consumed` / `released` / `stale`. A disposition counter
-  rather than an abandoned-only one, so a flat failure count is
-  distinguishable from a dead release path
+  tokens end, as `consumed` / `released` / `stale` / `abandoned`. The four
+  labels partition every admitted token, which is what makes `consumed` usable
+  as a denominator; an abandoned-only counter could not distinguish a healthy
+  system from a dead release path
 
 ### Changed
 
@@ -51,6 +52,16 @@ mis-sequenced rather than merely mis-specified.
   release non-breaking
 - CI accepts the Conventional Commits `!` breaking-change marker, which its
   regex previously rejected outright
+
+### Fixed
+
+- `Config::validate` rejects a zero `CIRCUIT_BREAKER_OPEN_DURATION_SECS`, which
+  disabled the breaker entirely — Open never rejected, and every admission past
+  the budget re-granted — and a zero `OPERATION_TIMEOUT_SECS`, which opened the
+  circuit on a healthy service and never closed it
+- The 503 body for a rejected request now names the state that actually
+  rejected. It previously re-read the breaker after the fact and could report a
+  state a concurrent transition had already moved past
 
 ### Security
 

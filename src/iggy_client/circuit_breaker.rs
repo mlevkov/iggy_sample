@@ -63,24 +63,30 @@
 //! let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
 //!
 //! // The gate is synchronous; only the guarded operation itself awaits.
-//! // A half-open admission carries a permit owning one probe token.
-//! let _permit = match cb.admit() {
-//!     Ok(admission) => admission,
+//! // A half-open admission carries a permit owning one probe token; a Closed
+//! // one consumes no token and so carries none.
+//! let permit = match cb.admit() {
+//!     Ok(Admission::Ungated) => None,
+//!     Ok(Admission::Probe(permit)) => Some(permit),
 //!     Err(rejection) => return Err(AppError::CircuitOpen(rejection.to_string())),
 //! };
 //!
-//! // Execute the operation. Only CONNECTION-CLASS outcomes feed the
-//! // breaker (see `resilience::run_resilient` for the real composition):
+//! // Execute the operation. Only CONNECTION-CLASS outcomes feed the breaker
+//! // (see `resilience::run_resilient` for the real composition). Recording an
+//! // outcome must CONSUME the permit: letting it drop as well would return a
+//! // token the request already accounted for.
 //! match operation().await {
 //!     Ok(result) => {
 //!         cb.record_success();
+//!         permit.map(ProbePermit::consume);
 //!         Ok(result)
 //!     }
 //!     Err(e) if is_connection_error(&e) => {
 //!         cb.record_failure();
+//!         permit.map(ProbePermit::consume);
 //!         Err(e)
 //!     }
-//!     // Other errors record neither. Dropping the permit returns the token.
+//!     // Neither counter moves, so the token goes back: just drop the permit.
 //!     Err(e) => Err(e),
 //! }
 //! ```
@@ -278,6 +284,9 @@ fn grant_window(
 
 /// How a half-open probe token ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Every minted token ends in exactly one of these, so the four together
+/// partition the admissions that carried a permit. That totality is the point:
+/// `consumed` is only usable as a denominator if nothing ends uncounted.
 enum Disposition {
     /// The outcome was recorded, so the token was not handed back.
     Consumed,
@@ -285,6 +294,11 @@ enum Disposition {
     Released,
     /// Dropped into a different window than it was minted in, and discarded.
     Stale,
+    /// The breaker left HalfOpen while the probe was in flight, so the window
+    /// died with the variant and there was nothing to return the token to.
+    /// The common shape during recovery: a sibling probe closes or reopens the
+    /// circuit while this one is still running.
+    Abandoned,
 }
 
 impl Disposition {
@@ -293,6 +307,7 @@ impl Disposition {
             Disposition::Consumed => "consumed",
             Disposition::Released => "released",
             Disposition::Stale => "stale",
+            Disposition::Abandoned => "abandoned",
         }
     }
 }
@@ -386,8 +401,8 @@ impl<'a> ProbePermit<'a> {
     ///
     /// Consumes by value, so use-after-consume is a compile error rather than a
     /// silent no-op. The disarm is a move with no lock involved, which is what
-    /// makes it safe to call from anywhere — including, once `Drop` is wired,
-    /// from a path where a state guard might still be live.
+    /// makes it safe to call from anywhere, including a path where a state
+    /// guard is still live — which `Drop` itself is not.
     pub(crate) fn consume(self) {
         self.breaker.record_disposition(Disposition::Consumed);
         // Suppress the release without running Drop. ManuallyDrop rather than
@@ -433,10 +448,17 @@ enum Effect {
     /// A request was turned away.
     Rejected(Rejection),
     /// A probe window elapsed with probes still unaccounted for, and was
-    /// re-granted so recovery cannot wedge.
-    RegrantedProbes { outstanding: u32 },
+    /// re-granted so recovery cannot wedge. `granted` is the size of the NEW
+    /// window - not a count of what is still in flight, which the breaker does
+    /// not track.
+    RegrantedProbes { granted: u32 },
     /// A token was dropped into a different window than it was minted in.
     StaleProbeDiscarded { minted: u64, current: u64 },
+    /// A token outlived its window entirely - the breaker is no longer HalfOpen.
+    ProbeWindowGone,
+    /// A token came back to a window that is already whole. Unreachable unless
+    /// the accounting is wrong.
+    ProbeOverRelease,
     /// A probe token was handed back because its outcome was never recorded.
     ReleasedProbe,
     /// A success landed in HalfOpen; `closed` if it reached the threshold.
@@ -455,8 +477,8 @@ enum Effect {
 ///
 /// State is guarded by a synchronous [`std::sync::Mutex`] rather than an async
 /// lock: every critical section is a short run of field updates that never
-/// awaits, and a blocking guard is what lets a future RAII probe permit release
-/// its token from `Drop`, which cannot await. No guard may be held across an
+/// awaits, and a blocking guard is what lets [`ProbePermit::drop`] return its
+/// token, which it could not do if releasing required an await. No guard may be held across an
 /// `.await` — `clippy::await_holding_lock` enforces that, and CI denies warnings.
 pub struct CircuitBreaker {
     /// Configuration parameters.
@@ -548,21 +570,36 @@ impl CircuitBreaker {
                 self.requests_rejected.fetch_add(1, Ordering::Relaxed);
                 crate::metrics::record_circuit_breaker_rejection(rejection.metric_label());
             }
-            Effect::RegrantedProbes { outstanding } => {
+            Effect::RegrantedProbes { granted } => {
                 // Reachable for a legitimate reason even with RAII release:
                 // probes still IN FLIGHT past open_duration, which is the
                 // normal half-open case during an outage. Not an invariant
                 // violation, so not a warning - the leak alarm is the stale
                 // discard below.
                 info!(
-                    outstanding,
-                    "Circuit breaker re-granted half-open probe tokens (previous window still outstanding)"
+                    granted,
+                    "Circuit breaker re-granted half-open probe tokens (previous window did not complete)"
                 );
             }
             Effect::ReleasedProbe => {
                 // Routine: every non-connection error in half-open lands here.
                 self.record_disposition(Disposition::Released);
                 debug!("Circuit breaker released a half-open probe token (outcome not recorded)");
+            }
+            Effect::ProbeWindowGone => {
+                // Routine during recovery, so debug rather than warn - but it
+                // is counted, because an uncounted ending would break the
+                // partition the disposition metric depends on.
+                self.record_disposition(Disposition::Abandoned);
+                debug!("Circuit breaker probe ended after its window closed");
+            }
+            Effect::ProbeOverRelease => {
+                self.record_disposition(Disposition::Abandoned);
+                debug_assert!(false, "probe token released into a full window");
+                warn!(
+                    "Circuit breaker saw a probe token released into a full window; \
+                     token accounting is inconsistent"
+                );
             }
             Effect::StaleProbeDiscarded { minted, current } => {
                 // The token outlived its window. Bounded and self-correcting,
@@ -632,11 +669,11 @@ impl CircuitBreaker {
     /// are rejected, which caps the probe load on a recovering server
     /// instead of letting every concurrent caller through at once.
     ///
-    /// Tokens re-grant after `open_duration` elapses in HalfOpen. This is
-    /// the anti-wedge guarantee: a probe whose outcome is never recorded
-    /// (e.g. the operation failed with a non-connection error, which by
-    /// design touches neither breaker counter) would otherwise leave the
-    /// breaker half-open with zero tokens forever.
+    /// Tokens re-grant after `open_duration` elapses in HalfOpen. A probe
+    /// whose outcome is never recorded now returns its token when its permit
+    /// drops, so the re-grant no longer covers leaked tokens — what remains is
+    /// a probe still IN FLIGHT past the window, which the breaker cannot
+    /// distinguish from a lost one and must not wait on forever.
     pub(crate) fn admit(&self) -> Result<Admission<'_>, Rejection> {
         /// Decided under the guard; the permit is minted only afterwards.
         ///
@@ -675,11 +712,6 @@ impl CircuitBreaker {
                         // tokens as it passes, so the window opens at
                         // budget - 1; probe_budget() floors at 1, so this
                         // cannot underflow.
-                        // A NEW recovery attempt, so the success count starts
-                        // at zero (contrast the re-grant arm below). The
-                        // transitioning caller takes the first of the granted
-                        // tokens as it passes, so the window opens at
-                        // budget - 1; probe_budget() floors at 1.
                         let generation = grant_window(state, probe_generation, budget - 1, 0);
                         self.set_gauge(CircuitState::HalfOpen);
                         (
@@ -711,9 +743,7 @@ impl CircuitBreaker {
                             grant_window(state, probe_generation, budget - 1, successes);
                         (
                             Decision::Probe(generation),
-                            Effect::RegrantedProbes {
-                                outstanding: budget,
-                            },
+                            Effect::RegrantedProbes { granted: budget },
                         )
                     } else {
                         (
@@ -785,9 +815,15 @@ impl CircuitBreaker {
                     *probes_remaining += 1;
                     Effect::ReleasedProbe
                 }
-                // Already at budget, or the breaker has left HalfOpen entirely
-                // and the window died with the variant.
-                _ => Effect::None,
+                // Same window, already at full budget. Since remaining plus
+                // outstanding always equals the budget, no permit can exist to
+                // reach this arm - getting here means the token accounting is
+                // broken, not that a release was merely redundant.
+                State::HalfOpen { .. } => Effect::ProbeOverRelease,
+                // The breaker left HalfOpen while this probe was in flight: a
+                // sibling probe closed or reopened the circuit. The window died
+                // with the variant, so there is nothing to return the token to.
+                State::Closed { .. } | State::Open { .. } => Effect::ProbeWindowGone,
             }
         };
         self.emit(effect);
@@ -1250,9 +1286,13 @@ mod tests {
         cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
-        assert!(cb.admit().is_ok());
+        // Permits held in named locals: as temporaries they would refund
+        // their tokens before the next admit, and the test would pass with the
+        // budget capped at one - which is exactly the property it claims to
+        // check.
+        let _probe_1 = cb.admit().expect("first probe admitted");
         cb.record_success();
-        assert!(cb.admit().is_ok());
+        let _probe_2 = cb.admit().expect("second probe admitted");
         cb.record_success();
 
         assert_eq!(cb.state(), CircuitState::Closed);
@@ -1462,6 +1502,13 @@ mod tests {
 
         assert_eq!(Rejection::Open.metric_label(), "open");
         assert_eq!(Rejection::ProbeBudgetExhausted.metric_label(), "half_open");
+
+        // Exported Prometheus label values; renaming one silently breaks
+        // existing queries, so they are pinned rather than trusted.
+        assert_eq!(Disposition::Consumed.label(), "consumed");
+        assert_eq!(Disposition::Released.label(), "released");
+        assert_eq!(Disposition::Stale.label(), "stale");
+        assert_eq!(Disposition::Abandoned.label(), "abandoned");
 
         // The distinction is the point: Display is user-facing prose and
         // renders a hyphen, while the exported Prometheus label uses an
