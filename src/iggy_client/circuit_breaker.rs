@@ -449,16 +449,28 @@ impl CircuitBreaker {
     }
 
     /// Get the number of times the circuit has been opened.
+    ///
+    /// Test-only. The counters are reported to operators through the
+    /// Prometheus gauge and counters emitted on each transition, not through
+    /// this getter; it exists so tests can assert on transitions directly.
+    #[cfg(test)]
     pub fn times_opened(&self) -> u32 {
         self.times_opened.load(Ordering::Relaxed)
     }
 
     /// Get the number of requests rejected due to open circuit.
+    ///
+    /// Test-only, for the same reason as [`Self::times_opened`].
+    #[cfg(test)]
     pub fn requests_rejected(&self) -> u64 {
         self.requests_rejected.load(Ordering::Relaxed)
     }
 
-    /// Force the circuit to close (for testing or manual recovery).
+    /// Force the circuit to close.
+    ///
+    /// Test-only: there is no manual-recovery path into the breaker, so the
+    /// only callers are tests staging a known state.
+    #[cfg(test)]
     pub fn force_close(&self) {
         let mut state = self.lock();
         state.state = CircuitState::Closed;
@@ -473,10 +485,12 @@ impl CircuitBreaker {
         info!("Circuit breaker forcibly closed");
     }
 
-    /// Force the circuit to open (for testing or manual intervention).
+    /// Force the circuit to open.
     ///
-    /// A no-op when already Open, preserving the no-refresh policy for
-    /// `opened_at` (see `record_failure`) and keeping `times_opened` honest.
+    /// Test-only, as [`Self::force_close`]. A no-op when already Open,
+    /// preserving the no-refresh policy for `opened_at` (see `record_failure`)
+    /// and keeping `times_opened` honest.
+    #[cfg(test)]
     pub fn force_open(&self) {
         let mut state = self.lock();
         if state.state != CircuitState::Open {

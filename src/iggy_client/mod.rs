@@ -77,7 +77,11 @@ use crate::error::{AppError, AppResult};
 use crate::models::Event;
 
 // Re-exports for public API
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+// Crate-internal: the breaker is a mechanism of the resilience executor, not
+// part of this crate's surface. Nothing outside `src/iggy_client/` referenced
+// these, and keeping them public would force every subsequent signature change
+// in TD-2026-07-09 to be a semver break for no consumer's benefit.
+pub(crate) use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use connection::ConnectionState;
 pub use helpers::{rand_jitter, to_identifier};
 pub use params::PollParams;
@@ -1046,26 +1050,6 @@ impl IggyClientWrapper {
         // widened back toward the global by a second with_timeout call.
         scoped.op_deadline = clamp_deadline(timeout, self.op_deadline);
         scoped
-    }
-
-    /// Get the current circuit breaker state.
-    pub async fn circuit_breaker_state(&self) -> CircuitState {
-        self.circuit_breaker.state()
-    }
-
-    /// Get circuit breaker metrics.
-    ///
-    /// Returns a tuple of (times_opened, requests_rejected).
-    pub fn circuit_breaker_metrics(&self) -> (u32, u64) {
-        (
-            self.circuit_breaker.times_opened(),
-            self.circuit_breaker.requests_rejected(),
-        )
-    }
-
-    /// Force close the circuit breaker (for manual recovery).
-    pub async fn force_close_circuit(&self) {
-        self.circuit_breaker.force_close();
     }
 }
 
