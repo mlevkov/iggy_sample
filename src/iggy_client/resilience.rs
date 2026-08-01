@@ -736,6 +736,43 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn scoped_timeout_returns_the_probe_token_even_when_reconnect_fails() {
+        // The permit is disposed before the reconnect step runs, so an early
+        // return from a failed reconnect cannot strand the token. Both
+        // pre-existing reconnect-failure tests drive Closed breakers, where a
+        // release is a no-op, so neither would notice either way.
+        let breaker = breaker_with(1);
+        breaker.record_failure();
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let reconnects = Arc::new(AtomicU32::new(0));
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            false,    // client-scoped deadline: must not feed the breaker
+            || false, // disconnected, so the reconnect path is taken
+            fake_reconnect(
+                &reconnects,
+                Err(AppError::ConnectionFailed("reconnect exhausted".into())),
+            ),
+            || async { std::future::pending().await },
+        )
+        .await;
+
+        assert!(matches!(&result, Err(AppError::ConnectionFailed(_))));
+        assert_eq!(reconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            breaker.state(),
+            CircuitState::HalfOpen,
+            "a scoped deadline expiring is not outage evidence"
+        );
+        assert!(
+            breaker.admit().is_ok(),
+            "the probe token must be back despite the early return"
+        );
+    }
+
     // =========================================================================
     // Error classifier
     // =========================================================================

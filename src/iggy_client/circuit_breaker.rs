@@ -981,6 +981,8 @@ impl Default for CircuitBreaker {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[tokio::test]
@@ -1336,6 +1338,139 @@ mod tests {
         assert!(
             cb.admit().is_err(),
             "release must not push the budget above its cap"
+        );
+    }
+
+    // =========================================================================
+    // TD-2026-07-09: the three probe-accounting leaks, one test each
+    // =========================================================================
+
+    #[tokio::test(start_paused = true)]
+    async fn test_straggler_from_an_expired_window_does_not_inflate_the_new_one() {
+        // Leak 2. A re-grant replaces the budget while an earlier window's
+        // token is still outstanding; when that straggler finally returns it
+        // must be discarded, not credited to the live window. Ownership alone
+        // does not fix this - it needs the window id.
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::from_secs(30)));
+        cb.record_failure();
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let stale = cb.admit().expect("window 1 token");
+        assert!(cb.admit().is_err(), "window 1 holds a single token");
+
+        // Window 2, granted while window 1's token is still out.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let _current = cb.admit().expect("window 2 re-granted");
+        assert!(cb.admit().is_err(), "window 2 also holds a single token");
+
+        drop(stale);
+        assert!(
+            cb.admit().is_err(),
+            "a token from an expired window must not inflate the live one"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_permit_dropped_after_leaving_half_open_does_not_seed_the_next_window() {
+        // Leak 1, respecified. The original phantom release - a request
+        // admitted while Closed handing back a token it never took - is
+        // unrepresentable now that Ungated carries no permit, so there is
+        // nothing left to assert about it. What remains testable is the same
+        // hazard one step later: a permit that outlives its window entirely.
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::from_secs(30)));
+        cb.record_failure();
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let stale = cb.admit().expect("window 1 token");
+
+        // Fail the probe: back to Open, then into a brand new window.
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let _fresh = cb.admit().expect("window 2 token");
+        assert!(cb.admit().is_err(), "window 2 holds a single token");
+
+        drop(stale);
+        assert!(
+            cb.admit().is_err(),
+            "a permit that outlived its window must not seed the next one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_probe_cancelled_mid_flight_returns_its_token() {
+        // Leak 3, and the only one Drop is strictly required for: a client
+        // disconnecting during an outage drops the request future while its
+        // probe is in flight. An explicit release call cannot cover this -
+        // there is no code path left to run it on.
+        let cb = Arc::new(CircuitBreaker::new(CircuitBreakerConfig::new(
+            1,
+            1,
+            Duration::from_secs(30),
+        )));
+        cb.force_half_open();
+
+        let task_cb = Arc::clone(&cb);
+        let in_flight = tokio::spawn(async move {
+            let _probe = task_cb.admit().expect("token admitted");
+            // Hold the permit across a suspension point, as a real operation
+            // awaiting the server would.
+            std::future::pending::<()>().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            cb.admit().is_err(),
+            "the in-flight probe holds the only token"
+        );
+
+        in_flight.abort();
+        let _ = in_flight.await;
+
+        assert!(
+            cb.admit().is_ok(),
+            "a probe cancelled mid-flight must return its token"
+        );
+    }
+
+    #[test]
+    fn test_dropping_a_permit_after_recording_does_not_deadlock() {
+        // Drop takes the same non-reentrant mutex that record_* takes, so the
+        // ordering is load-bearing. It holds structurally rather than by
+        // convention: record_success releases its guard before returning, and
+        // admit mints the permit only after releasing its own, so no permit
+        // can exist while a guard is live.
+        //
+        // A regression here HANGS rather than fails - a deadlocked thread
+        // cannot assert its own deadlock - so this is an executable statement
+        // of the ordering rather than a detector.
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::from_secs(30)));
+        cb.force_half_open();
+
+        let probe = cb.admit().expect("token admitted");
+        cb.record_success();
+        drop(probe);
+
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_metric_projections_are_distinct_from_display() {
+        assert_eq!(CircuitState::Closed.gauge(), 0);
+        assert_eq!(CircuitState::HalfOpen.gauge(), 1);
+        assert_eq!(CircuitState::Open.gauge(), 2);
+
+        assert_eq!(Rejection::Open.metric_label(), "open");
+        assert_eq!(Rejection::ProbeBudgetExhausted.metric_label(), "half_open");
+
+        // The distinction is the point: Display is user-facing prose and
+        // renders a hyphen, while the exported Prometheus label uses an
+        // underscore. Routing the label through Display would silently rename
+        // it and break existing queries.
+        assert_eq!(CircuitState::HalfOpen.to_string(), "half-open");
+        assert_ne!(
+            CircuitState::HalfOpen.to_string(),
+            Rejection::ProbeBudgetExhausted.metric_label()
         );
     }
 
