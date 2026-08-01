@@ -14,10 +14,9 @@
 //! 3. **Classified connection error** → record breaker failure, run the
 //!    `reconnect` step, then retry the operation exactly once.
 //! 4. **Non-connection error** → returned as-is; the breaker records
-//!    neither success nor failure (bad requests must not open the circuit),
-//!    but any half-open probe token the request consumed is RELEASED so an
-//!    unrecorded outcome cannot starve recovery (see
-//!    `CircuitBreaker::release_probe`).
+//!    neither success nor failure (bad requests must not open the circuit).
+//!    Any half-open probe token the request consumed is returned when its
+//!    permit drops, so an unrecorded outcome cannot starve recovery.
 //! 5. **Timeout** → recorded as a breaker failure only when
 //!    `timeout_is_outage_signal` is true, i.e. the deadline is the global
 //!    operation timeout (the SDK's internal transport reconnection swallows
@@ -64,11 +63,19 @@
 //! immediately. This is the accepted trade against the one-client-DoS the
 //! exemption prevents.
 //!
-//! Note also that a single request may release its probe token twice
-//! (scoped first-attempt timeout, then an unrecorded retry outcome); the
-//! budget cap bounds the effect to transiently admitting one extra
-//! concurrent probe — the same order of slack as the documented
-//! retry-gate bypass.
+//! # Probe token ownership
+//!
+//! A half-open admission hands back a `ProbePermit`. Recording an outcome
+//! CONSUMES it; anything else — an unrecorded error, a client-scoped timeout,
+//! or the request future being dropped mid-flight — returns the token when the
+//! permit falls out of scope. A request can therefore no longer both record an
+//! outcome and refund its token, nor release the same token twice, both of
+//! which this module previously documented as bounded slack.
+//!
+//! The retry path holds no permit: the first attempt has already disposed of
+//! it by the time a reconnect leads there. That is deliberate and unchanged —
+//! the retry deliberately bypasses the gate (above), so one token still covers
+//! up to two server operations.
 
 use std::time::Duration;
 
@@ -160,10 +167,10 @@ where
             retry_once(breaker, timeout, timeout_is_outage_signal, &operation).await
         }
         Ok(Err(e)) => {
-            // Non-connection error - record neither success nor failure,
-            // but hand back any half-open probe token this request consumed
-            // so an unrecorded outcome cannot starve recovery.
-            breaker.release_probe();
+            // Non-connection error - record neither success nor failure.
+            // Dropping the permit hands back any half-open probe token this
+            // request consumed, so an unrecorded outcome cannot starve
+            // recovery.
             drop(permit);
             Err(e)
         }
@@ -182,7 +189,6 @@ where
                     "Operation timed out at the global deadline (recorded as circuit-breaker failure)"
                 );
             } else {
-                breaker.release_probe();
                 drop(permit);
                 debug!(
                     timeout = ?timeout,
@@ -237,10 +243,9 @@ where
             if is_connection_error(&e) {
                 breaker.record_failure();
                 warn!(error = %e, "Retry failed with a connection error (recorded as breaker failure)");
-            } else {
-                // Unrecorded outcome: hand back any consumed probe token.
-                breaker.release_probe();
             }
+            // No token to hand back: the permit was disposed on the first
+            // attempt, before the reconnect that led here.
             Err(e)
         }
         Err(_) => {
@@ -250,8 +255,6 @@ where
                     timeout = ?timeout,
                     "Retry timed out at the global deadline (recorded as breaker failure)"
                 );
-            } else {
-                breaker.release_probe();
             }
             Err(AppError::OperationTimeout(format!(
                 "Operation timed out after {:?} on retry",

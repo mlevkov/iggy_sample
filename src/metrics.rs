@@ -11,6 +11,7 @@
 //! - `iggy_connection_reconnects_total` - Total reconnection attempts
 //! - `iggy_circuit_breaker_opens_total` - Times the circuit breaker opened
 //! - `iggy_circuit_breaker_rejections_total` - Requests rejected by circuit breaker (label: state = open | half_open)
+//! - `iggy_circuit_breaker_probe_dispositions_total` - How half-open probe tokens ended (label: disposition = consumed | released | stale)
 //!
 //! ## Histograms
 //! - `iggy_send_duration_seconds` - Message send duration
@@ -45,6 +46,8 @@ pub mod names {
     pub const CONNECTION_RECONNECTS_TOTAL: &str = "iggy_connection_reconnects_total";
     pub const CIRCUIT_BREAKER_OPENS_TOTAL: &str = "iggy_circuit_breaker_opens_total";
     pub const CIRCUIT_BREAKER_REJECTIONS_TOTAL: &str = "iggy_circuit_breaker_rejections_total";
+    pub const CIRCUIT_BREAKER_PROBE_DISPOSITIONS_TOTAL: &str =
+        "iggy_circuit_breaker_probe_dispositions_total";
     pub const SEND_DURATION_SECONDS: &str = "iggy_send_duration_seconds";
     pub const POLL_DURATION_SECONDS: &str = "iggy_poll_duration_seconds";
     pub const CONNECTION_STATUS: &str = "iggy_connection_status";
@@ -90,6 +93,11 @@ pub fn init_metrics(metrics_addr: SocketAddr) -> Result<(), String> {
     describe_counter!(
         names::CIRCUIT_BREAKER_REJECTIONS_TOTAL,
         "Total number of requests rejected by circuit breaker"
+    );
+    describe_counter!(
+        names::CIRCUIT_BREAKER_PROBE_DISPOSITIONS_TOTAL,
+        "How half-open probe tokens ended: consumed (outcome recorded), \
+         released (returned unrecorded), or stale (dropped into a later window)"
     );
 
     describe_histogram!(
@@ -153,6 +161,18 @@ pub fn record_circuit_breaker_open() {
 /// exhausted half-open probe budget during recovery.
 pub fn record_circuit_breaker_rejection(state: &'static str) {
     counter!(names::CIRCUIT_BREAKER_REJECTIONS_TOTAL, "state" => state).increment(1);
+}
+
+/// Record how a half-open probe token ended.
+///
+/// Deliberately a disposition counter rather than an abandoned-only one. A
+/// counter that only ever increments on the failure path reads identically
+/// whether the system is healthy or the release path is dead code; with
+/// `consumed` as a denominator, `released` flat while `consumed` climbs is a
+/// visible signature rather than an absence.
+pub fn record_circuit_breaker_probe_disposition(disposition: &'static str) {
+    counter!(names::CIRCUIT_BREAKER_PROBE_DISPOSITIONS_TOTAL, "disposition" => disposition)
+        .increment(1);
 }
 
 // =============================================================================

@@ -42,11 +42,16 @@
 //! # Half-Open Probe Limiting
 //!
 //! Entering half-open grants `success_threshold` probe tokens (minimum one);
-//! each allowed request consumes one, and requests beyond the budget are
-//! rejected so a recovering server never receives a thundering herd of
-//! probes. Tokens re-grant after `open_duration` elapses in half-open,
-//! guaranteeing the breaker cannot wedge if a probe's outcome is never
-//! recorded. See [`CircuitBreaker::admit`].
+//! each admitted request receives a `ProbePermit` owning one, and requests
+//! beyond the budget are rejected so a recovering server never receives a
+//! thundering herd of probes. See [`CircuitBreaker::admit`].
+//!
+//! A permit returns its token unless the outcome was recorded, so a probe that
+//! ends without feeding the breaker — an unrecorded error, or a request future
+//! dropped mid-flight — no longer strands its token. Windows still re-grant
+//! after `open_duration`, which now covers only genuinely long-running probes
+//! rather than leaked ones; a token from an expired window is discarded on
+//! release rather than credited to the live one.
 //!
 //! One consumed token can cover up to two server operations: the
 //! post-reconnect retry in `resilience::run_resilient` deliberately does
@@ -57,11 +62,12 @@
 //! ```rust,ignore
 //! let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
 //!
-//! // Check if request should be allowed. The gate is synchronous; only the
-//! // guarded operation itself awaits.
-//! if cb.admit().is_err() {
-//!     return Err(AppError::CircuitOpen);
-//! }
+//! // The gate is synchronous; only the guarded operation itself awaits.
+//! // A half-open admission carries a permit owning one probe token.
+//! let _permit = match cb.admit() {
+//!     Ok(admission) => admission,
+//!     Err(rejection) => return Err(AppError::CircuitOpen(rejection.to_string())),
+//! };
 //!
 //! // Execute the operation. Only CONNECTION-CLASS outcomes feed the
 //! // breaker (see `resilience::run_resilient` for the real composition):
@@ -74,15 +80,11 @@
 //!         cb.record_failure();
 //!         Err(e)
 //!     }
-//!     // Other errors record neither; release any half-open probe token.
-//!     Err(e) => {
-//!         cb.release_probe();
-//!         Err(e)
-//!     }
+//!     // Other errors record neither. Dropping the permit returns the token.
+//!     Err(e) => Err(e),
 //! }
 //! ```
 
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -225,6 +227,76 @@ impl From<&State> for CircuitState {
     }
 }
 
+/// Everything the state mutex protects.
+///
+/// `probe_generation` lives here rather than as an atomic on
+/// [`CircuitBreaker`] deliberately: every access already happens under this
+/// guard, and an atomic field would advertise lock-free access that is not
+/// actually safe to use that way. Keeping it beside `state` also makes
+/// "bumped on every grant" checkable in one place.
+struct Guarded {
+    state: State,
+    /// Monotonic id of the current half-open probe window.
+    ///
+    /// Bumped on EVERY grant — both entering HalfOpen and re-granting within
+    /// it — so a token minted in one window is distinguishable from the window
+    /// it is dropped into. It cannot live inside `State::HalfOpen`: passing
+    /// through Open would leave the next entry with nothing to read, and any
+    /// restart lets a straggler match a recycled id.
+    ///
+    /// Never reset. `force_close`/`force_open` deliberately leave it alone for
+    /// the same reason.
+    probe_generation: u64,
+}
+
+/// Open a fresh half-open probe window and return its id.
+///
+/// The single place a window is granted, so the generation cannot advance
+/// without a grant, nor a grant happen without advancing it — the pairing is
+/// structural rather than a convention repeated at three call sites.
+///
+/// Takes the two guarded fields separately rather than `&mut Guarded` because
+/// callers hold them through a split borrow: the state must stay mutably
+/// borrowed by the match arm that decided to grant.
+///
+/// `consecutive_successes` is the caller's decision, and is exactly what
+/// separates entering from re-granting — see the [`State`] docs.
+fn grant_window(
+    state: &mut State,
+    probe_generation: &mut u64,
+    probes_remaining: u32,
+    consecutive_successes: u32,
+) -> u64 {
+    *probe_generation += 1;
+    *state = State::HalfOpen {
+        probes_remaining,
+        granted_at: Instant::now(),
+        consecutive_successes,
+    };
+    *probe_generation
+}
+
+/// How a half-open probe token ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// The outcome was recorded, so the token was not handed back.
+    Consumed,
+    /// The outcome was never recorded; the token returned to its own window.
+    Released,
+    /// Dropped into a different window than it was minted in, and discarded.
+    Stale,
+}
+
+impl Disposition {
+    fn label(self) -> &'static str {
+        match self {
+            Disposition::Consumed => "consumed",
+            Disposition::Released => "released",
+            Disposition::Stale => "stale",
+        }
+    }
+}
+
 /// Why the gate turned a request away.
 ///
 /// Captured under the same guard that made the decision, so — unlike re-reading
@@ -278,10 +350,12 @@ impl std::fmt::Display for Rejection {
 /// — handing back a token the request never took — unrepresentable rather than
 /// merely guarded against.
 ///
-/// In this commit the permit is a marker: it makes ownership explicit at every
-/// call site and forces each to bind it, but dropping one does nothing and the
-/// explicit `release_probe()` calls remain. The next commit moves the release
-/// into `Drop`, at which point these bindings become load-bearing.
+/// Dropping a permit hands its token back; [`ProbePermit::consume`] gives it up
+/// without releasing, for outcomes that WERE recorded. That is the whole
+/// mechanism: a request cannot both record an outcome and return its token,
+/// and a request future dropped mid-probe — a client disconnect during an
+/// outage — returns the token it was holding instead of leaking it until the
+/// re-grant window.
 ///
 /// The lifetime borrows the breaker, so a permit cannot outlive it or be
 /// smuggled into a detached task. Deliberately not `Clone` — a cloned permit
@@ -295,13 +369,16 @@ impl std::fmt::Display for Rejection {
 /// lint this crate does not enable. Tests whose assertion depends on a token
 /// staying held say so at the binding.
 pub(crate) struct ProbePermit<'a> {
-    breaker: PhantomData<&'a CircuitBreaker>,
+    breaker: &'a CircuitBreaker,
+    /// The probe window this token was taken from.
+    generation: u64,
 }
 
-impl ProbePermit<'_> {
-    fn new() -> Self {
+impl<'a> ProbePermit<'a> {
+    fn new(breaker: &'a CircuitBreaker, generation: u64) -> Self {
         Self {
-            breaker: PhantomData,
+            breaker,
+            generation,
         }
     }
 
@@ -312,16 +389,18 @@ impl ProbePermit<'_> {
     /// makes it safe to call from anywhere — including, once `Drop` is wired,
     /// from a path where a state guard might still be live.
     pub(crate) fn consume(self) {
+        self.breaker.record_disposition(Disposition::Consumed);
+        // Suppress the release without running Drop. ManuallyDrop rather than
+        // mem::forget only for clarity - the permit owns a shared reference
+        // and a u64, so neither leaks anything.
         let _ = std::mem::ManuallyDrop::new(self);
     }
 }
 
 impl Drop for ProbePermit<'_> {
-    /// Inert in this commit. Landing the release separately is deliberate:
-    /// with `Drop` doing nothing, every existing assertion still holds, so the
-    /// call-site rewrites here can be reviewed as mechanical rather than as
-    /// behavior.
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        self.breaker.release_probe(self.generation);
+    }
 }
 
 /// Outcome of the circuit-breaker gate for one request.
@@ -353,8 +432,11 @@ enum Effect {
     EnteredHalfOpen { probes: u32 },
     /// A request was turned away.
     Rejected(Rejection),
-    /// A probe window elapsed with no recorded outcome and was re-granted.
-    RegrantedProbes,
+    /// A probe window elapsed with probes still unaccounted for, and was
+    /// re-granted so recovery cannot wedge.
+    RegrantedProbes { outstanding: u32 },
+    /// A token was dropped into a different window than it was minted in.
+    StaleProbeDiscarded { minted: u64, current: u64 },
     /// A probe token was handed back because its outcome was never recorded.
     ReleasedProbe,
     /// A success landed in HalfOpen; `closed` if it reached the threshold.
@@ -380,7 +462,7 @@ pub struct CircuitBreaker {
     /// Configuration parameters.
     config: CircuitBreakerConfig,
     /// Internal state protected by a synchronous mutex.
-    state: Mutex<State>,
+    state: Mutex<Guarded>,
     /// Total number of times the circuit has been opened (for metrics).
     times_opened: AtomicU32,
     /// Total number of requests rejected due to open circuit (for metrics).
@@ -392,7 +474,10 @@ impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             config,
-            state: Mutex::new(State::initial()),
+            state: Mutex::new(Guarded {
+                state: State::initial(),
+                probe_generation: 0,
+            }),
             times_opened: AtomicU32::new(0),
             requests_rejected: AtomicU64::new(0),
         }
@@ -410,7 +495,7 @@ impl CircuitBreaker {
     /// The `panicking()` guard is load-bearing: poisoning implies an in-flight
     /// unwind, and asserting during unwind double-panics straight to abort,
     /// destroying the very test report the assertion exists to sharpen.
-    fn lock(&self) -> MutexGuard<'_, State> {
+    fn lock(&self) -> MutexGuard<'_, Guarded> {
         self.state.lock().unwrap_or_else(|poisoned| {
             if !std::thread::panicking() {
                 debug_assert!(false, "circuit breaker state lock poisoned");
@@ -463,13 +548,32 @@ impl CircuitBreaker {
                 self.requests_rejected.fetch_add(1, Ordering::Relaxed);
                 crate::metrics::record_circuit_breaker_rejection(rejection.metric_label());
             }
-            Effect::RegrantedProbes => {
-                // info: a full probe window elapsed without a recorded outcome
-                // - recovery is stalling, not progressing.
-                info!("Circuit breaker re-granted half-open probe tokens");
+            Effect::RegrantedProbes { outstanding } => {
+                // Reachable for a legitimate reason even with RAII release:
+                // probes still IN FLIGHT past open_duration, which is the
+                // normal half-open case during an outage. Not an invariant
+                // violation, so not a warning - the leak alarm is the stale
+                // discard below.
+                info!(
+                    outstanding,
+                    "Circuit breaker re-granted half-open probe tokens (previous window still outstanding)"
+                );
             }
             Effect::ReleasedProbe => {
+                // Routine: every non-connection error in half-open lands here.
+                self.record_disposition(Disposition::Released);
                 debug!("Circuit breaker released a half-open probe token (outcome not recorded)");
+            }
+            Effect::StaleProbeDiscarded { minted, current } => {
+                // The token outlived its window. Bounded and self-correcting,
+                // but it means a probe ran longer than open_duration, so it is
+                // worth an operator's attention.
+                self.record_disposition(Disposition::Stale);
+                warn!(
+                    minted_generation = minted,
+                    current_generation = current,
+                    "Circuit breaker discarded a probe token from an expired window"
+                );
             }
             Effect::HalfOpenSuccess { successes, closed } => {
                 debug!(
@@ -543,7 +647,8 @@ impl CircuitBreaker {
         /// discouraged, and a `?` added mid-function later cannot reintroduce it.
         enum Decision {
             Ungated,
-            Probe,
+            /// Admitted holding a token from this probe window.
+            Probe(u64),
             Rejected(Rejection),
         }
 
@@ -553,8 +658,14 @@ impl CircuitBreaker {
         let (decision, effect) = {
             let mut guard = self.lock();
             let budget = self.probe_budget();
+            // Split the borrow so a grant can bump the window id while the
+            // match still holds `state` mutably.
+            let Guarded {
+                state,
+                probe_generation,
+            } = &mut *guard;
 
-            match &mut *guard {
+            match state {
                 State::Closed { .. } => (Decision::Ungated, Effect::None),
                 State::Open { opened_at } => {
                     if opened_at.elapsed() >= self.config.open_duration {
@@ -564,13 +675,17 @@ impl CircuitBreaker {
                         // tokens as it passes, so the window opens at
                         // budget - 1; probe_budget() floors at 1, so this
                         // cannot underflow.
-                        *guard = State::HalfOpen {
-                            probes_remaining: budget - 1,
-                            granted_at: Instant::now(),
-                            consecutive_successes: 0,
-                        };
+                        // A NEW recovery attempt, so the success count starts
+                        // at zero (contrast the re-grant arm below). The
+                        // transitioning caller takes the first of the granted
+                        // tokens as it passes, so the window opens at
+                        // budget - 1; probe_budget() floors at 1.
+                        let generation = grant_window(state, probe_generation, budget - 1, 0);
                         self.set_gauge(CircuitState::HalfOpen);
-                        (Decision::Probe, Effect::EnteredHalfOpen { probes: budget })
+                        (
+                            Decision::Probe(generation),
+                            Effect::EnteredHalfOpen { probes: budget },
+                        )
                     } else {
                         (
                             Decision::Rejected(Rejection::Open),
@@ -581,19 +696,25 @@ impl CircuitBreaker {
                 State::HalfOpen {
                     probes_remaining,
                     granted_at,
-                    ..
+                    consecutive_successes,
                 } => {
                     if *probes_remaining > 0 {
                         *probes_remaining -= 1;
-                        (Decision::Probe, Effect::None)
+                        (Decision::Probe(*probe_generation), Effect::None)
                     } else if granted_at.elapsed() >= self.config.open_duration {
-                        // Re-grant after open_duration so leaked probes cannot
-                        // wedge the breaker in HalfOpen (see doc above). This
-                        // is the SAME recovery attempt continuing, so
-                        // consecutive_successes is deliberately untouched.
-                        *probes_remaining = budget - 1;
-                        *granted_at = Instant::now();
-                        (Decision::Probe, Effect::RegrantedProbes)
+                        // Re-grant after open_duration so outstanding probes
+                        // cannot wedge the breaker in HalfOpen. This is the
+                        // SAME recovery attempt continuing, so the success
+                        // count carries over.
+                        let successes = *consecutive_successes;
+                        let generation =
+                            grant_window(state, probe_generation, budget - 1, successes);
+                        (
+                            Decision::Probe(generation),
+                            Effect::RegrantedProbes {
+                                outstanding: budget,
+                            },
+                        )
                     } else {
                         (
                             Decision::Rejected(Rejection::ProbeBudgetExhausted),
@@ -607,7 +728,7 @@ impl CircuitBreaker {
         self.emit(effect);
         match decision {
             Decision::Ungated => Ok(Admission::Ungated),
-            Decision::Probe => Ok(Admission::Probe(ProbePermit::new())),
+            Decision::Probe(generation) => Ok(Admission::Probe(ProbePermit::new(self, generation))),
             Decision::Rejected(rejection) => Err(rejection),
         }
     }
@@ -628,12 +749,13 @@ impl CircuitBreaker {
     /// leaves the budget as the only contended resource.
     #[cfg(test)]
     fn force_half_open(&self) {
+        let budget = self.probe_budget();
         let mut guard = self.lock();
-        *guard = State::HalfOpen {
-            probes_remaining: self.probe_budget(),
-            granted_at: Instant::now(),
-            consecutive_successes: 0,
-        };
+        let Guarded {
+            state,
+            probe_generation,
+        } = &mut *guard;
+        grant_window(state, probe_generation, budget, 0);
     }
 
     /// Hand back a half-open probe token whose outcome was deliberately not
@@ -643,22 +765,38 @@ impl CircuitBreaker {
     /// round-trip proving transport health — would permanently consume
     /// tokens and starve recovery until the re-grant window. No-op outside
     /// HalfOpen; capped at the granted budget.
-    pub(super) fn release_probe(&self) {
+    fn release_probe(&self, generation: u64) {
         let effect = {
             let mut guard = self.lock();
             let budget = self.probe_budget();
-            if let State::HalfOpen {
-                probes_remaining, ..
-            } = &mut *guard
-                && *probes_remaining < budget
-            {
-                *probes_remaining += 1;
-                Effect::ReleasedProbe
-            } else {
-                Effect::None
+            let current = guard.probe_generation;
+
+            match &mut guard.state {
+                // A token minted in an earlier window must not credit this
+                // one: the re-grant already replaced the budget it belonged
+                // to, so crediting it here would inflate the live window.
+                State::HalfOpen { .. } if current != generation => Effect::StaleProbeDiscarded {
+                    minted: generation,
+                    current,
+                },
+                State::HalfOpen {
+                    probes_remaining, ..
+                } if *probes_remaining < budget => {
+                    *probes_remaining += 1;
+                    Effect::ReleasedProbe
+                }
+                // Already at budget, or the breaker has left HalfOpen entirely
+                // and the window died with the variant.
+                _ => Effect::None,
             }
         };
         self.emit(effect);
+    }
+
+    /// Count how a probe token ended. Touches no state and takes no lock, so
+    /// it is safe from [`ProbePermit::consume`], which may run anywhere.
+    fn record_disposition(&self, disposition: Disposition) {
+        crate::metrics::record_circuit_breaker_probe_disposition(disposition.label());
     }
 
     /// Record a successful operation.
@@ -668,7 +806,7 @@ impl CircuitBreaker {
         let effect = {
             let mut guard = self.lock();
 
-            match &mut *guard {
+            match &mut guard.state {
                 State::Closed {
                     consecutive_failures,
                 } => {
@@ -684,7 +822,7 @@ impl CircuitBreaker {
                     let successes = *consecutive_successes;
                     let closed = successes >= self.config.success_threshold;
                     if closed {
-                        *guard = State::Closed {
+                        guard.state = State::Closed {
                             consecutive_failures: 0,
                         };
                         self.set_gauge(CircuitState::Closed);
@@ -713,7 +851,7 @@ impl CircuitBreaker {
         let effect = {
             let mut guard = self.lock();
 
-            match &mut *guard {
+            match &mut guard.state {
                 State::Closed {
                     consecutive_failures,
                 } => {
@@ -725,14 +863,14 @@ impl CircuitBreaker {
                     let failures = *consecutive_failures;
                     let opened = failures >= self.config.failure_threshold;
                     if opened {
-                        self.open_now(&mut guard);
+                        self.open_now(&mut guard.state);
                     }
                     Effect::Failure { failures, opened }
                 }
                 State::HalfOpen { .. } => {
                     // Any failure in half-open state reopens the circuit; the
                     // accumulated success count dies with the variant.
-                    self.open_now(&mut guard);
+                    self.open_now(&mut guard.state);
                     Effect::ReopenedFromHalfOpen
                 }
                 State::Open { .. } => {
@@ -754,7 +892,7 @@ impl CircuitBreaker {
     /// non-test caller is gone along with its second lock acquisition.
     #[cfg(test)]
     pub fn state(&self) -> CircuitState {
-        CircuitState::from(&*self.lock())
+        CircuitState::from(&self.lock().state)
     }
 
     /// Get the number of times the circuit has been opened.
@@ -786,7 +924,7 @@ impl CircuitBreaker {
             // One assignment replaces six field resets. The old flat struct
             // needed explicit hygiene so stale half-open values could not
             // outlive the reset; the enum drops them with the variant.
-            *guard = State::Closed {
+            guard.state = State::Closed {
                 consecutive_failures: 0,
             };
             self.set_gauge(CircuitState::Closed);
@@ -803,9 +941,9 @@ impl CircuitBreaker {
     pub fn force_open(&self) {
         let opened = {
             let mut guard = self.lock();
-            let changed = !matches!(*guard, State::Open { .. });
+            let changed = !matches!(guard.state, State::Open { .. });
             if changed {
-                self.open_now(&mut guard);
+                self.open_now(&mut guard.state);
             }
             changed
         };
@@ -1053,13 +1191,15 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Entry consumes one of the two tokens; record a success against it.
-        assert!(cb.admit().is_ok());
+        // Permits are held in named locals throughout: dropping one returns
+        // its token, and this test is entirely about a budget that stays spent.
+        let _probe_1 = cb.admit().expect("first probe admitted");
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Spend the second token, then exhaust the budget. Without this the
         // re-grant branch is never reached and the rest passes vacuously.
-        assert!(cb.admit().is_ok());
+        let _probe_2 = cb.admit().expect("second probe admitted");
         assert!(
             cb.admit().is_err(),
             "budget must be exhausted for the re-grant branch to be exercised"
@@ -1067,7 +1207,7 @@ mod tests {
 
         // Window expiry re-grants; the success recorded above must survive.
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(cb.admit().is_ok());
+        let _probe_3 = cb.admit().expect("re-granted window admits");
 
         // This second success reaches success_threshold only if the first one
         // survived the re-grant - a resetting re-grant leaves it HalfOpen.
@@ -1148,53 +1288,73 @@ mod tests {
             cb.force_half_open();
 
             let gate = std::sync::Barrier::new(2);
+            // The admissions are carried OUT of the threads and held until the
+            // assertion. Testing `is_ok()` inside a thread would drop the
+            // permit there, hand the token straight back, and let both racers
+            // pass - which is the bug this test exists to catch.
             let (a, b) = std::thread::scope(|s| {
                 let first = s.spawn(|| {
                     gate.wait();
-                    cb.admit().is_ok()
+                    cb.admit()
                 });
                 let second = s.spawn(|| {
                     gate.wait();
-                    cb.admit().is_ok()
+                    cb.admit()
                 });
                 (first.join().unwrap(), second.join().unwrap())
             });
 
             assert!(
-                a ^ b,
-                "iteration {i}: exactly one of two racing probes may pass, got ({a}, {b})"
+                a.is_ok() ^ b.is_ok(),
+                "iteration {i}: exactly one of two racing probes may pass, got ({}, {})",
+                a.is_ok(),
+                b.is_ok()
             );
             assert_eq!(cb.state(), CircuitState::HalfOpen);
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_release_probe_returns_token_capped_at_budget() {
+    async fn test_dropping_a_permit_returns_its_token() {
+        // Replaces the old direct test of release_probe, which is now private
+        // and reachable only through Drop. Same property, driven through the
+        // public path: an unrecorded outcome hands its token back.
         let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
-
-        // No-op while Closed.
-        cb.release_probe();
-        assert!(cb.admit().is_ok());
 
         cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
-        // Consume the only token, release it, and it must admit again.
-        let held = cb.admit().expect("only token admitted");
-        assert!(cb.admit().is_err());
-        cb.release_probe();
-        let held_2 = cb.admit().expect("released token re-admits");
-
-        // Releases never exceed the granted budget (single token here).
-        cb.release_probe();
-        cb.release_probe();
-        let held_3 = cb.admit().expect("capped release admits exactly once more");
+        let probe = cb.admit().expect("only token admitted");
         assert!(
             cb.admit().is_err(),
-            "budget cap must hold after over-release"
+            "budget exhausted while the probe is held"
         );
-        drop((held, held_2, held_3));
+
+        drop(probe);
+        let _readmitted = cb.admit().expect("released token re-admits");
+        assert!(
+            cb.admit().is_err(),
+            "release must not push the budget above its cap"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_consuming_a_permit_does_not_return_its_token() {
+        // The other half of the mechanism: a RECORDED outcome must not also
+        // hand the token back, or a request would both count and refund.
+        let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure();
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let Admission::Probe(probe) = cb.admit().expect("only token admitted") else {
+            panic!("half-open admission must carry a permit");
+        };
+        probe.consume();
+
+        assert!(cb.admit().is_err(), "a consumed token must stay consumed");
     }
 
     #[tokio::test]

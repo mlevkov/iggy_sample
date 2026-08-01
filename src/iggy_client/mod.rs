@@ -146,8 +146,9 @@ fn backoff_delay_ms(attempt: u32, base_ms: u64, max_ms: u64, jitter_unit: f64) -
 /// - **Closed** (normal): All requests pass through
 /// - **Open** (failing): Requests fail fast without attempting the operation
 /// - **Half-Open** (recovery): Probes limited to `success_threshold` tokens
-///   per `open_duration` window; excess requests fail fast (see
-///   `circuit_breaker` module docs for the token re-grant rules)
+///   per `open_duration` window; excess requests fail fast. Each admitted
+///   probe owns its token and returns it unless its outcome was recorded (see
+///   `circuit_breaker` module docs for ownership and the re-grant rules)
 ///
 /// # Performance Considerations
 ///
