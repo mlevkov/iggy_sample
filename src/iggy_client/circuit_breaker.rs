@@ -46,7 +46,7 @@
 //! rejected so a recovering server never receives a thundering herd of
 //! probes. Tokens re-grant after `open_duration` elapses in half-open,
 //! guaranteeing the breaker cannot wedge if a probe's outcome is never
-//! recorded. See [`CircuitBreaker::allow_request`].
+//! recorded. See [`CircuitBreaker::admit`].
 //!
 //! One consumed token can cover up to two server operations: the
 //! post-reconnect retry in `resilience::run_resilient` deliberately does
@@ -59,7 +59,7 @@
 //!
 //! // Check if request should be allowed. The gate is synchronous; only the
 //! // guarded operation itself awaits.
-//! if !cb.allow_request() {
+//! if cb.admit().is_err() {
 //!     return Err(AppError::CircuitOpen);
 //! }
 //!
@@ -82,6 +82,7 @@
 //! }
 //! ```
 
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -224,6 +225,115 @@ impl From<&State> for CircuitState {
     }
 }
 
+/// Why the gate turned a request away.
+///
+/// Captured under the same guard that made the decision, so — unlike re-reading
+/// `state()` afterwards — it always names the state that actually rejected,
+/// even under a concurrent transition.
+///
+/// Deliberately has no `Closed` variant: Closed never rejects, so an
+/// `Err(Closed)` would be representable and meaningless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rejection {
+    /// The circuit is open and its open window has not yet elapsed.
+    Open,
+    /// Half-open, but this window's probe budget is already spent.
+    ProbeBudgetExhausted,
+}
+
+impl Rejection {
+    /// Value for the `state` label on the rejection counter.
+    ///
+    /// Deliberately not [`CircuitState`]'s `Display`, which renders
+    /// `"half-open"` as user-facing prose. The metric vocabulary is
+    /// `"half_open"`, and routing the label through `Display` would silently
+    /// rename an exported label value and break existing queries.
+    fn metric_label(self) -> &'static str {
+        match self {
+            Rejection::Open => "open",
+            Rejection::ProbeBudgetExhausted => "half_open",
+        }
+    }
+}
+
+impl From<Rejection> for CircuitState {
+    fn from(rejection: Rejection) -> Self {
+        match rejection {
+            Rejection::Open => CircuitState::Open,
+            Rejection::ProbeBudgetExhausted => CircuitState::HalfOpen,
+        }
+    }
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        CircuitState::from(*self).fmt(f)
+    }
+}
+
+/// Ownership of one half-open probe token.
+///
+/// Minted only where a token is actually taken, so the permit's *existence* is
+/// the proof that this request holds one. That is what makes a phantom release
+/// — handing back a token the request never took — unrepresentable rather than
+/// merely guarded against.
+///
+/// In this commit the permit is a marker: it makes ownership explicit at every
+/// call site and forces each to bind it, but dropping one does nothing and the
+/// explicit `release_probe()` calls remain. The next commit moves the release
+/// into `Drop`, at which point these bindings become load-bearing.
+///
+/// The lifetime borrows the breaker, so a permit cannot outlive it or be
+/// smuggled into a detached task. Deliberately not `Clone` — a cloned permit
+/// would release twice.
+///
+/// One caveat worth stating rather than implying: binding a permit to a named
+/// local is a review rule, not a compiler-enforced one. `#[must_use]` on
+/// [`Admission`] catches a discarded admission, but `admit().is_ok()` and
+/// `let _ = admit()` both silence it while dropping the token immediately —
+/// `clippy::let_underscore_must_use` would catch the latter and is a pedantic
+/// lint this crate does not enable. Tests whose assertion depends on a token
+/// staying held say so at the binding.
+pub(crate) struct ProbePermit<'a> {
+    breaker: PhantomData<&'a CircuitBreaker>,
+}
+
+impl ProbePermit<'_> {
+    fn new() -> Self {
+        Self {
+            breaker: PhantomData,
+        }
+    }
+
+    /// The outcome was recorded, so the token must NOT be handed back.
+    ///
+    /// Consumes by value, so use-after-consume is a compile error rather than a
+    /// silent no-op. The disarm is a move with no lock involved, which is what
+    /// makes it safe to call from anywhere — including, once `Drop` is wired,
+    /// from a path where a state guard might still be live.
+    pub(crate) fn consume(self) {
+        let _ = std::mem::ManuallyDrop::new(self);
+    }
+}
+
+impl Drop for ProbePermit<'_> {
+    /// Inert in this commit. Landing the release separately is deliberate:
+    /// with `Drop` doing nothing, every existing assertion still holds, so the
+    /// call-site rewrites here can be reviewed as mechanical rather than as
+    /// behavior.
+    fn drop(&mut self) {}
+}
+
+/// Outcome of the circuit-breaker gate for one request.
+#[must_use = "an admission decides whether the operation may run"]
+pub(crate) enum Admission<'a> {
+    /// Closed: the request passes and consumes no probe token, so there is
+    /// nothing it could later hand back.
+    Ungated,
+    /// HalfOpen: the request holds one of the window's probe tokens.
+    Probe(ProbePermit<'a>),
+}
+
 /// What a completed state transition should report, emitted once the state
 /// guard has been released.
 ///
@@ -241,12 +351,8 @@ enum Effect {
     /// Open -> HalfOpen. `probes` is the budget as granted, captured before the
     /// transitioning caller takes its own token.
     EnteredHalfOpen { probes: u32 },
-    /// A request was turned away. The label separates "circuit is open" from
-    /// "half-open probe budget exhausted" — materially different situations.
-    Rejected {
-        label: &'static str,
-        budget_exhausted: bool,
-    },
+    /// A request was turned away.
+    Rejected(Rejection),
     /// A probe window elapsed with no recorded outcome and was re-granted.
     RegrantedProbes,
     /// A probe token was handed back because its outcome was never recorded.
@@ -350,15 +456,12 @@ impl CircuitBreaker {
                     "Circuit breaker transitioning from Open to HalfOpen"
                 );
             }
-            Effect::Rejected {
-                label,
-                budget_exhausted,
-            } => {
-                if budget_exhausted {
+            Effect::Rejected(rejection) => {
+                if rejection == Rejection::ProbeBudgetExhausted {
                     debug!("Circuit breaker rejected request: half-open probe budget exhausted");
                 }
                 self.requests_rejected.fetch_add(1, Ordering::Relaxed);
-                crate::metrics::record_circuit_breaker_rejection(label);
+                crate::metrics::record_circuit_breaker_rejection(rejection.metric_label());
             }
             Effect::RegrantedProbes => {
                 // info: a full probe window elapsed without a recorded outcome
@@ -405,9 +508,11 @@ impl CircuitBreaker {
         }
     }
 
-    /// Check if a request should be allowed through the circuit breaker.
+    /// Ask the breaker to admit one request.
     ///
-    /// Returns `true` if the request can proceed, `false` if it should be rejected.
+    /// `Ok` carries an [`Admission`] describing what the caller now holds:
+    /// nothing (Closed) or a [`ProbePermit`] (HalfOpen). `Err` carries the
+    /// [`Rejection`] reason, captured under the guard that made the decision.
     ///
     /// # State Transitions
     ///
@@ -428,20 +533,29 @@ impl CircuitBreaker {
     /// (e.g. the operation failed with a non-connection error, which by
     /// design touches neither breaker counter) would otherwise leave the
     /// breaker half-open with zero tokens forever.
-    pub fn allow_request(&self) -> bool {
-        // One exclusive acquisition covers every case. The former read-lock
-        // fast path existed to avoid an async write lock on the common Closed
-        // path; a synchronous mutex makes it unnecessary, and dropping it also
-        // removes the read->write upgrade race that forced the state to be
-        // re-matched after the second acquisition.
-        // Single-tail: every arm yields (allowed, effect) rather than returning
-        // early, so no path can skip the emit below.
-        let (allowed, effect) = {
+    pub(crate) fn admit(&self) -> Result<Admission<'_>, Rejection> {
+        /// Decided under the guard; the permit is minted only afterwards.
+        ///
+        /// Keeping construction outside the critical section is structural
+        /// deadlock safety: once `Drop` releases a token it must take the same
+        /// non-reentrant mutex, so no permit may exist while a guard is live.
+        /// Deferring the mint makes that impossible rather than merely
+        /// discouraged, and a `?` added mid-function later cannot reintroduce it.
+        enum Decision {
+            Ungated,
+            Probe,
+            Rejected(Rejection),
+        }
+
+        // One exclusive acquisition covers every case, and every arm yields
+        // (decision, effect) rather than returning early, so no path can skip
+        // the emit below.
+        let (decision, effect) = {
             let mut guard = self.lock();
             let budget = self.probe_budget();
 
             match &mut *guard {
-                State::Closed { .. } => (true, Effect::None),
+                State::Closed { .. } => (Decision::Ungated, Effect::None),
                 State::Open { opened_at } => {
                     if opened_at.elapsed() >= self.config.open_duration {
                         // A NEW recovery attempt: the success count starts at
@@ -456,14 +570,11 @@ impl CircuitBreaker {
                             consecutive_successes: 0,
                         };
                         self.set_gauge(CircuitState::HalfOpen);
-                        (true, Effect::EnteredHalfOpen { probes: budget })
+                        (Decision::Probe, Effect::EnteredHalfOpen { probes: budget })
                     } else {
                         (
-                            false,
-                            Effect::Rejected {
-                                label: "open",
-                                budget_exhausted: false,
-                            },
+                            Decision::Rejected(Rejection::Open),
+                            Effect::Rejected(Rejection::Open),
                         )
                     }
                 }
@@ -474,7 +585,7 @@ impl CircuitBreaker {
                 } => {
                     if *probes_remaining > 0 {
                         *probes_remaining -= 1;
-                        (true, Effect::None)
+                        (Decision::Probe, Effect::None)
                     } else if granted_at.elapsed() >= self.config.open_duration {
                         // Re-grant after open_duration so leaked probes cannot
                         // wedge the breaker in HalfOpen (see doc above). This
@@ -482,14 +593,11 @@ impl CircuitBreaker {
                         // consecutive_successes is deliberately untouched.
                         *probes_remaining = budget - 1;
                         *granted_at = Instant::now();
-                        (true, Effect::RegrantedProbes)
+                        (Decision::Probe, Effect::RegrantedProbes)
                     } else {
                         (
-                            false,
-                            Effect::Rejected {
-                                label: "half_open",
-                                budget_exhausted: true,
-                            },
+                            Decision::Rejected(Rejection::ProbeBudgetExhausted),
+                            Effect::Rejected(Rejection::ProbeBudgetExhausted),
                         )
                     }
                 }
@@ -497,7 +605,11 @@ impl CircuitBreaker {
         };
 
         self.emit(effect);
-        allowed
+        match decision {
+            Decision::Ungated => Ok(Admission::Ungated),
+            Decision::Probe => Ok(Admission::Probe(ProbePermit::new())),
+            Decision::Rejected(rejection) => Err(rejection),
+        }
     }
 
     /// Half-open probe budget: `success_threshold`, floored at one so a
@@ -509,7 +621,7 @@ impl CircuitBreaker {
 
     /// Test-only: enter HalfOpen with a full probe budget, spending nothing.
     ///
-    /// The production path reaches HalfOpen only through [`Self::allow_request`],
+    /// The production path reaches HalfOpen only through [`Self::admit`],
     /// which consumes the transitioning caller's token on the way in. A race
     /// over the budget therefore cannot be staged through it — the setup call
     /// would take the very token under contention. Granting the window directly
@@ -635,6 +747,12 @@ impl CircuitBreaker {
     }
 
     /// Get the current circuit state.
+    ///
+    /// Test-only. Production code used to call this immediately after a
+    /// rejection to name the state in the error message; [`Rejection`] now
+    /// carries that, captured under the guard that rejected, so the last
+    /// non-test caller is gone along with its second lock acquisition.
+    #[cfg(test)]
     pub fn state(&self) -> CircuitState {
         CircuitState::from(&*self.lock())
     }
@@ -731,7 +849,7 @@ mod tests {
     async fn test_circuit_breaker_starts_closed() {
         let cb = CircuitBreaker::default();
         assert_eq!(cb.state(), CircuitState::Closed);
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
     }
 
     #[tokio::test]
@@ -759,7 +877,7 @@ mod tests {
         assert_eq!(cb.state(), CircuitState::Open);
 
         // Requests should be rejected
-        assert!(!cb.allow_request());
+        assert!(cb.admit().is_err());
         assert_eq!(cb.requests_rejected(), 1);
     }
 
@@ -775,7 +893,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(20)).await;
 
         // Should allow request and transition to half-open
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 
@@ -789,7 +907,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(20)).await;
 
         // Transition to half-open
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Record successes
@@ -810,7 +928,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(20)).await;
 
         // Transition to half-open
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Failure should reopen
@@ -850,7 +968,7 @@ mod tests {
 
         cb.force_close();
         assert_eq!(cb.state(), CircuitState::Closed);
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
     }
 
     #[tokio::test]
@@ -860,7 +978,7 @@ mod tests {
 
         cb.force_open();
         assert_eq!(cb.state(), CircuitState::Open);
-        assert!(!cb.allow_request());
+        assert!(cb.admit().is_err());
     }
 
     // =========================================================================
@@ -878,12 +996,16 @@ mod tests {
 
         // success_threshold = 2 probe tokens: two callers pass, the third
         // is rejected instead of piling onto the recovering server.
-        assert!(cb.allow_request());
-        assert!(cb.allow_request());
+        //
+        // The permits are bound to named locals deliberately. Once Drop
+        // releases the token, letting these fall as temporaries would hand
+        // both tokens straight back and invert the rejection asserted below.
+        let _probe_1 = cb.admit().expect("first probe admitted");
+        let _probe_2 = cb.admit().expect("second probe admitted");
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         let rejected_before = cb.requests_rejected();
-        assert!(!cb.allow_request());
+        assert!(cb.admit().is_err());
         assert_eq!(cb.requests_rejected(), rejected_before + 1);
     }
 
@@ -897,18 +1019,20 @@ mod tests {
 
         // Single token consumed by the transitioning caller; its outcome is
         // never recorded (the leaked-probe case) so the breaker sits in
-        // HalfOpen with zero tokens.
-        assert!(cb.allow_request());
-        assert!(!cb.allow_request());
+        // HalfOpen with zero tokens. Held in a named local: a temporary would
+        // return the token once Drop releases, and the whole point of this
+        // test is a window that stays exhausted.
+        let _leaked_probe = cb.admit().expect("transitioning caller admitted");
+        assert!(cb.admit().is_err());
 
         // Just below the window boundary the budget must stay exhausted -
         // an unconditional re-grant would defeat the probe cap entirely.
         tokio::time::advance(Duration::from_secs(29)).await;
-        assert!(!cb.allow_request());
+        assert!(cb.admit().is_err());
 
         // The re-grant window keeps the breaker from wedging permanently.
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 
@@ -929,21 +1053,21 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Entry consumes one of the two tokens; record a success against it.
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Spend the second token, then exhaust the budget. Without this the
         // re-grant branch is never reached and the rest passes vacuously.
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         assert!(
-            !cb.allow_request(),
+            cb.admit().is_err(),
             "budget must be exhausted for the re-grant branch to be exercised"
         );
 
         // Window expiry re-grants; the success recorded above must survive.
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
 
         // This second success reaches success_threshold only if the first one
         // survived the re-grant - a resetting re-grant leaves it HalfOpen.
@@ -964,13 +1088,13 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Consume the only token, then fail the probe: back to Open.
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);
 
         // Next half-open entry starts with a fresh token budget.
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 
@@ -984,13 +1108,13 @@ mod tests {
         cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         cb.record_success();
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
         cb.record_success();
 
         assert_eq!(cb.state(), CircuitState::Closed);
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1003,16 +1127,16 @@ mod tests {
         cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
     }
 
     #[test]
     fn test_half_open_concurrent_probes_admit_exactly_the_budget() {
-        // Two OS threads race allow_request inside HalfOpen over a one-token
+        // Two OS threads race admit() inside HalfOpen over a one-token
         // budget: exactly one may pass.
         //
         // This deliberately no longer uses tokio::join!. A synchronous
-        // allow_request is not a future, and the obvious sequential rewrite
+        // admit() is not a future, and the obvious sequential rewrite
         // would still pass with the cap removed entirely - it takes two
         // genuinely concurrent callers to test a cap. A Barrier releases both
         // threads at once and the loop amplifies a narrow window; a fresh
@@ -1027,11 +1151,11 @@ mod tests {
             let (a, b) = std::thread::scope(|s| {
                 let first = s.spawn(|| {
                     gate.wait();
-                    cb.allow_request()
+                    cb.admit().is_ok()
                 });
                 let second = s.spawn(|| {
                     gate.wait();
-                    cb.allow_request()
+                    cb.admit().is_ok()
                 });
                 (first.join().unwrap(), second.join().unwrap())
             });
@@ -1051,25 +1175,26 @@ mod tests {
 
         // No-op while Closed.
         cb.release_probe();
-        assert!(cb.allow_request());
+        assert!(cb.admit().is_ok());
 
         cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Consume the only token, release it, and it must admit again.
-        assert!(cb.allow_request());
-        assert!(!cb.allow_request());
+        let held = cb.admit().expect("only token admitted");
+        assert!(cb.admit().is_err());
         cb.release_probe();
-        assert!(cb.allow_request());
+        let held_2 = cb.admit().expect("released token re-admits");
 
         // Releases never exceed the granted budget (single token here).
         cb.release_probe();
         cb.release_probe();
-        assert!(cb.allow_request());
+        let held_3 = cb.admit().expect("capped release admits exactly once more");
         assert!(
-            !cb.allow_request(),
+            cb.admit().is_err(),
             "budget cap must hold after over-release"
         );
+        drop((held, held_2, held_3));
     }
 
     #[tokio::test]

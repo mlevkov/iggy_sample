@@ -74,7 +74,7 @@ use std::time::Duration;
 
 use tracing::{debug, warn};
 
-use super::circuit_breaker::CircuitBreaker;
+use super::circuit_breaker::{Admission, CircuitBreaker, ProbePermit};
 use crate::error::{AppError, AppResult};
 
 /// Check if an error is a connection-related error that warrants reconnection.
@@ -86,6 +86,18 @@ pub(super) fn is_connection_error(error: &AppError) -> bool {
         error,
         AppError::ConnectionFailed(_) | AppError::Disconnected(_) | AppError::ConnectionReset(_)
     )
+}
+
+/// Give up an owned probe token because the outcome WAS recorded.
+///
+/// A no-op for `None` (the request was admitted while Closed and holds no
+/// token). Consuming rather than dropping is what keeps a recorded outcome
+/// from also handing the token back — once `Drop` releases, doing both would
+/// mint a token from nothing.
+fn consume(permit: Option<ProbePermit<'_>>) {
+    if let Some(permit) = permit {
+        permit.consume();
+    }
 }
 
 /// Execute `operation` under the full resilience composition.
@@ -116,26 +128,33 @@ where
     R: FnOnce() -> RFut,
     RFut: Future<Output = AppResult<()>>,
 {
-    // Check circuit breaker before attempting operation
-    if !breaker.allow_request() {
-        // The state is re-read after the rejection, so under a concurrent
-        // transition it reports the CURRENT state, not necessarily the one
-        // that rejected the request.
-        let state = breaker.state();
-        return Err(AppError::CircuitOpen(format!(
-            "Circuit breaker rejected the request (current state: {}) - service temporarily unavailable",
-            state
-        )));
-    }
+    // Check circuit breaker before attempting operation. A half-open
+    // admission hands back a permit representing the probe token this request
+    // now owns; Closed admissions consume no token and so carry none.
+    let permit = match breaker.admit() {
+        Ok(Admission::Ungated) => None,
+        Ok(Admission::Probe(permit)) => Some(permit),
+        Err(rejection) => {
+            // `rejection` was captured under the guard that made the decision,
+            // so it names the state that actually rejected - no second lock
+            // acquisition, and no chance of reporting a state a concurrent
+            // transition has already moved past.
+            return Err(AppError::CircuitOpen(format!(
+                "Circuit breaker rejected the request (state: {rejection}) - service temporarily unavailable"
+            )));
+        }
+    };
 
     // First attempt with timeout
     match tokio::time::timeout(timeout, operation()).await {
         Ok(Ok(value)) => {
             breaker.record_success();
+            consume(permit);
             Ok(value)
         }
         Ok(Err(e)) if is_connection_error(&e) => {
             breaker.record_failure();
+            consume(permit);
             warn!(error = %e, "Operation failed due to connection error, attempting reconnect");
             reconnect().await?;
             retry_once(breaker, timeout, timeout_is_outage_signal, &operation).await
@@ -145,6 +164,7 @@ where
             // but hand back any half-open probe token this request consumed
             // so an unrecorded outcome cannot starve recovery.
             breaker.release_probe();
+            drop(permit);
             Err(e)
         }
         Err(_) => {
@@ -156,12 +176,14 @@ where
             // evidence; hand back any consumed probe token instead.
             if timeout_is_outage_signal {
                 breaker.record_failure();
+                consume(permit);
                 warn!(
                     timeout = ?timeout,
                     "Operation timed out at the global deadline (recorded as circuit-breaker failure)"
                 );
             } else {
                 breaker.release_probe();
+                drop(permit);
                 debug!(
                     timeout = ?timeout,
                     "Operation timed out at a client-scoped deadline (not a breaker failure)"
@@ -667,7 +689,7 @@ mod tests {
         // Without release_probe the single token would be gone and this
         // would be rejected until the re-grant window.
         assert!(
-            breaker.allow_request(),
+            breaker.admit().is_ok(),
             "released token must admit the next probe"
         );
     }
