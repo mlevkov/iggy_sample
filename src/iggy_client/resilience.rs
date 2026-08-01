@@ -14,10 +14,9 @@
 //! 3. **Classified connection error** → record breaker failure, run the
 //!    `reconnect` step, then retry the operation exactly once.
 //! 4. **Non-connection error** → returned as-is; the breaker records
-//!    neither success nor failure (bad requests must not open the circuit),
-//!    but any half-open probe token the request consumed is RELEASED so an
-//!    unrecorded outcome cannot starve recovery (see
-//!    `CircuitBreaker::release_probe`).
+//!    neither success nor failure (bad requests must not open the circuit).
+//!    Any half-open probe token the request consumed is returned when its
+//!    permit drops, so an unrecorded outcome cannot starve recovery.
 //! 5. **Timeout** → recorded as a breaker failure only when
 //!    `timeout_is_outage_signal` is true, i.e. the deadline is the global
 //!    operation timeout (the SDK's internal transport reconnection swallows
@@ -64,17 +63,25 @@
 //! immediately. This is the accepted trade against the one-client-DoS the
 //! exemption prevents.
 //!
-//! Note also that a single request may release its probe token twice
-//! (scoped first-attempt timeout, then an unrecorded retry outcome); the
-//! budget cap bounds the effect to transiently admitting one extra
-//! concurrent probe — the same order of slack as the documented
-//! retry-gate bypass.
+//! # Probe token ownership
+//!
+//! A half-open admission hands back a `ProbePermit`. Recording an outcome
+//! CONSUMES it; anything else — an unrecorded error, a client-scoped timeout,
+//! or the request future being dropped mid-flight — returns the token when the
+//! permit falls out of scope. A request can therefore no longer both record an
+//! outcome and refund its token, nor release the same token twice, both of
+//! which this module previously documented as bounded slack.
+//!
+//! The retry path holds no permit: the first attempt has already disposed of
+//! it by the time a reconnect leads there. That is deliberate and unchanged —
+//! the retry deliberately bypasses the gate (above), so one token still covers
+//! up to two server operations.
 
 use std::time::Duration;
 
 use tracing::{debug, warn};
 
-use super::circuit_breaker::CircuitBreaker;
+use super::circuit_breaker::{Admission, CircuitBreaker, ProbePermit};
 use crate::error::{AppError, AppResult};
 
 /// Check if an error is a connection-related error that warrants reconnection.
@@ -86,6 +93,18 @@ pub(super) fn is_connection_error(error: &AppError) -> bool {
         error,
         AppError::ConnectionFailed(_) | AppError::Disconnected(_) | AppError::ConnectionReset(_)
     )
+}
+
+/// Give up an owned probe token because the outcome WAS recorded.
+///
+/// A no-op for `None` (the request was admitted while Closed and holds no
+/// token). Consuming rather than dropping is what keeps a recorded outcome
+/// from also handing the token back — once `Drop` releases, doing both would
+/// mint a token from nothing.
+fn consume(permit: Option<ProbePermit<'_>>) {
+    if let Some(permit) = permit {
+        permit.consume();
+    }
 }
 
 /// Execute `operation` under the full resilience composition.
@@ -116,35 +135,43 @@ where
     R: FnOnce() -> RFut,
     RFut: Future<Output = AppResult<()>>,
 {
-    // Check circuit breaker before attempting operation
-    if !breaker.allow_request().await {
-        // The state is re-read after the rejection, so under a concurrent
-        // transition it reports the CURRENT state, not necessarily the one
-        // that rejected the request.
-        let state = breaker.state().await;
-        return Err(AppError::CircuitOpen(format!(
-            "Circuit breaker rejected the request (current state: {}) - service temporarily unavailable",
-            state
-        )));
-    }
+    // Check circuit breaker before attempting operation. A half-open
+    // admission hands back a permit representing the probe token this request
+    // now owns; Closed admissions consume no token and so carry none.
+    let permit = match breaker.admit() {
+        Ok(Admission::Ungated) => None,
+        Ok(Admission::Probe(permit)) => Some(permit),
+        Err(rejection) => {
+            // `rejection` was captured under the guard that made the decision,
+            // so it names the state that actually rejected - no second lock
+            // acquisition, and no chance of reporting a state a concurrent
+            // transition has already moved past.
+            return Err(AppError::CircuitOpen(format!(
+                "Circuit breaker rejected the request (state: {rejection}) - service temporarily unavailable"
+            )));
+        }
+    };
 
     // First attempt with timeout
     match tokio::time::timeout(timeout, operation()).await {
         Ok(Ok(value)) => {
-            breaker.record_success().await;
+            breaker.record_success();
+            consume(permit);
             Ok(value)
         }
         Ok(Err(e)) if is_connection_error(&e) => {
-            breaker.record_failure().await;
+            breaker.record_failure();
+            consume(permit);
             warn!(error = %e, "Operation failed due to connection error, attempting reconnect");
             reconnect().await?;
             retry_once(breaker, timeout, timeout_is_outage_signal, &operation).await
         }
         Ok(Err(e)) => {
-            // Non-connection error - record neither success nor failure,
-            // but hand back any half-open probe token this request consumed
-            // so an unrecorded outcome cannot starve recovery.
-            breaker.release_probe().await;
+            // Non-connection error - record neither success nor failure.
+            // Dropping the permit hands back any half-open probe token this
+            // request consumed, so an unrecorded outcome cannot starve
+            // recovery.
+            drop(permit);
             Err(e)
         }
         Err(_) => {
@@ -155,13 +182,14 @@ where
             // failure. A client-shortened deadline expiring is not outage
             // evidence; hand back any consumed probe token instead.
             if timeout_is_outage_signal {
-                breaker.record_failure().await;
+                breaker.record_failure();
+                consume(permit);
                 warn!(
                     timeout = ?timeout,
                     "Operation timed out at the global deadline (recorded as circuit-breaker failure)"
                 );
             } else {
-                breaker.release_probe().await;
+                drop(permit);
                 debug!(
                     timeout = ?timeout,
                     "Operation timed out at a client-scoped deadline (not a breaker failure)"
@@ -208,28 +236,25 @@ where
 {
     match tokio::time::timeout(timeout, operation()).await {
         Ok(Ok(value)) => {
-            breaker.record_success().await;
+            breaker.record_success();
             Ok(value)
         }
         Ok(Err(e)) => {
             if is_connection_error(&e) {
-                breaker.record_failure().await;
+                breaker.record_failure();
                 warn!(error = %e, "Retry failed with a connection error (recorded as breaker failure)");
-            } else {
-                // Unrecorded outcome: hand back any consumed probe token.
-                breaker.release_probe().await;
             }
+            // No token to hand back: the permit was disposed on the first
+            // attempt, before the reconnect that led here.
             Err(e)
         }
         Err(_) => {
             if timeout_is_outage_signal {
-                breaker.record_failure().await;
+                breaker.record_failure();
                 warn!(
                     timeout = ?timeout,
                     "Retry timed out at the global deadline (recorded as breaker failure)"
                 );
-            } else {
-                breaker.release_probe().await;
             }
             Err(AppError::OperationTimeout(format!(
                 "Operation timed out after {:?} on retry",
@@ -277,7 +302,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn breaker_open_fails_fast_without_running_operation() {
         let breaker = breaker_with(5);
-        breaker.force_open().await;
+        breaker.force_open();
         let calls = Arc::new(AtomicU32::new(0));
         let reconnects = Arc::new(AtomicU32::new(0));
 
@@ -307,10 +332,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn success_passes_through_and_records_breaker_success() {
         // Enter HalfOpen (success_threshold = 1) so record_success is
-        // observable: the single success must close the circuit. Zero
-        // open_duration makes the Open->HalfOpen transition immediate.
-        let breaker = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::ZERO));
-        breaker.force_open().await;
+        // observable: the single success must close the circuit.
+        //
+        // A real 30s window plus an advance, rather than a zero window: zero is
+        // a configuration Config::validate now rejects, and a test resting on
+        // one production refuses would drift from reality.
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::from_secs(30)));
+        breaker.force_open();
+        tokio::time::advance(Duration::from_secs(30)).await;
         let reconnects = Arc::new(AtomicU32::new(0));
 
         let result: AppResult<u32> = run_resilient(
@@ -324,7 +353,7 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap(), 42);
-        assert_eq!(breaker.state().await, CircuitState::Closed);
+        assert_eq!(breaker.state(), CircuitState::Closed);
         assert_eq!(reconnects.load(Ordering::SeqCst), 0);
     }
 
@@ -346,7 +375,7 @@ mod tests {
         assert!(matches!(result, Err(AppError::OperationTimeout(_))));
         assert_eq!(reconnects.load(Ordering::SeqCst), 0, "must not reconnect");
         // The timeout still counts as a breaker failure (threshold 1 -> Open).
-        assert_eq!(breaker.state().await, CircuitState::Open);
+        assert_eq!(breaker.state(), CircuitState::Open);
     }
 
     #[tokio::test(start_paused = true)]
@@ -410,7 +439,7 @@ mod tests {
         assert_eq!(reconnects.load(Ordering::SeqCst), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         // Failure then success: the success resets the consecutive count.
-        assert_eq!(breaker.state().await, CircuitState::Closed);
+        assert_eq!(breaker.state(), CircuitState::Closed);
     }
 
     #[tokio::test(start_paused = true)]
@@ -442,7 +471,7 @@ mod tests {
         assert!(matches!(result, Err(AppError::ConnectionFailed(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "single retry, no loop");
         assert_eq!(reconnects.load(Ordering::SeqCst), 1, "single reconnect");
-        assert_eq!(breaker.state().await, CircuitState::Open);
+        assert_eq!(breaker.state(), CircuitState::Open);
     }
 
     #[tokio::test(start_paused = true)]
@@ -471,7 +500,7 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::BadRequest(_))));
-        assert_eq!(breaker.state().await, CircuitState::Closed);
+        assert_eq!(breaker.state(), CircuitState::Closed);
         assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry");
         assert_eq!(reconnects.load(Ordering::SeqCst), 0, "no reconnect");
     }
@@ -544,7 +573,7 @@ mod tests {
         assert!(
             matches!(&result, Err(AppError::OperationTimeout(msg)) if msg.contains("on retry"))
         );
-        assert_eq!(breaker.state().await, CircuitState::Open);
+        assert_eq!(breaker.state(), CircuitState::Open);
     }
 
     #[tokio::test(start_paused = true)]
@@ -576,7 +605,7 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::BadRequest(_))));
-        assert_eq!(breaker.state().await, CircuitState::Closed);
+        assert_eq!(breaker.state(), CircuitState::Closed);
     }
 
     #[tokio::test(start_paused = true)]
@@ -598,7 +627,7 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::OperationTimeout(_))));
-        assert_eq!(breaker.state().await, CircuitState::Closed);
+        assert_eq!(breaker.state(), CircuitState::Closed);
         assert_eq!(reconnects.load(Ordering::SeqCst), 0);
     }
 
@@ -647,8 +676,8 @@ mod tests {
         // error records neither counter but must hand its token back, or
         // recovery starves until the re-grant window.
         let breaker = breaker_with(1); // success_threshold 1 => single token
-        breaker.record_failure().await;
-        assert_eq!(breaker.state().await, CircuitState::Open);
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CircuitState::Open);
         tokio::time::advance(Duration::from_secs(30)).await;
 
         let reconnects = Arc::new(AtomicU32::new(0));
@@ -663,11 +692,11 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::NotFound(_))));
-        assert_eq!(breaker.state().await, CircuitState::HalfOpen);
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
         // Without release_probe the single token would be gone and this
         // would be rejected until the re-grant window.
         assert!(
-            breaker.allow_request().await,
+            breaker.admit().is_ok(),
             "released token must admit the next probe"
         );
     }
@@ -705,10 +734,101 @@ mod tests {
         assert_eq!(reconnects.load(Ordering::SeqCst), 1, "recovery still fires");
         assert_eq!(calls.load(Ordering::SeqCst), 2, "single retry");
         assert_eq!(
-            breaker.state().await,
+            breaker.state(),
             CircuitState::Closed,
             "scoped timeouts on both attempts must not feed the breaker"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scoped_timeout_returns_the_probe_token_even_when_reconnect_fails() {
+        // The permit is disposed before the reconnect step runs, so an early
+        // return from a failed reconnect cannot strand the token. Both
+        // pre-existing reconnect-failure tests drive Closed breakers, where a
+        // release is a no-op, so neither would notice either way.
+        let breaker = breaker_with(1);
+        breaker.record_failure();
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let reconnects = Arc::new(AtomicU32::new(0));
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            false,    // client-scoped deadline: must not feed the breaker
+            || false, // disconnected, so the reconnect path is taken
+            fake_reconnect(
+                &reconnects,
+                Err(AppError::ConnectionFailed("reconnect exhausted".into())),
+            ),
+            || async { std::future::pending().await },
+        )
+        .await;
+
+        assert!(matches!(&result, Err(AppError::ConnectionFailed(_))));
+        assert_eq!(reconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            breaker.state(),
+            CircuitState::HalfOpen,
+            "a scoped deadline expiring is not outage evidence"
+        );
+        assert!(
+            breaker.admit().is_ok(),
+            "the probe token must be back despite the early return"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejection_message_names_the_state_that_actually_rejected() {
+        // The whole point of returning Rejection instead of re-reading state()
+        // is that the message names the state that made the decision. Nothing
+        // asserted on the message before, so mapping ProbeBudgetExhausted to
+        // the wrong state left every test green.
+        let breaker = breaker_with(1);
+        let calls = Arc::new(AtomicU32::new(0));
+        let reconnects = Arc::new(AtomicU32::new(0));
+
+        // Hard-open: the request never runs.
+        breaker.force_open();
+        let op_calls = Arc::clone(&calls);
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            true,
+            || true,
+            fake_reconnect(&reconnects, Ok(())),
+            move || {
+                let calls = Arc::clone(&op_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(1)
+                }
+            },
+        )
+        .await;
+        let Err(AppError::CircuitOpen(message)) = result else {
+            panic!("an open circuit must reject");
+        };
+        assert!(message.contains("open"), "got: {message}");
+        assert!(!message.contains("half-open"), "got: {message}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "operation must not run");
+
+        // Half-open with the budget spent: a different rejection reason, and
+        // the message must say so rather than reporting the enclosing state.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let _probe = breaker.admit().expect("the single probe token");
+        let result: AppResult<u32> = run_resilient(
+            &breaker,
+            TIMEOUT,
+            true,
+            || true,
+            fake_reconnect(&reconnects, Ok(())),
+            || async { Ok(2) },
+        )
+        .await;
+        let Err(AppError::CircuitOpen(message)) = result else {
+            panic!("an exhausted probe budget must reject");
+        };
+        assert!(message.contains("half-open"), "got: {message}");
     }
 
     // =========================================================================

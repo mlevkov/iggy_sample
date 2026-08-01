@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-01
+
+Session-03 tech-debt sweep: TD-2026-07-09 resolved. Plan review ran three
+rounds before any code was written (25 agents; artifacts under
+`docs/code-reviews/session-03-plan-round{1,2,3}.md`), which is why
+TD-2026-07-08 moved to session 04 — round 2 established the two records were
+mis-sequenced rather than merely mis-specified.
+
+### Added
+
+- Ownership of half-open circuit-breaker probe tokens. `admit()` returns a
+  `ProbePermit` that returns its token on drop and is consumed when the
+  outcome is recorded, closing the three accounting leaks TD-2026-07-09
+  named: a request admitted while closed can no longer release a token it
+  never took, a token from an expired probe window is discarded instead of
+  credited to the live one, and a request future dropped mid-probe — a client
+  disconnecting during an outage — returns its token instead of stranding it
+  until the re-grant window
+- `iggy_circuit_breaker_probe_dispositions_total{disposition}` — how probe
+  tokens end, as `consumed` / `released` / `stale` / `abandoned` /
+  `inconsistent`. The labels partition every admitted token, which is what
+  makes `consumed` usable as a denominator; an abandoned-only counter could not
+  distinguish a healthy system from a dead release path. `inconsistent` is
+  separate on purpose — it means the token accounting is wrong, and it must not
+  hide inside the routine `abandoned` volume
+
+### Changed
+
+- Circuit-breaker state is an enum whose variants own their own data, so a
+  field belonging to another state is unrepresentable. Deletes two `Option`s,
+  a window guard, a six-field hygiene reset and three defensive resets that
+  were previously maintained by convention at each mutation site
+- The breaker's state is guarded by `std::sync::Mutex` and its methods are
+  synchronous. Not a preference: `Drop` cannot await, so a blocking guard is
+  what makes the probe permit's release possible at all. Also removes the
+  read-lock fast path and the read-to-write upgrade race it required
+- Tracing and monotonic counters moved out of the breaker's critical section.
+  The Prometheus state gauge deliberately stays inside it: it is
+  last-writer-wins, and emitting it after releasing the guard would let racing
+  transitions leave it permanently disagreeing with the breaker
+- **Breaking**: `CircuitBreaker`, `CircuitBreakerConfig` and `CircuitState`
+  are crate-internal, and `IggyClientWrapper`'s `circuit_breaker_state`,
+  `circuit_breaker_metrics` and `force_close_circuit` accessors are removed.
+  All had zero callers; narrowing the surface is what keeps the rest of this
+  release non-breaking
+- CI accepts the Conventional Commits `!` breaking-change marker, which its
+  regex previously rejected outright
+
+### Fixed
+
+- `Config::validate` rejects a zero `CIRCUIT_BREAKER_OPEN_DURATION_SECS`, which
+  disabled the breaker entirely — Open never rejected, and every admission past
+  the budget re-granted — and a zero `OPERATION_TIMEOUT_SECS`, which opened the
+  circuit on a healthy service and never closed it
+- The 503 body for a rejected request now names the state that actually
+  rejected. It previously re-read the breaker after the fact and could report a
+  state a concurrent transition had already moved past
+
 ### Security
 
 - Bumped transitive `crossbeam-epoch` 0.9.18 -> 0.9.20 (lockfile-only) to
@@ -197,7 +255,8 @@ triggers (`docs/tech-debt/`):
 - Trusted proxy configuration for X-Forwarded-For validation
 - Input validation to prevent injection attacks
 
-[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mlevkov/iggy_sample/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mlevkov/iggy_sample/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mlevkov/iggy_sample/releases/tag/v0.1.0

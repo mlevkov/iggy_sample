@@ -1,6 +1,6 @@
 [package]
 name = "iggy_sample"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.93.0"
 description = "A comprehensive demonstration of Apache Iggy message streaming with Axum"
@@ -97,4 +97,9 @@ unsafe_code = "warn"
 debug = true
 codegen-units = 1
 lto = true
+# Load-bearing beyond binary size: CircuitBreaker::lock recovers a poisoned
+# state mutex rather than propagating, and its justification is that a panic
+# under the guard aborts here instead of unwinding into a poisoned lock. The
+# recovery path is therefore unreachable in release and exercised only by
+# `cargo test`. Changing this means revisiting that reasoning.
 panic = "abort"

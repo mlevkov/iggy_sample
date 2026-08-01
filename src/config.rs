@@ -277,6 +277,28 @@ impl Config {
             ));
         }
 
+        // A zero open window makes the breaker a no-op AND a log source: Open
+        // never rejects because the window has always elapsed, and every
+        // admission past the budget re-grants, bumping the probe generation so
+        // each outstanding permit then returns as a stale discard. That is an
+        // info plus a warn per request during the outage the breaker exists to
+        // damp.
+        if self.circuit_breaker_open_duration.is_zero() {
+            return Err(AppError::ConfigError(
+                "CIRCUIT_BREAKER_OPEN_DURATION_SECS must be greater than 0".to_string(),
+            ));
+        }
+
+        // A zero operation timeout expires every request on its first poll,
+        // and because that deadline equals the global one it counts as outage
+        // evidence - so the breaker opens on a service that is perfectly
+        // healthy and never closes.
+        if self.operation_timeout.is_zero() {
+            return Err(AppError::ConfigError(
+                "OPERATION_TIMEOUT_SECS must be greater than 0".to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -514,6 +536,45 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("BATCH_MAX_SIZE"));
+    }
+
+    #[test]
+    fn test_validate_circuit_breaker_open_duration_zero() {
+        // A zero window disables the breaker and turns every request during an
+        // outage into an info + a warn.
+        let config = Config {
+            circuit_breaker_open_duration: Duration::ZERO,
+            ..Config::default()
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("CIRCUIT_BREAKER_OPEN_DURATION_SECS")
+        );
+    }
+
+    #[test]
+    fn test_validate_operation_timeout_zero() {
+        // A zero deadline opens the breaker on a healthy service: every
+        // request expires on first poll, at the global deadline, which counts
+        // as outage evidence.
+        let config = Config {
+            operation_timeout: Duration::ZERO,
+            ..Config::default()
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("OPERATION_TIMEOUT_SECS")
+        );
     }
 
     #[test]
