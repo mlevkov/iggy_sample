@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- Bumped transitive `crossbeam-epoch` 0.9.18 -> 0.9.20 (lockfile-only) to
+  patch RUSTSEC-2026-0204: invalid pointer dereference in the
+  `fmt::Pointer`/`Display` impls for `Atomic`/`Shared` on null pointers.
+  Pulled in via the iggy SDK and `metrics-exporter-prometheus`; not used
+  directly by this crate.
 
 ## [0.3.0] - 2026-07-05
 
