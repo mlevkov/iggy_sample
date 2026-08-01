@@ -1050,7 +1050,7 @@ impl IggyClientWrapper {
 
     /// Get the current circuit breaker state.
     pub async fn circuit_breaker_state(&self) -> CircuitState {
-        self.circuit_breaker.state().await
+        self.circuit_breaker.state()
     }
 
     /// Get circuit breaker metrics.
@@ -1065,7 +1065,7 @@ impl IggyClientWrapper {
 
     /// Force close the circuit breaker (for manual recovery).
     pub async fn force_close_circuit(&self) {
-        self.circuit_breaker.force_close().await;
+        self.circuit_breaker.force_close();
     }
 }
 

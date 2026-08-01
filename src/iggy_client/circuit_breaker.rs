@@ -57,8 +57,9 @@
 //! ```rust,ignore
 //! let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
 //!
-//! // Check if request should be allowed
-//! if !cb.allow_request().await {
+//! // Check if request should be allowed. The gate is synchronous; only the
+//! // guarded operation itself awaits.
+//! if !cb.allow_request() {
 //!     return Err(AppError::CircuitOpen);
 //! }
 //!
@@ -66,29 +67,29 @@
 //! // breaker (see `resilience::run_resilient` for the real composition):
 //! match operation().await {
 //!     Ok(result) => {
-//!         cb.record_success().await;
+//!         cb.record_success();
 //!         Ok(result)
 //!     }
 //!     Err(e) if is_connection_error(&e) => {
-//!         cb.record_failure().await;
+//!         cb.record_failure();
 //!         Err(e)
 //!     }
 //!     // Other errors record neither; release any half-open probe token.
 //!     Err(e) => {
-//!         cb.release_probe().await;
+//!         cb.release_probe();
 //!         Err(e)
 //!     }
 //! }
 //! ```
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use tokio::sync::RwLock;
 // tokio's Instant (a thin wrapper over std's) so breaker timing follows the
 // pausable test clock; identical behavior in production.
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Circuit breaker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,12 +176,17 @@ impl CircuitBreakerState {
 /// Thread-safe circuit breaker implementation.
 ///
 /// Prevents cascading failures by failing fast when a service is unavailable.
-/// Uses RwLock internally for thread-safe state management.
+///
+/// State is guarded by a synchronous [`std::sync::Mutex`] rather than an async
+/// lock: every critical section is a short run of field updates that never
+/// awaits, and a blocking guard is what lets a future RAII probe permit release
+/// its token from `Drop`, which cannot await. No guard may be held across an
+/// `.await` — `clippy::await_holding_lock` enforces that, and CI denies warnings.
 pub struct CircuitBreaker {
     /// Configuration parameters.
     config: CircuitBreakerConfig,
-    /// Internal state protected by RwLock.
-    state: RwLock<CircuitBreakerState>,
+    /// Internal state protected by a synchronous mutex.
+    state: Mutex<CircuitBreakerState>,
     /// Total number of times the circuit has been opened (for metrics).
     times_opened: AtomicU32,
     /// Total number of requests rejected due to open circuit (for metrics).
@@ -192,10 +198,32 @@ impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             config,
-            state: RwLock::new(CircuitBreakerState::new()),
+            state: Mutex::new(CircuitBreakerState::new()),
             times_opened: AtomicU32::new(0),
             requests_rejected: AtomicU64::new(0),
         }
+    }
+
+    /// Acquire the state lock, recovering the inner value if it was poisoned.
+    ///
+    /// Poisoning requires a panic while the guard is held. The release profile
+    /// sets `panic = "abort"` (see `Cargo.toml`), so such a panic kills the
+    /// process and this branch is unreachable in production; it is reachable
+    /// only under `cargo test`, where silently continuing on half-updated state
+    /// would surface as a baffling failure in some later test instead of at its
+    /// origin — hence the `debug_assert!`.
+    ///
+    /// The `panicking()` guard is load-bearing: poisoning implies an in-flight
+    /// unwind, and asserting during unwind double-panics straight to abort,
+    /// destroying the very test report the assertion exists to sharpen.
+    fn lock(&self) -> MutexGuard<'_, CircuitBreakerState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            if !std::thread::panicking() {
+                debug_assert!(false, "circuit breaker state lock poisoned");
+            }
+            error!("Circuit breaker state lock poisoned; recovering inner state");
+            poisoned.into_inner()
+        })
     }
 
     /// Check if a request should be allowed through the circuit breaker.
@@ -221,32 +249,15 @@ impl CircuitBreaker {
     /// (e.g. the operation failed with a non-connection error, which by
     /// design touches neither breaker counter) would otherwise leave the
     /// breaker half-open with zero tokens forever.
-    pub async fn allow_request(&self) -> bool {
-        // First, check with a read lock for the common cases that don't
-        // mutate state (Closed passes, still-Open rejects).
-        {
-            let state = self.state.read().await;
-            match state.state {
-                CircuitState::Closed => return true,
-                // Consuming a probe token requires the write lock below.
-                CircuitState::HalfOpen => {}
-                CircuitState::Open => {
-                    // Check if timeout has expired
-                    if let Some(opened_at) = state.opened_at
-                        && opened_at.elapsed() < self.config.open_duration
-                    {
-                        return self.reject_request("open");
-                    }
-                    // Timeout expired - need to transition to half-open
-                }
-            }
-        }
-
-        // Write lock: Open -> HalfOpen transition, or HalfOpen token use.
-        let mut state = self.state.write().await;
+    pub fn allow_request(&self) -> bool {
+        // One exclusive acquisition covers every case. The former read-lock
+        // fast path existed to avoid an async write lock on the common Closed
+        // path; a synchronous mutex makes it unnecessary, and dropping it also
+        // removes the read->write upgrade race that forced the state to be
+        // re-matched after the second acquisition.
+        let mut state = self.lock();
 
         match state.state {
-            // Another task closed the circuit while we waited for the lock.
             CircuitState::Closed => true,
             CircuitState::Open => {
                 if let Some(opened_at) = state.opened_at
@@ -307,6 +318,21 @@ impl CircuitBreaker {
         self.config.success_threshold.max(1)
     }
 
+    /// Test-only: enter HalfOpen with a full probe budget, spending nothing.
+    ///
+    /// The production path reaches HalfOpen only through [`Self::allow_request`],
+    /// which consumes the transitioning caller's token on the way in. A race
+    /// over the budget therefore cannot be staged through it — the setup call
+    /// would take the very token under contention. Granting the window directly
+    /// leaves the budget as the only contended resource.
+    #[cfg(test)]
+    fn force_half_open(&self) {
+        let mut state = self.lock();
+        state.state = CircuitState::HalfOpen;
+        state.consecutive_successes = 0;
+        self.grant_probe_tokens(&mut state);
+    }
+
     /// Record a rejection (counter + state-labeled metric) and return `false`.
     ///
     /// Single site for the bookkeeping so no rejection path can forget the
@@ -326,8 +352,8 @@ impl CircuitBreaker {
     /// round-trip proving transport health — would permanently consume
     /// tokens and starve recovery until the re-grant window. No-op outside
     /// HalfOpen; capped at the granted budget.
-    pub(super) async fn release_probe(&self) {
-        let mut state = self.state.write().await;
+    pub(super) fn release_probe(&self) {
+        let mut state = self.lock();
         if state.state == CircuitState::HalfOpen {
             let cap = self.probe_budget();
             if state.half_open_probes_remaining < cap {
@@ -340,8 +366,8 @@ impl CircuitBreaker {
     /// Record a successful operation.
     ///
     /// In HalfOpen state, consecutive successes can close the circuit.
-    pub async fn record_success(&self) {
-        let mut state = self.state.write().await;
+    pub fn record_success(&self) {
+        let mut state = self.lock();
 
         match state.state {
             CircuitState::Closed => {
@@ -382,8 +408,8 @@ impl CircuitBreaker {
     ///
     /// In Closed state, consecutive failures can open the circuit.
     /// In HalfOpen state, any failure reopens the circuit.
-    pub async fn record_failure(&self) {
-        let mut state = self.state.write().await;
+    pub fn record_failure(&self) {
+        let mut state = self.lock();
 
         match state.state {
             CircuitState::Closed => {
@@ -418,8 +444,8 @@ impl CircuitBreaker {
     }
 
     /// Get the current circuit state.
-    pub async fn state(&self) -> CircuitState {
-        self.state.read().await.state
+    pub fn state(&self) -> CircuitState {
+        self.lock().state
     }
 
     /// Get the number of times the circuit has been opened.
@@ -433,8 +459,8 @@ impl CircuitBreaker {
     }
 
     /// Force the circuit to close (for testing or manual recovery).
-    pub async fn force_close(&self) {
-        let mut state = self.state.write().await;
+    pub fn force_close(&self) {
+        let mut state = self.lock();
         state.state = CircuitState::Closed;
         state.opened_at = None;
         state.consecutive_failures = 0;
@@ -451,8 +477,8 @@ impl CircuitBreaker {
     ///
     /// A no-op when already Open, preserving the no-refresh policy for
     /// `opened_at` (see `record_failure`) and keeping `times_opened` honest.
-    pub async fn force_open(&self) {
-        let mut state = self.state.write().await;
+    pub fn force_open(&self) {
+        let mut state = self.lock();
         if state.state != CircuitState::Open {
             self.open_now(&mut state);
             warn!("Circuit breaker forcibly opened");
@@ -485,8 +511,8 @@ mod tests {
     #[tokio::test]
     async fn test_circuit_breaker_starts_closed() {
         let cb = CircuitBreaker::default();
-        assert_eq!(cb.state().await, CircuitState::Closed);
-        assert!(cb.allow_request().await);
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow_request());
     }
 
     #[tokio::test]
@@ -495,13 +521,13 @@ mod tests {
         let cb = CircuitBreaker::new(config);
 
         // Record failures below threshold
-        cb.record_failure().await;
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Closed);
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
 
         // One more failure should open the circuit
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
         assert_eq!(cb.times_opened(), 1);
     }
 
@@ -510,11 +536,11 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
 
         // Requests should be rejected
-        assert!(!cb.allow_request().await);
+        assert!(!cb.allow_request());
         assert_eq!(cb.requests_rejected(), 1);
     }
 
@@ -523,15 +549,15 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 1, Duration::from_millis(10));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
 
         // Advance the paused clock past the open window
         tokio::time::advance(Duration::from_millis(20)).await;
 
         // Should allow request and transition to half-open
-        assert!(cb.allow_request().await);
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 
     #[tokio::test(start_paused = true)]
@@ -540,19 +566,19 @@ mod tests {
         let cb = CircuitBreaker::new(config);
 
         // Open the circuit
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_millis(20)).await;
 
         // Transition to half-open
-        assert!(cb.allow_request().await);
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Record successes
-        cb.record_success().await;
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
 
-        cb.record_success().await;
-        assert_eq!(cb.state().await, CircuitState::Closed);
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
     }
 
     #[tokio::test(start_paused = true)]
@@ -561,16 +587,16 @@ mod tests {
         let cb = CircuitBreaker::new(config);
 
         // Open the circuit
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_millis(20)).await;
 
         // Transition to half-open
-        assert!(cb.allow_request().await);
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Failure should reopen
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
         assert_eq!(cb.times_opened(), 2);
     }
 
@@ -579,43 +605,43 @@ mod tests {
         let config = CircuitBreakerConfig::new(3, 1, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
-        cb.record_failure().await;
+        cb.record_failure();
+        cb.record_failure();
         // Success should reset the counter
-        cb.record_success().await;
+        cb.record_success();
 
         // Now we need 3 more failures to open
-        cb.record_failure().await;
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Closed);
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
 
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
     }
 
     #[tokio::test]
     async fn test_force_close() {
         let cb = CircuitBreaker::default();
-        cb.record_failure().await;
-        cb.record_failure().await;
-        cb.record_failure().await;
-        cb.record_failure().await;
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
 
-        cb.force_close().await;
-        assert_eq!(cb.state().await, CircuitState::Closed);
-        assert!(cb.allow_request().await);
+        cb.force_close();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow_request());
     }
 
     #[tokio::test]
     async fn test_force_open() {
         let cb = CircuitBreaker::default();
-        assert_eq!(cb.state().await, CircuitState::Closed);
+        assert_eq!(cb.state(), CircuitState::Closed);
 
-        cb.force_open().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
-        assert!(!cb.allow_request().await);
+        cb.force_open();
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(!cb.allow_request());
     }
 
     // =========================================================================
@@ -627,18 +653,18 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 2, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // success_threshold = 2 probe tokens: two callers pass, the third
         // is rejected instead of piling onto the recovering server.
-        assert!(cb.allow_request().await);
-        assert!(cb.allow_request().await);
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        assert!(cb.allow_request());
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         let rejected_before = cb.requests_rejected();
-        assert!(!cb.allow_request().await);
+        assert!(!cb.allow_request());
         assert_eq!(cb.requests_rejected(), rejected_before + 1);
     }
 
@@ -647,24 +673,24 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Single token consumed by the transitioning caller; its outcome is
         // never recorded (the leaked-probe case) so the breaker sits in
         // HalfOpen with zero tokens.
-        assert!(cb.allow_request().await);
-        assert!(!cb.allow_request().await);
+        assert!(cb.allow_request());
+        assert!(!cb.allow_request());
 
         // Just below the window boundary the budget must stay exhausted -
         // an unconditional re-grant would defeat the probe cap entirely.
         tokio::time::advance(Duration::from_secs(29)).await;
-        assert!(!cb.allow_request().await);
+        assert!(!cb.allow_request());
 
         // The re-grant window keeps the breaker from wedging permanently.
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(cb.allow_request().await);
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 
     #[tokio::test(start_paused = true)]
@@ -679,31 +705,31 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 2, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Entry consumes one of the two tokens; record a success against it.
-        assert!(cb.allow_request().await);
-        cb.record_success().await;
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        assert!(cb.allow_request());
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Spend the second token, then exhaust the budget. Without this the
         // re-grant branch is never reached and the rest passes vacuously.
-        assert!(cb.allow_request().await);
+        assert!(cb.allow_request());
         assert!(
-            !cb.allow_request().await,
+            !cb.allow_request(),
             "budget must be exhausted for the re-grant branch to be exercised"
         );
 
         // Window expiry re-grants; the success recorded above must survive.
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(cb.allow_request().await);
+        assert!(cb.allow_request());
 
         // This second success reaches success_threshold only if the first one
         // survived the re-grant - a resetting re-grant leaves it HalfOpen.
-        cb.record_success().await;
+        cb.record_success();
         assert_eq!(
-            cb.state().await,
+            cb.state(),
             CircuitState::Closed,
             "re-grant must preserve consecutive_successes"
         );
@@ -714,18 +740,18 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Consume the only token, then fail the probe: back to Open.
-        assert!(cb.allow_request().await);
-        cb.record_failure().await;
-        assert_eq!(cb.state().await, CircuitState::Open);
+        assert!(cb.allow_request());
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
 
         // Next half-open entry starts with a fresh token budget.
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(cb.allow_request().await);
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 
     #[tokio::test(start_paused = true)]
@@ -735,16 +761,16 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 2, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
-        assert!(cb.allow_request().await);
-        cb.record_success().await;
-        assert!(cb.allow_request().await);
-        cb.record_success().await;
+        assert!(cb.allow_request());
+        cb.record_success();
+        assert!(cb.allow_request());
+        cb.record_success();
 
-        assert_eq!(cb.state().await, CircuitState::Closed);
-        assert!(cb.allow_request().await);
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow_request());
     }
 
     #[tokio::test(start_paused = true)]
@@ -754,30 +780,48 @@ mod tests {
         let config = CircuitBreakerConfig::new(1, 0, Duration::from_secs(30));
         let cb = CircuitBreaker::new(config);
 
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
-        assert!(cb.allow_request().await);
+        assert!(cb.allow_request());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn test_half_open_concurrent_probes_admit_exactly_the_budget() {
-        // Two callers race allow_request at the Open->HalfOpen boundary with
-        // a single-token budget: exactly one may pass. On the deterministic
-        // paused single-thread runtime, join! interleaves both futures
-        // through the same write-lock protocol the production path uses.
-        let config = CircuitBreakerConfig::new(1, 1, Duration::from_secs(30));
-        let cb = CircuitBreaker::new(config);
+    #[test]
+    fn test_half_open_concurrent_probes_admit_exactly_the_budget() {
+        // Two OS threads race allow_request inside HalfOpen over a one-token
+        // budget: exactly one may pass.
+        //
+        // This deliberately no longer uses tokio::join!. A synchronous
+        // allow_request is not a future, and the obvious sequential rewrite
+        // would still pass with the cap removed entirely - it takes two
+        // genuinely concurrent callers to test a cap. A Barrier releases both
+        // threads at once and the loop amplifies a narrow window; a fresh
+        // breaker per iteration keeps them independent. open_duration is far
+        // longer than an iteration, so the re-grant window cannot fire
+        // mid-race and hand the loser a second token.
+        for i in 0..200 {
+            let cb = CircuitBreaker::new(CircuitBreakerConfig::new(1, 1, Duration::from_secs(30)));
+            cb.force_half_open();
 
-        cb.record_failure().await;
-        tokio::time::advance(Duration::from_secs(30)).await;
+            let gate = std::sync::Barrier::new(2);
+            let (a, b) = std::thread::scope(|s| {
+                let first = s.spawn(|| {
+                    gate.wait();
+                    cb.allow_request()
+                });
+                let second = s.spawn(|| {
+                    gate.wait();
+                    cb.allow_request()
+                });
+                (first.join().unwrap(), second.join().unwrap())
+            });
 
-        let (a, b) = tokio::join!(cb.allow_request(), cb.allow_request());
-        assert!(
-            a ^ b,
-            "exactly one of two racing probes may pass, got ({a}, {b})"
-        );
-        assert_eq!(cb.state().await, CircuitState::HalfOpen);
+            assert!(
+                a ^ b,
+                "iteration {i}: exactly one of two racing probes may pass, got ({a}, {b})"
+            );
+            assert_eq!(cb.state(), CircuitState::HalfOpen);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -786,24 +830,24 @@ mod tests {
         let cb = CircuitBreaker::new(config);
 
         // No-op while Closed.
-        cb.release_probe().await;
-        assert!(cb.allow_request().await);
+        cb.release_probe();
+        assert!(cb.allow_request());
 
-        cb.record_failure().await;
+        cb.record_failure();
         tokio::time::advance(Duration::from_secs(30)).await;
 
         // Consume the only token, release it, and it must admit again.
-        assert!(cb.allow_request().await);
-        assert!(!cb.allow_request().await);
-        cb.release_probe().await;
-        assert!(cb.allow_request().await);
+        assert!(cb.allow_request());
+        assert!(!cb.allow_request());
+        cb.release_probe();
+        assert!(cb.allow_request());
 
         // Releases never exceed the granted budget (single token here).
-        cb.release_probe().await;
-        cb.release_probe().await;
-        assert!(cb.allow_request().await);
+        cb.release_probe();
+        cb.release_probe();
+        assert!(cb.allow_request());
         assert!(
-            !cb.allow_request().await,
+            !cb.allow_request(),
             "budget cap must hold after over-release"
         );
     }
@@ -812,10 +856,10 @@ mod tests {
     async fn test_force_open_when_already_open_does_not_double_count() {
         let cb = CircuitBreaker::default();
 
-        cb.force_open().await;
-        cb.force_open().await;
+        cb.force_open();
+        cb.force_open();
 
-        assert_eq!(cb.state().await, CircuitState::Open);
+        assert_eq!(cb.state(), CircuitState::Open);
         assert_eq!(
             cb.times_opened(),
             1,
