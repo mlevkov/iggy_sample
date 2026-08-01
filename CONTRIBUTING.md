@@ -30,29 +30,38 @@ By participating in this project, you agree to maintain a respectful and inclusi
 This project uses [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-<type>(<scope>): <description>
+<type>(<scope>)!: <description>
 
 [optional body]
 
 [optional footer(s)]
 ```
 
+The scope and the `!` are both optional. Use `!` to mark a breaking change —
+CI checks only the subject line, so a `BREAKING CHANGE:` footer alone will not
+be recognized (and would not appear in the generated release notes either).
+
 **Types:**
 - `feat`: New feature
 - `fix`: Bug fix
 - `docs`: Documentation changes
+- `style`: Formatting only, no code change
 - `refactor`: Code refactoring (no functional change)
 - `test`: Adding or updating tests
 - `chore`: Maintenance tasks
 - `perf`: Performance improvements
 - `ci`: CI/CD changes
+- `revert`: Reverting a previous commit
 
 **Examples:**
 ```
 feat(messages): add batch message validation
 fix(auth): handle empty API key gracefully
 docs(readme): update configuration examples
+refactor(circuit-breaker)!: narrow the public surface
 ```
+
+Keep the subject line at 72 characters or fewer (`.commitlintrc.json`).
 
 ## Development Setup
 

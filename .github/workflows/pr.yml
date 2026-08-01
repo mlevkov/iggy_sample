@@ -73,8 +73,12 @@ jobs:
           # Get all commits in this PR (exclude merge commits)
           COMMITS=$(git log --format="%s" --no-merges origin/${{ github.base_ref }}..HEAD)
 
-          # Regex for conventional commits
-          PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?: .+"
+          # Regex for conventional commits. The optional `!` marks a breaking
+          # change (type[(scope)][!]: description) - it must be accepted here
+          # because this check reads only the subject line, so a BREAKING CHANGE
+          # footer would be invisible to it (and to release.yml's notes, which
+          # also format with %s).
+          PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+"
 
           FAILED=0
           while IFS= read -r commit; do
@@ -83,8 +87,9 @@ jobs:
 
             if [[ ! "$commit" =~ $PATTERN ]]; then
               echo "::error::Non-conventional commit: '$commit'"
-              echo "Expected format: type(scope): description"
+              echo "Expected format: type(scope)!: description  (scope and ! are optional)"
               echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+              echo "Use ! to mark a breaking change, e.g. refactor(api)!: rename the client trait"
               FAILED=1
             fi
           done <<< "$COMMITS"
