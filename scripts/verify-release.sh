@@ -16,9 +16,11 @@
 # verify the run, then delete the release and its tag. A leftover pre-release
 # tag becomes the changelog base of the next release: see CONTRIBUTING.md.
 #
-# Requires gh (authenticated), git, perl, tar and curl. Exits 0 when every
-# check passes (skips allowed), 1 when any fails, 2 on a usage or setup
-# error. The work directory is kept when a check fails.
+# Requires gh (authenticated), git, perl and tar. Exits 0 when every check
+# passes (skips allowed), 1 when any fails, 2 on a usage or setup error. The
+# work directory is kept when a check fails. Binaries before v0.4.0 are not
+# executed: they accept a zero OPERATION_TIMEOUT_SECS and go on to open
+# network listeners.
 
 set -uo pipefail
 
@@ -44,6 +46,7 @@ case $VERSION in
     *) PRERELEASE=false ;;
 esac
 TAB=$(printf '\t')
+PERL=$(command -v perl) || { echo "required tool not found: perl" >&2; exit 2; }
 
 ROOT=$(git rev-parse --show-toplevel) || exit 2
 cd "$ROOT" || exit 2
@@ -79,6 +82,13 @@ check() {
 # SIGPIPEs the producer, which turns every negated check into a vacuous pass.
 has_line() { grep -qxF -- "$1" "$2"; }
 lacks_regex() { ! grep -qiE -- "$1" "$2"; }
+# version_lt A B: A < B, comparing X.Y.Z numerically.
+# shellcheck disable=SC2016 # perl's variables, not the shell's
+version_lt() {
+    "$PERL" -e '@a = split /\./, $ARGV[0]; @b = split /\./, $ARGV[1];
+        for (0 .. 2) { exit 0 if ($a[$_] // 0) < ($b[$_] // 0); exit 1 if ($a[$_] // 0) > ($b[$_] // 0) }
+        exit 1' "$1" "$2"
+}
 
 # --------------------------------------------------------------------------
 # The run
@@ -244,6 +254,8 @@ if [ "$release_ok" != true ]; then
     skip "host binary (no release to download from)"
 elif [ -z "$host" ] || ! grep -qxF -- "$asset" "$WORK/release.txt"; then
     skip "host binary (no asset for $(uname -s)-$(uname -m))"
+elif version_lt "$BASE" 0.4.0; then
+    skip "host binary ($BASE predates the zero-timeout check it relies on)"
 elif ! gh release download "$TAG" --pattern "$asset" --dir "$WORK/bin" >/dev/null 2>"$WORK/download.err"; then
     fail "download $asset ($(head -n 1 "$WORK/download.err"))"
 else
@@ -254,10 +266,19 @@ else
     tar -xzf "$WORK/bin/$asset" -C "$WORK/bin"
     # Config::validate rejects a zero OPERATION_TIMEOUT_SECS, so the binary
     # logs its version and exits with EX_CONFIG (78) before any network I/O.
-    OPERATION_TIMEOUT_SECS=0 RUST_LOG=info "$WORK/bin/$CRATE" >"$WORK/bin.raw" 2>&1
+    # Run it from an empty directory (the app loads a .env from its working
+    # directory) with an empty environment (a verifier should not hand a
+    # freshly downloaded binary the caller's tokens), and give it 30 seconds.
+    mkdir -p "$WORK/run"
+    (cd "$WORK/run" && env -i OPERATION_TIMEOUT_SECS=0 RUST_LOG=info \
+        "$PERL" -e 'alarm 30; exec @ARGV or exit 127' "$WORK/bin/$CRATE") >"$WORK/bin.raw" 2>&1
     code=$?
-    perl -pe 's/\e\[[0-9;]*m//g' "$WORK/bin.raw" >"$WORK/bin.log"
-    check "$host binary exits 78 on an invalid config (got $code)" test "$code" -eq 78
+    "$PERL" -pe 's/\e\[[0-9;]*m//g' "$WORK/bin.raw" >"$WORK/bin.log"
+    if [ "$code" -eq 142 ]; then
+        fail "$host binary exits on an invalid config (killed after 30s; does Config::validate still reject a zero timeout?)"
+    else
+        check "$host binary exits 78 on an invalid config (got $code)" test "$code" -eq 78
+    fi
     check "$host binary reports version $BASE" grep -qF "Starting Iggy Sample Application v$BASE" "$WORK/bin.log"
 fi
 
