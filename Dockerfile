@@ -1,5 +1,8 @@
-# Build stage
-FROM rust:1.91.1-slim-bookworm AS builder
+# Build stage: the latest stable toolchain, as release.yml's binaries use.
+# It must stay at or above Cargo.toml's `rust-version` (cargo refuses to
+# build the crate otherwise); CI's MSRV job tests that floor separately.
+# Keep the Debian release in step with the runtime stage (glibc).
+FROM rust:1.98.1-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -16,7 +19,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 
 # Build dependencies only (for caching)
-RUN cargo build --release && rm -rf src
+RUN cargo build --locked --release && rm -rf src
 
 # Copy actual source code
 COPY src ./src
@@ -25,7 +28,7 @@ COPY src ./src
 RUN touch src/main.rs
 
 # Build the actual application
-RUN cargo build --release
+RUN cargo build --locked --release
 
 # Runtime stage
 FROM debian:bookworm-slim

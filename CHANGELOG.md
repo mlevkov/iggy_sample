@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which Dependabot silently drops, gave way to its auto-created defaults
 - `SECURITY.md` listed only 0.1.x as supported; it now names 0.4.x and
   describes what each audit gate actually covers
+- The Docker image could not be built since 2026-07-04: its builder stage
+  used `rust:1.91.1` after `rust-version` rose to 1.93.0, and cargo refuses
+  to build below the MSRV, so the compose quick start's `app` service
+  failed at build time. The builder now uses `rust:1.98.1`, the latest
+  stable (as the release binaries do), and builds with `--locked`
 
 ### Security
 
