@@ -631,7 +631,7 @@ This application implements multiple security layers suitable for production dep
 | Input Validation | `src/validation.rs` | Sanitization of stream names, topic names, and event types |
 | Trusted Proxy Support | `src/middleware/ip.rs` | X-Forwarded-For validation against configurable CIDR ranges |
 | Request ID Propagation | `src/middleware/request_id.rs` | UUIDv4 generation for distributed tracing |
-| Security Audit | `.github/workflows/ci.yml` | Automated `cargo-audit` vulnerability scanning in CI |
+| Dependency Auditing | `.github/workflows/ci.yml`, `deny.toml` | `cargo-deny` advisory, license and source policy plus `cargo-audit` vulnerability scanning in CI (see [SECURITY.md](SECURITY.md#dependency-updates)) |
 | Vulnerability Reporting | `SECURITY.md` | Responsible disclosure policy |
 
 ### Not Included (by design)
@@ -667,7 +667,7 @@ Key dependencies (see `Cargo.toml` for full list):
 | `governor` | 0.10 | Rate limiting (token bucket) |
 | `subtle` | 2.6 | Constant-time comparison |
 | `tower-http` | 0.7 | HTTP middleware (CORS, tracing) |
-| `rust_decimal` | 1.42 | Exact decimal arithmetic for money |
+| `rust_decimal` | 1.43 | Exact decimal arithmetic for money |
 | `uuid` | 1.23 | UUID generation |
 | `chrono` | 0.4 | Date/time handling |
 | `testcontainers` | 0.27 | Integration testing |
@@ -688,12 +688,14 @@ This project uses GitHub Actions for continuous integration and deployment:
 - **Linting**: `cargo clippy -- -D warnings`
 - **Tests**: Matrix across 3 OSes × 3 Rust versions
 - **Coverage**: Uploaded to Codecov
-- **Security**: `cargo-audit` vulnerability scanning
-- **Licenses**: `cargo-deny` compliance checking
+- **Dependency policy**: `cargo deny --locked check` (advisories, bans,
+  licenses, sources)
+- **Security**: `cargo-audit` vulnerability scanning; blocking on pushes and
+  PRs, and the weekly run files an issue per new advisory
 
 ### Dependabot
 Automatically creates PRs for:
-- Cargo dependency updates (weekly)
+- Cargo dependency updates, direct and transitive (weekly)
 - GitHub Actions updates (weekly)
 
 ## Documentation

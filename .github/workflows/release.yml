@@ -156,7 +156,9 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [validate, build]
-    environment: release  # Requires manual approval in GitHub settings
+    # No protection rules are configured on this environment, so nothing
+    # gates publishing; add required reviewers under Settings > Environments.
+    environment: release
     steps:
       - uses: actions/checkout@v4
         with:
