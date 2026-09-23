@@ -689,7 +689,7 @@ This project uses GitHub Actions for continuous integration and deployment:
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`
 - **Linting**: `cargo clippy -- -D warnings`
-- **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV (1.93.0) on Linux
+- **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV on Linux
 - **Coverage**: Uploaded to Codecov
 - **Dependency policy**: `cargo deny --locked check` (advisories, bans,
   licenses, sources)

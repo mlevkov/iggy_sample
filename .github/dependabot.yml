@@ -27,9 +27,9 @@ updates:
       timezone: "UTC"
     open-pull-requests-limit: 10
     # Include transitive crates. The default updates only what Cargo.toml
-    # names; three of the four RustSec advisories fixed in 0.4.1 sat in
-    # transitive crates, and the GitHub Advisory Database, which security
-    # updates rely on, carried none of the four.
+    # names; three of the four RustSec advisories fixed in 0.4.1 needed
+    # lockfile-only bumps of transitive crates, and the GitHub Advisory
+    # Database, which security updates rely on, carried none of the four.
     allow:
       - dependency-type: "all"
     commit-message:

@@ -42,8 +42,11 @@ Dependabot config: validating the file in CI.
 - Dependabot's cargo updates cover transitive dependencies
   (`allow: dependency-type: all`), so the weekly grouped PR doubles as a
   lockfile refresh. Version updates otherwise touch only what `Cargo.toml`
-  names, and the GitHub Advisory Database carried none of this release's
-  four advisories, so no Dependabot mode could have raised them
+  names, and all four of this release's advisories sat in transitive
+  crates: three needed lockfile-only bumps version updates never make, and
+  rkyv went only through the direct `rust_decimal` bump. The GitHub
+  Advisory Database carried none of the four, so no Dependabot mode would
+  have flagged them
 - `deny.toml` fails on yanked crates (`yanked = "deny"`) and on unsound
   advisories in any crate (`unsound = "all"`). cargo-deny's defaults only
   warned on the three yanked crates replaced above and never reported the
@@ -57,9 +60,9 @@ Dependabot config: validating the file in CI.
   release build and the Dockerfile passes `--locked`. In CI's gating jobs
   and the release build, a `Cargo.lock` that does not match `Cargo.toml`
   now fails the job instead of being silently re-resolved on the runner
-  (while `cargo audit` would still scan the committed file). The
-  informational pr.yml and extended-tests.yml steps mask failures by
-  design, so there it only stops the re-resolve
+  (while `cargo audit` would still scan the committed file). In the pr.yml
+  and extended-tests.yml steps that mask failures by design, it only stops
+  the re-resolve
 - The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
   `main`, which takes it out of that job's Node 20 deprecation annotation
   (`actions/checkout@v4` still triggers it until Dependabot bumps checkout).
