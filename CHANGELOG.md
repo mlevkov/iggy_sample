@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Bumped transitive `h2` 0.4.15 -> 0.4.19 (lockfile-only) to patch
+  RUSTSEC-2026-0258: empty DATA frames were queued without limit, so a peer
+  could grow memory on a stream that was not being drained. Reachable here
+  even though axum's `http2` feature is off: `metrics-exporter-prometheus`
+  enables `hyper-util/server-auto`, which compiles HTTP/2 into the builder
+  `axum::serve` uses, so the API listener accepts cleartext HTTP/2 (h2c)
+  from any client that can reach it.
+
 ## [0.4.0] - 2026-08-01
 
 Session-03 tech-debt sweep: TD-2026-07-09 resolved. Plan review ran three
