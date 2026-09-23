@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   even though axum's `http2` feature is off: `metrics-exporter-prometheus`
   enables `hyper-util/server-auto`, which compiles HTTP/2 into the builder
   `axum::serve` uses, so the API listener accepts cleartext HTTP/2 (h2c)
-  from any client that can reach it.
+  from any client that can reach it. Whether to keep that surface is
+  tracked as TD-2026-09-01.
 - Bumped transitive `rustls` 0.23.41 -> 0.23.45 (lockfile-only, with the
   `aws-lc-rs`, `aws-lc-sys` and `rustls-webpki` bumps it requires) to patch
   RUSTSEC-2026-0285: TLS 1.3 handshake messages were accepted at the wrong
