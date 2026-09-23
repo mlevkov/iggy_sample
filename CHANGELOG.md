@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lockfile refresh. Version updates otherwise touch only what `Cargo.toml`
   names, and the GitHub Advisory Database carried none of this release's
   four advisories, so no Dependabot mode could have raised them
+- `deny.toml` fails on yanked crates (`yanked = "deny"`) and on unsound
+  advisories in any crate (`unsound = "all"`). cargo-deny's defaults only
+  warned on the three yanked crates replaced above and never reported the
+  transitive event-listener unsoundness at all. Run against the pre-fix
+  lockfile, the stricter policy turns the unsoundness and all three yanked
+  crates into errors
 - The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
   `main`, clearing that job's Node 20 deprecation annotation. Upstream has
   cut no release since v2.0.0; the bundled action code is byte-identical
