@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Replaced three yanked lockfile entries with their successors:
   `chacha20` 0.10.2 (via `rand`), `spin` 0.9.9 (via the iggy SDK) and
-  `num-bigint` 0.4.8 (dev-only, via `testcontainers`)
+  `num-bigint` 0.4.8 (built only for tests, via `testcontainers`)
 - Dependabot's cargo updates cover transitive dependencies
   (`allow: dependency-type: all`), so the weekly grouped PR doubles as a
   lockfile refresh. Version updates otherwise touch only what `Cargo.toml`
@@ -28,16 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails the job instead of being silently re-resolved on the runner (while
   `cargo audit` would still scan the committed file)
 - The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
-  `main`, clearing that job's Node 20 deprecation annotation. Upstream has
-  cut no release since v2.0.0; the bundled action code is byte-identical
+  `main`, which takes it out of that job's Node 20 deprecation annotation
+  (`actions/checkout@v4` still triggers it until Dependabot bumps checkout).
+  Upstream has cut no release since v2.0.0; the bundled action code is
+  byte-identical
 
 ### Fixed
 
-- Dependabot never ran. `.github/dependabot.yml` failed schema validation
-  from the day it landed (the `reviewers` key GitHub removed in 2025, and an
-  ignore rule using the nonexistent `version-update:semver-prerelease`), and
-  GitHub runs no updates for any ecosystem while the file is invalid. Two
-  settings that would have misfired once it ran are fixed too: the cargo
+- Dependabot never ran: no run or PR appeared for either ecosystem after
+  `.github/dependabot.yml` landed on 2025-12-01. The file fails schema
+  validation on an ignore rule using the nonexistent
+  `version-update:semver-prerelease` and on the `reviewers` option GitHub
+  retired in 2025. Two settings that would have misfired once it ran are
+  fixed too: the cargo
   commit prefix `deps(cargo)`, a type PR Checks rejects, is now
   `chore(deps)`; and custom labels that do not exist in the repository,
   which Dependabot silently drops, gave way to its auto-created defaults
@@ -48,7 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bumped transitive `h2` 0.4.15 -> 0.4.19 (lockfile-only) to patch
   RUSTSEC-2026-0258: empty DATA frames were queued without limit, so a peer
-  could grow memory on a stream that was not being drained. Reachable here
+  could grow memory on a stream that was not being drained, or overflow a
+  length and panic, which this crate's `panic = "abort"` release profile
+  turns into a process exit. Reachable here
   even though axum's `http2` feature is off: `metrics-exporter-prometheus`
   enables `hyper-util/server-auto`, which compiles HTTP/2 into the builder
   `axum::serve` uses, so the API listener accepts cleartext HTTP/2 (h2c)
@@ -65,8 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped transitive `event-listener` 5.4.1 -> 5.4.2 (lockfile-only) to patch
   RUSTSEC-2026-0221, an unsoundness: `StackSlot` was `Send + Sync`
   unconditionally, so a `!Send` tag set with `Event::with_tag` could cross
-  threads through a `listener!` slot. Pulled in via the iggy SDK
-  (`async-broadcast`) and `moka` (`async-lock`). Not reachable: no crate in
+  threads through a `listener!` slot. Pulled in only under the iggy SDK:
+  directly by `async-broadcast`, and by `iggy_common`'s `moka`, both
+  directly and through `async-lock`. Not reachable: no crate in
   the graph calls `Event::with_tag`, so every event carries the default,
   `Send`, unit tag.
 - Removed `rkyv` 0.7.46 from `Cargo.lock` (RUSTSEC-2026-0235: out-of-bounds
