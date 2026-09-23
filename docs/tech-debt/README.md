@@ -6,7 +6,7 @@ condition under which the record MUST be resolved (not "someday").
 | ID | Title | Source | Trigger | Status |
 |----|-------|--------|---------|--------|
 | [TD-2026-07-01](TD-2026-07-01.md) | `with_reconnect` composition test matrix | Review session 01 (tests #2) | Any behavioral change to `with_reconnect`/`retry_once` | resolved (session 02) |
-| [TD-2026-07-02](TD-2026-07-02.md) | DiagnosticEvents-driven connection state | Review session 01 (architect #2) | Next iggy SDK minor bump | open (trigger FIRED: iggy 0.11.0 released 2026-09-18) |
+| [TD-2026-07-02](TD-2026-07-02.md) | DiagnosticEvents-driven connection state | Review session 01 (architect #2) | Next iggy SDK minor bump | open (trigger FIRED: iggy 0.11.0 released 2026-09-18; Dependabot cannot propose it below Rust 1.95, so upgrade by hand) |
 | [TD-2026-07-03](TD-2026-07-03.md) | Half-open probe limiting | Review session 01 (architect #9, types F5) | First production incident involving breaker recovery, or breaker config exposure | resolved (session 02) |
 | [TD-2026-07-04](TD-2026-07-04.md) | X-Request-Timeout enforcement | Review session 01 (silentfail M4) | Before advertising the header in any client-facing docs beyond CLAUDE.md | resolved (session 02) |
 | [TD-2026-07-05](TD-2026-07-05.md) | Metrics exporter smoke test | Review session 01 (tests #7) | Next metrics-exporter-prometheus major/minor bump | resolved (session 02) |
