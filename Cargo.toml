@@ -71,7 +71,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false, feat
 
 [dev-dependencies]
 reqwest = { version = "0.13", features = ["json"] }
-testcontainers = "0.27"
+testcontainers = "0.28"
 # test-util unlocks tokio::time::pause()/advance() for the paused-clock
 # resilience matrix (TD-2026-07-01); dev-only so production builds are
 # unaffected.
