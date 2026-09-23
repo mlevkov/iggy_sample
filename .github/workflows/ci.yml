@@ -212,7 +212,9 @@ jobs:
             # cleartext HTTP/2 only because hyper-util's `http2` feature is in
             # the production graph (via metrics-exporter-prometheus). Test
             # builds also get it from dev-dependencies, so only this check
-            # can see production lose it.
+            # can see production lose it. If cargo calls `hyper-util`
+            # ambiguous, a second version arrived: point -i at the version
+            # axum::serve uses (hyper-util@X) rather than loosening the grep.
             - name: Pin the production HTTP/2 surface (TD-2026-09-01)
               run: |
                   tree=$(cargo tree --locked -e normal,build,features -i hyper-util)
@@ -233,6 +235,11 @@ jobs:
                       echo "::error::could not read the Dockerfile's rust image ('$image') or rust-version ('$msrv')"
                       exit 1
                   fi
+                  # Compare as X.Y.Z: `rust:1.93` means the latest 1.93.x, and
+                  # sort -V would rank a bare "1.93" below "1.93.0".
+                  pad() { case "$1" in *.*.*) echo "$1" ;; *.*) echo "$1.0" ;; *) echo "$1.0.0" ;; esac; }
+                  image=$(pad "$image")
+                  msrv=$(pad "$msrv")
                   if [ "$(printf '%s\n%s\n' "$msrv" "$image" | sort -V | head -n1)" != "$msrv" ]; then
                       echo "::error::Dockerfile builds with rust $image, below rust-version $msrv; cargo would refuse to build the image"
                       exit 1
