@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`async-broadcast`) and `moka` (`async-lock`). Not reachable: no crate in
   the graph calls `Event::with_tag`, so every event carries the default,
   `Send`, unit tag.
+- Removed `rkyv` 0.7.46 from `Cargo.lock` (RUSTSEC-2026-0235: out-of-bounds
+  reads through shared-pointer validation; only 0.8.17+ is patched) by
+  raising `rust_decimal` to 1.43. It was never compiled: `rust_decimal`
+  1.42 names it through the weak `rkyv?/std` feature, which pins an optional
+  dependency in the lockfile without activating it. That is why
+  `cargo deny` (resolved graph) stayed quiet while `cargo audit` (lockfile
+  scan) flagged it. `rust_decimal` 1.43 drops the rkyv 0.7 bridge, taking
+  `rkyv` and 13 crates that were in the lockfile only because of it.
 
 ## [0.4.0] - 2026-08-01
 
