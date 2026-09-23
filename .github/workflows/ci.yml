@@ -193,15 +193,20 @@ jobs:
             - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
               with:
                   toolchain: stable
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            # No rust-cache here, deliberately: cargo-deny compiles nothing,
+            # and its yanked check reads cargo's index cache, which
+            # `cargo fetch --locked` does not refresh. A restored cache can
+            # hold an entry fetched before a yank and hide it.
 
             - name: Install cargo-deny
               uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
               with:
                   tool: cargo-deny
 
+            # -D index-failure: an index entry cargo-deny cannot read would
+            # otherwise only warn, passing the check without it.
             - name: Check dependency policy (advisories, bans, licenses, sources)
-              run: cargo deny --locked check
+              run: cargo deny --locked check -D index-failure
 
     # ==========================================================================
     # Final status check (for branch protection)

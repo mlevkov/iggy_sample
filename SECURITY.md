@@ -47,14 +47,16 @@ Dependencies are monitored via:
 - `cargo deny --locked check` in CI, gating every pull request through the
   required `CI Success` check and also run weekly: vulnerability,
   unmaintained and unsound advisories in any crate fail it, and so does a
-  yanked crate
+  yanked crate. The job starts from an empty cargo cache so the yank
+  status comes from a fresh index, and an index entry it cannot read
+  fails the check too
 - `cargo-audit` (`rustsec/audit-check`) on every CI run. On pushes and pull
   requests a vulnerability advisory fails the job, and with it `CI
   Success`, including one in a crate that sits in `Cargo.lock` without being
   built, which the `cargo-deny` gate never sees; unsound, unmaintained and
-  yanked findings only warn there. The weekly scheduled run never fails: it
-  opens a GitHub issue per new advisory instead, skipping any advisory ID
-  already named in an issue or PR title, open or closed
+  yanked findings only warn there. The weekly scheduled run does not fail
+  on advisories: it opens a GitHub issue per new advisory instead, skipping
+  any advisory ID already named in an issue or PR title, open or closed
 - Manual review of security advisories
 
 Dependabot alerts and security updates are not relied on for Rust crates:

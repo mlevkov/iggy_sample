@@ -42,7 +42,10 @@ Dependabot config: validating the file in CI.
   warned on the three yanked crates replaced above and never reported the
   transitive event-listener unsoundness at all. Run against the pre-fix
   lockfile, the stricter policy turns the unsoundness and all three yanked
-  crates into errors
+  crates into errors. The yanked check reads cargo's local index cache, so
+  the Dependency Policy job no longer restores one (an entry fetched before
+  a yank would hide it), and an unreadable entry now fails the check
+  (`-D index-failure`) instead of warning
 - Every cargo invocation in CI, the extended tests and the release build
   passes `--locked`, so a `Cargo.lock` that does not match `Cargo.toml`
   fails the job instead of being silently re-resolved on the runner (while
