@@ -183,6 +183,26 @@ src/
 └── services/         # Business logic
 ```
 
+## Releasing
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the
+binaries, creates the GitHub Release and deploys the docs; only admins can
+create tags. A green run does not mean every step worked (a step under
+`continue-on-error` fails silently), so once the run completes, check what it
+did:
+
+```bash
+scripts/verify-release.sh v0.4.2
+```
+
+To exercise a `release.yml` change without releasing, push a pre-release tag
+of the current `Cargo.toml` version, such as `v0.4.1-ci.1` (the validate job
+compares only the part before the hyphen), and verify it the same way. Then
+delete it with `gh release delete v0.4.1-ci.1 --cleanup-tag --yes`. Do not
+leave it behind: the changelog starts from the nearest earlier tag
+(`git describe --tags`), so a leftover pre-release tag drops every commit
+before it from the next release's notes.
+
 ## Questions?
 
 - Open a [Discussion](https://github.com/mlevkov/iggy_sample/discussions) for questions

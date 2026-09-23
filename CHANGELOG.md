@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/verify-release.sh` checks a release.yml run step by step instead
+  of trusting its conclusion: what each step printed, the artifacts, the
+  GitHub Release and its assets, the Pages deployment record, and that the
+  published binary for the host platform runs and reports its version. It
+  also fails on a step that failed under `continue-on-error`, which the
+  Actions API reports as a success; the crates.io publish step has failed
+  that way on every stable release (TD-2026-09-04). CONTRIBUTING.md now
+  describes releasing and exercising `release.yml` with a pre-release tag
+
 ## [0.4.1] - 2026-09-23
 
 Security patch for four RustSec advisories: one reachable on the public API
