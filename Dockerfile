@@ -1,7 +1,8 @@
-# Build stage: the latest stable toolchain, as release.yml's binaries use.
-# It must stay at or above Cargo.toml's `rust-version` (cargo refuses to
-# build the crate otherwise); CI's MSRV job tests that floor separately.
-# Keep the Debian release in step with the runtime stage (glibc).
+# Build stage: a pinned stable toolchain (current stable as of 2026-09-23;
+# release.yml's binaries track the floating `stable` channel). CI's
+# Dependency Policy job fails if it drops below Cargo.toml's `rust-version`,
+# which cargo refuses to build under. Keep the Debian release in step with
+# the runtime stage (glibc).
 FROM rust:1.98.1-slim-bookworm AS builder
 
 WORKDIR /app

@@ -208,6 +208,37 @@ jobs:
             - name: Check dependency policy (advisories, bans, licenses, sources)
               run: cargo deny --locked check -D index-failure
 
+            # TD-2026-09-01 tripwire, production side. The API listener serves
+            # cleartext HTTP/2 only because hyper-util's `http2` feature is in
+            # the production graph (via metrics-exporter-prometheus). Test
+            # builds also get it from dev-dependencies, so only this check
+            # can see production lose it.
+            - name: Pin the production HTTP/2 surface (TD-2026-09-01)
+              run: |
+                  tree=$(cargo tree --locked -e normal,build,features -i hyper-util)
+                  if grep -q 'hyper-util feature "http2"' <<< "$tree"; then
+                      echo "hyper-util/http2 is in the production graph: the API listener serves h2c"
+                  else
+                      echo "::error::hyper-util/http2 left the production graph, so the API listener is now HTTP/1-only; resolve TD-2026-09-01"
+                      exit 1
+                  fi
+
+            # cargo refuses to build below rust-version; the image sat
+            # unbuildable from 2026-07-04 until 0.4.1 because nothing checked.
+            - name: Dockerfile toolchain is at or above rust-version
+              run: |
+                  image=$(sed -nE 's/^FROM rust:([0-9]+(\.[0-9]+){1,2})-.*/\1/p' Dockerfile)
+                  msrv=$(sed -nE 's/^rust-version = "([0-9.]+)"/\1/p' Cargo.toml)
+                  if [ -z "$image" ] || [ -z "$msrv" ]; then
+                      echo "::error::could not read the Dockerfile's rust image ('$image') or rust-version ('$msrv')"
+                      exit 1
+                  fi
+                  if [ "$(printf '%s\n%s\n' "$msrv" "$image" | sort -V | head -n1)" != "$msrv" ]; then
+                      echo "::error::Dockerfile builds with rust $image, below rust-version $msrv; cargo would refuse to build the image"
+                      exit 1
+                  fi
+                  echo "Dockerfile rust $image is at or above rust-version $msrv"
+
     # ==========================================================================
     # Final status check (for branch protection)
     # ==========================================================================

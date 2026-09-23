@@ -22,10 +22,15 @@ Dependabot config: validating the file in CI.
 
 ### Added
 
-- Tripwire tests for TD-2026-09-01: the API listener must serve an h2c
-  prior-knowledge request and the metrics listener must refuse one, so a
-  dependency bump that flips either protocol surface fails CI instead of
-  passing unnoticed
+- Tripwires for TD-2026-09-01. CI checks that `hyper-util`'s `http2`
+  feature is still in the production dependency graph, the one thing that
+  makes the API listener serve h2c (test builds get it from dev-dependencies
+  too, so no test can see production lose it); tests pin that the API
+  listener serves an h2c prior-knowledge request and the metrics listener
+  refuses one. A dependency bump that flips either surface fails CI instead
+  of passing unnoticed
+- CI fails when the Dockerfile's Rust image falls below `rust-version`, the
+  gap that left the image unbuildable from 2026-07-04 (see Fixed)
 
 ### Changed
 
@@ -72,8 +77,9 @@ Dependabot config: validating the file in CI.
 - The Docker image could not be built since 2026-07-04: its builder stage
   used `rust:1.91.1` after `rust-version` rose to 1.93.0, and cargo refuses
   to build below the MSRV, so the compose quick start's `app` service
-  failed at build time. The builder now uses `rust:1.98.1`, the latest
-  stable (as the release binaries do), and builds with `--locked`
+  failed at build time. The builder now uses `rust:1.98.1`, the current
+  stable (the release binaries build on the floating stable channel), and
+  builds with `--locked`
 - A push to `main` while the Monday scheduled CI run was in progress
   cancelled it, and with it that week's audit issue filing (only the
   scheduled run files issues). CI's concurrency group now includes the
