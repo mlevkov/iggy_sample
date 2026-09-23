@@ -247,12 +247,27 @@ jobs:
                   echo "Dockerfile rust $image is at or above rust-version $msrv"
 
     # ==========================================================================
+    # Shell scripts (scripts/verify-release.sh runs after every release)
+    # ==========================================================================
+    shellcheck:
+        name: Shellcheck
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            # Preinstalled on GitHub's ubuntu runners; -s bash because the
+            # scripts are bash, and they must stay clean under it.
+            - name: Lint shell scripts
+              run: |
+                  shellcheck --version
+                  shellcheck -s bash scripts/*.sh
+
+    # ==========================================================================
     # Final status check (for branch protection)
     # ==========================================================================
     ci-success:
         name: CI Success
         runs-on: ubuntu-latest
-        needs: [fmt, clippy, test, integration, docs, audit, licenses]
+        needs: [fmt, clippy, test, integration, docs, audit, licenses, shellcheck]
         if: always()
         steps:
             - name: Check all jobs passed
@@ -263,7 +278,8 @@ jobs:
                      [[ "${{ needs.integration.result }}" != "success" ]] || \
                      [[ "${{ needs.docs.result }}" != "success" ]] || \
                      [[ "${{ needs.audit.result }}" != "success" ]] || \
-                     [[ "${{ needs.licenses.result }}" != "success" ]]; then
+                     [[ "${{ needs.licenses.result }}" != "success" ]] || \
+                     [[ "${{ needs.shellcheck.result }}" != "success" ]]; then
                     echo "One or more jobs failed"
                     exit 1
                   fi
