@@ -55,7 +55,7 @@ jobs:
         run: |
           # Check if benches directory exists
           if [ -d "benches" ]; then
-            cargo bench --all-features -- --noplot
+            cargo bench --locked --all-features -- --noplot
           else
             echo "No benchmarks directory found, skipping..."
           fi
@@ -119,9 +119,9 @@ jobs:
       - name: Run stress tests
         run: |
           # Run integration tests with increased load
-          cargo test --test '*' --all-features -- --ignored 2>/dev/null || {
+          cargo test --locked --test '*' --all-features -- --ignored 2>/dev/null || {
             echo "No ignored (stress) tests found, running regular integration tests with increased iterations..."
-            cargo test --test '*' --all-features
+            cargo test --locked --test '*' --all-features
           }
         env:
           IGGY_CONNECTION_STRING: "iggy://iggy:iggy@localhost:8090"
@@ -148,7 +148,7 @@ jobs:
           sudo apt-get install -y valgrind
 
       - name: Build test binary
-        run: cargo test --no-run --lib --all-features 2>&1 | grep -oP 'target/debug/deps/[^ ]+' | head -1 > test_binary.txt
+        run: cargo test --locked --no-run --lib --all-features 2>&1 | grep -oP 'target/debug/deps/[^ ]+' | head -1 > test_binary.txt
 
       - name: Run Valgrind
         run: |
@@ -190,7 +190,7 @@ jobs:
       - name: Run Miri on unit tests
         run: |
           # Run Miri on a subset of tests (some may not be compatible)
-          cargo miri test --lib 2>&1 || {
+          cargo miri test --locked --lib 2>&1 || {
             echo "::warning::Some tests failed under Miri. This may be due to unsupported operations."
           }
         continue-on-error: true
@@ -220,10 +220,10 @@ jobs:
           key: features-${{ matrix.features }}
 
       - name: Build with features
-        run: cargo build ${{ matrix.features }}
+        run: cargo build --locked ${{ matrix.features }}
 
       - name: Test with features
-        run: cargo test --lib ${{ matrix.features }}
+        run: cargo test --locked --lib ${{ matrix.features }}
 
   # ==========================================================================
   # Documentation coverage
@@ -240,7 +240,7 @@ jobs:
 
       - name: Check documentation coverage
         run: |
-          RUSTDOCFLAGS="-Z unstable-options --show-coverage" cargo +nightly doc --no-deps --all-features 2>&1 | tee doc-coverage.txt
+          RUSTDOCFLAGS="-Z unstable-options --show-coverage" cargo +nightly doc --locked --no-deps --all-features 2>&1 | tee doc-coverage.txt
 
           # Extract coverage percentage
           COVERAGE=$(grep -oP '\d+\.\d+%' doc-coverage.txt | tail -1 || echo "unknown")

@@ -117,9 +117,9 @@ jobs:
       - name: Build release binary
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --locked --release --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --locked --release --target ${{ matrix.target }}
           fi
         shell: bash
 
@@ -235,7 +235,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features
         env:
           RUSTDOCFLAGS: --cfg docsrs
 

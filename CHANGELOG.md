@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive event-listener unsoundness at all. Run against the pre-fix
   lockfile, the stricter policy turns the unsoundness and all three yanked
   crates into errors
+- Every cargo invocation in CI, the extended tests and the release build
+  passes `--locked`, so a `Cargo.lock` that does not match `Cargo.toml`
+  fails the job instead of being silently re-resolved on the runner (while
+  `cargo audit` would still scan the committed file)
 - The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
   `main`, clearing that job's Node 20 deprecation annotation. Upstream has
   cut no release since v2.0.0; the bundled action code is byte-identical

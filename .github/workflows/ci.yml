@@ -55,7 +55,7 @@ jobs:
                   components: clippy
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
             - name: Run Clippy
-              run: cargo clippy --all-targets --all-features -- -D warnings
+              run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
     # ==========================================================================
     # Test matrix across OS and Rust versions
@@ -83,13 +83,13 @@ jobs:
                   key: ${{ matrix.os }}-${{ matrix.rust }}
 
             - name: Build
-              run: cargo build --all-features
+              run: cargo build --locked --all-features
 
             - name: Run unit tests
-              run: cargo test --lib --all-features
+              run: cargo test --locked --lib --all-features
 
             - name: Run doc tests
-              run: cargo test --doc --all-features
+              run: cargo test --locked --doc --all-features
 
     # ==========================================================================
     # Integration tests (requires Docker for testcontainers)
@@ -106,7 +106,7 @@ jobs:
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
             - name: Run integration tests
-              run: cargo test --test '*' --all-features
+              run: cargo test --locked --test '*' --all-features
               env:
                   # Testcontainers will pull and run Iggy server automatically
                   TESTCONTAINERS: true
@@ -132,7 +132,7 @@ jobs:
                   tool: cargo-llvm-cov
 
             - name: Generate coverage report
-              run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+              run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
             - name: Upload coverage to Codecov
               uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
@@ -156,7 +156,7 @@ jobs:
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
             - name: Build documentation
-              run: cargo doc --no-deps --all-features
+              run: cargo doc --locked --no-deps --all-features
               env:
                   RUSTDOCFLAGS: -D warnings
 
@@ -179,7 +179,7 @@ jobs:
                   token: ${{ secrets.GITHUB_TOKEN }}
 
     # ==========================================================================
-    # Dependency policy check (advisories + licenses, gated by deny.toml)
+    # Dependency policy check (advisories, bans, licenses, sources; deny.toml)
     # ==========================================================================
     licenses:
         name: Dependency Policy (cargo-deny)
@@ -197,7 +197,7 @@ jobs:
                   tool: cargo-deny
 
             - name: Check dependency policy (advisories, bans, licenses, sources)
-              run: cargo deny check
+              run: cargo deny --locked check
 
     # ==========================================================================
     # Final status check (for branch protection)
