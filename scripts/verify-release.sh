@@ -3,24 +3,28 @@
 #
 # Usage: scripts/verify-release.sh <tag> [<previous-tag>]
 #
-# Checks the latest release.yml run for <tag>: job conclusions, what the
-# steps printed, the uploaded artifacts, the GitHub Release, the Pages
-# deployment, and one published binary. <previous-tag> is where the changelog
-# should start; by default it is what release.yml computes,
-# `git describe --tags --abbrev=0 <tagged commit>^`.
+# Checks the newest release.yml run for <tag> against the workflow file and
+# Cargo.toml at the commit it built: that the tag names that commit; the job
+# conclusions; what the steps printed; the GitHub Release, its notes and its
+# assets; that every asset is byte-identical to its build job's artifact and
+# holds a binary for its target; the Pages deployment and, while it is the
+# live one, the served docs; that crates.io agrees with Cargo.toml's
+# `publish`; and that the host platform's binary runs. <previous-tag> is where
+# the changelog should start. By default it is what release.yml computes,
+# `git describe --tags --abbrev=0 <tagged commit>^`, over the tags on origin.
 #
 # A tag with a hyphen (v0.4.1-ci.1) is a pre-release: the publish job must be
-# skipped and the release must not become Latest. To exercise a release.yml
-# change without releasing, tag the current Cargo.toml version with a
-# pre-release suffix (the validate job compares the part before the hyphen),
-# verify the run, then delete the release and its tag. A leftover pre-release
-# tag becomes the changelog base of the next release: see CONTRIBUTING.md.
+# skipped and the release must not become Latest. The docs job still deploys
+# the tagged commit's docs to Pages, and deleting the tag does not undo that.
+# CONTRIBUTING.md ("Releasing") describes exercising release.yml this way.
 #
-# Requires gh (authenticated), git, perl and tar. Exits 0 when every check
-# passes (skips allowed), 1 when any fails, 2 on a usage or setup error. The
-# work directory is kept when a check fails. Binaries before v0.4.0 are not
-# executed: they accept a zero OPERATION_TIMEOUT_SECS and go on to open
-# network listeners.
+# Requires gh (authenticated), git, perl, tar and curl; unzip and file are
+# used when present. Exits 0 when every check passes (skips allowed), 1 when
+# any fails, 2 when it cannot start. The work directory is kept on failure.
+#
+# Not yet exercised: a run whose jobs come from different attempts ("Re-run
+# failed jobs"). Binaries before v0.4.0 are not executed: they accept a zero
+# OPERATION_TIMEOUT_SECS and go on to open network listeners.
 
 set -uo pipefail
 
@@ -38,7 +42,7 @@ case ${1:-} in
 esac
 [ $# -le 2 ] || usage
 
-for tool in gh git perl tar; do
+for tool in gh git perl tar curl; do
     command -v "$tool" >/dev/null 2>&1 || { echo "required tool not found: $tool" >&2; exit 2; }
 done
 PERL=$(command -v perl)
@@ -92,6 +96,9 @@ lacks_regex() {
     [ $? -eq 1 ]
 }
 first_line() { head -n 1 "$1" 2>/dev/null; }
+is_prefix_of() { case $2 in "$1"*) [ -n "$1" ] ;; *) false ;; esac; }
+# shellcheck disable=SC2016 # perl's variables, not the shell's
+sha256() { "$PERL" -MDigest::SHA -e 'print Digest::SHA->new(256)->addfile($ARGV[0])->hexdigest' "$1"; }
 # version_lt A B: A < B, comparing X.Y.Z numerically.
 # shellcheck disable=SC2016 # perl's variables, not the shell's
 version_lt() {
@@ -122,6 +129,7 @@ git show "$SHA:.github/workflows/release.yml" >"$WORK/release.yml" 2>/dev/null |
 git show "$SHA:Cargo.toml" >"$WORK/Cargo.toml" || exit 2
 CRATE=$(awk -F'"' '/^name = / { print $2; exit }' "$WORK/Cargo.toml")
 [ -n "$CRATE" ] || { echo "cannot read the package name from Cargo.toml at ${SHA:0:7}" >&2; exit 2; }
+PUBLISH=$(awk '/^publish = / { print $3; exit }' "$WORK/Cargo.toml")
 awk '/^ *- target: / { print $3 }' "$WORK/release.yml" | LC_ALL=C sort >"$WORK/targets.txt"
 [ -s "$WORK/targets.txt" ] || { echo "no build targets in release.yml at ${SHA:0:7}" >&2; exit 2; }
 if grep -q '^ *name: Publish to crates.io$' "$WORK/release.yml"; then HAS_PUBLISH=true; else HAS_PUBLISH=false; fi
@@ -229,16 +237,25 @@ if gh run view "$RID" --log >"$WORK/raw.log" 2>"$WORK/raw.err" && [ -s "$WORK/ra
             *) pass "changelog base $PREV is a stable tag" ;;
         esac
     fi
-    check "no artifact digest mismatch" lacks_regex 'digest.*mismatch|hash mismatch' "$WORK/output.log"
 
     # A step under continue-on-error fails without failing its job, and the
     # API reports that step's conclusion as success too. Its "##[error]" line
-    # is the only trace, so any such line means a failure the job status hides.
-    if grep -F '##[error]' "$WORK/output.log" >"$WORK/errors.log"; then
-        fail "no step failed silently; failures hidden behind a successful job:"
-        sed 's/^/        /' "$WORK/errors.log"
+    # is the only trace. One FAIL per job, so a second hidden failure moves
+    # the count instead of hiding under the first.
+    awk -F'\t' 'index($2, "##[error]") == 1 { print $1 }' "$WORK/output.log" | sort -u >"$WORK/error-jobs.txt"
+    if [ -s "$WORK/error-jobs.txt" ]; then
+        while IFS= read -r job; do
+            fail "no step failed silently in \"$job\":"
+            awk -F'\t' -v j="$job" '$1 == j && index($2, "##[error]") == 1 { print "        " $2 }' "$WORK/output.log"
+        done <"$WORK/error-jobs.txt"
     else
         pass "no step failed silently"
+    fi
+    awk -F'\t' 'index($2, "##[warning]") == 1 { print substr($2, 12, 150) }' "$WORK/output.log" |
+        sort | uniq -c >"$WORK/warnings.txt"
+    if [ -s "$WORK/warnings.txt" ]; then
+        note "the run logged warnings (not failures):"
+        sed 's/^/        /' "$WORK/warnings.txt"
     fi
 else
     fail "fetch the run log ($(first_line "$WORK/raw.err"))"
@@ -261,18 +278,33 @@ fi
 # The GitHub Release
 # --------------------------------------------------------------------------
 release_ok=false
-if gh release view "$TAG" --json isPrerelease,isDraft,publishedAt,assets \
-    --jq '"\(.isPrerelease)\t\(.isDraft)\t\(.publishedAt)", (.assets[] | .name)' \
-    >"$WORK/release.txt" 2>"$WORK/release.err"; then
+if gh release view "$TAG" --json isPrerelease,isDraft,publishedAt \
+    --jq '"\(.isPrerelease)\t\(.isDraft)\t\(.publishedAt)"' \
+    >"$WORK/release.tsv" 2>"$WORK/release.err"; then
     release_ok=true
-    IFS=$TAB read -r is_pre is_draft published <"$WORK/release.txt"
+    IFS=$TAB read -r is_pre is_draft published <"$WORK/release.tsv"
     pass "release $TAG exists"
     check "release is published, not a draft" test "$is_draft" = false
     check "release pre-release flag is $PRERELEASE" test "$is_pre" = "$PRERELEASE"
-    while IFS= read -r target; do
-        case $target in *-windows-*) ext=zip ;; *) ext=tar.gz ;; esac
-        check "asset $CRATE-$VERSION-$target.$ext" grep -qxF -- "$CRATE-$VERSION-$target.$ext" "$WORK/release.txt"
-    done <"$WORK/targets.txt"
+    gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.digest // "")"' >"$WORK/assets.tsv" ||
+        fail "list the release's assets"
+    gh release view "$TAG" --json body --jq .body >"$WORK/body.md" || fail "read the release notes"
+
+    # release.yml writes one "- <subject> (<hash>)" line per commit since the
+    # changelog base, newest first; GitHub appends its own notes, whose
+    # "Full Changelog" link names the base it chose independently.
+    expected=$(git rev-list --count "$PREV..$SHA" 2>/dev/null)
+    entries=$(grep -cE '^- .* \([0-9a-f]{7,}\)$' "$WORK/body.md")
+    check "release notes list the ${expected:-?} commits since $PREV ($entries)" test "$entries" = "${expected:-x}"
+    newest=$(grep -m 1 -E '^- .* \([0-9a-f]{7,}\)$' "$WORK/body.md" | sed -E 's/.*\(([0-9a-f]+)\)$/\1/')
+    check "release notes start at the tagged commit (${newest:-none})" is_prefix_of "$newest" "$SHA"
+    # shellcheck disable=SC2016 # perl's variables, not the shell's
+    gh_base=$("$PERL" -ne 'print "$1\n" and exit if m{\*\*Full Changelog\*\*: \S*/compare/(\S+?)\.\.\.\S+}' "$WORK/body.md")
+    if [ -n "$gh_base" ]; then
+        check "GitHub's notes compare from $PREV too ($gh_base)" test "$gh_base" = "$PREV"
+    else
+        skip "GitHub's notes compare from $PREV (no compare link)"
+    fi
 else
     fail "release $TAG exists ($(first_line "$WORK/release.err"))"
 fi
@@ -293,21 +325,118 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# Pages
+# Assets: each is the file its build job uploaded, and holds its target
 # --------------------------------------------------------------------------
-# Reachability proves nothing: the site already served the last release's
-# docs. The deployment record says what this run deployed. A later deploy
-# turns this one inactive, so look for success anywhere in its history.
-dep=$(gh api "repos/$REPO/deployments?environment=github-pages&sha=$SHA&per_page=1" --jq '.[0].id // empty')
-if [ -n "$dep" ]; then
-    check "Pages deployed from ${SHA:0:7}" \
-        test "$(gh api "repos/$REPO/deployments/$dep/statuses" --jq '[.[].state] | index("success") != null')" = true
+arch_pattern() {
+    case $1 in
+        x86_64-unknown-linux-*) echo '^ELF 64-bit .*x86-64' ;;
+        aarch64-unknown-linux-*) echo '^ELF 64-bit .*aarch64' ;;
+        x86_64-apple-darwin) echo '^Mach-O 64-bit .*x86_64' ;;
+        aarch64-apple-darwin) echo '^Mach-O 64-bit .*arm64' ;;
+        x86_64-pc-windows-*) echo '^PE32\+ executable.*x86-64' ;;
+    esac
+}
+has_release_files() {  # has_release_files <listing> <binary>
+    grep -qxF -- "$2" "$1" && grep -qxF README.md "$1" && grep -q '^LICENSE' "$1"
+}
+if [ "$release_ok" = true ]; then
+    # The loop reads targets on fd 3, so a command in its body that reads
+    # stdin cannot swallow the remaining targets.
+    while IFS= read -r target <&3; do
+        case $target in *-windows-*) ext=zip bin=$CRATE.exe ;; *) ext=tar.gz bin=$CRATE ;; esac
+        name=$CRATE-$VERSION-$target.$ext
+        # shellcheck disable=SC2016 # $1 and $2 are awk fields
+        if ! awk -F'\t' -v n="$name" '$1 == n { found = 1 } END { exit !found }' "$WORK/assets.tsv"; then
+            fail "asset $name"
+            continue
+        fi
+        # shellcheck disable=SC2016 # $1 and $2 are awk fields
+        digest=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' "$WORK/assets.tsv")
+        file=""
+        dir=$WORK/assets/$target
+        if gh run download "$RID" -n "$CRATE-$target" -D "$dir" >/dev/null 2>"$WORK/art.err" && [ -f "$dir/$name" ]; then
+            file=$dir/$name
+            if [ -n "$digest" ]; then
+                check "asset $name is its build job's artifact" test "sha256:$(sha256 "$file")" = "$digest"
+            else
+                skip "asset $name is its build job's artifact (the API reports no digest)"
+            fi
+        elif gh release download "$TAG" --pattern "$name" --dir "$dir" >/dev/null 2>"$WORK/dl.err"; then
+            file=$dir/$name
+            skip "asset $name is its build job's artifact (no artifact: $(first_line "$WORK/art.err"))"
+        else
+            fail "download $name ($(first_line "$WORK/dl.err"))"
+            continue
+        fi
+        mkdir -p "$dir/x"
+        if [ "$ext" = zip ]; then
+            if ! command -v unzip >/dev/null 2>&1; then
+                skip "contents of $name (no unzip)"
+                continue
+            fi
+            unzip -Z1 "$file" >"$dir/list.txt" 2>/dev/null && unzip -q -o "$file" "$bin" -d "$dir/x" 2>/dev/null
+        else
+            tar -tzf "$file" >"$dir/list.txt" 2>/dev/null && tar -xzf "$file" -C "$dir/x" "$bin" 2>/dev/null
+        fi
+        check "$name holds $bin, README.md and a LICENSE" has_release_files "$dir/list.txt" "$bin"
+        pattern=$(arch_pattern "$target")
+        if [ -z "$pattern" ] || ! command -v file >/dev/null 2>&1; then
+            skip "$bin in $name is built for $target (no file command or pattern)"
+        else
+            file -b "$dir/x/$bin" >"$dir/file.txt" 2>&1
+            check "$bin in $name is built for $target" grep -qE -- "$pattern" "$dir/file.txt"
+        fi
+    done 3<"$WORK/targets.txt"
 else
-    fail "Pages deployed from ${SHA:0:7} (no deployment record)"
+    skip "assets (no release)"
 fi
 
 # --------------------------------------------------------------------------
-# One published binary, for the host platform
+# Pages
+# --------------------------------------------------------------------------
+# Reachability proves nothing: the site already served the last release's
+# docs. The deployment record for this tag says what the run deployed, and a
+# later deploy turns it inactive, so look for success anywhere in its
+# history. The served pages are checked only while this deployment is live.
+dep=$(gh api "repos/$REPO/deployments?environment=github-pages&ref=$TAG&per_page=1" \
+    --jq '.[] | "\(.id) \(.sha)"')
+read -r dep_id dep_sha <<<"$dep"
+if [ -z "${dep_id:-}" ]; then
+    fail "Pages deployment for $TAG (none recorded)"
+else
+    check "Pages deployment for $TAG built ${SHA:0:7}" test "$dep_sha" = "$SHA"
+    check "Pages deployment for $TAG succeeded" \
+        test "$(gh api "repos/$REPO/deployments/$dep_id/statuses" --jq '[.[].state] | index("success") != null')" = true
+    live=$(gh api "repos/$REPO/deployments?environment=github-pages&per_page=1" --jq '.[].id')
+    if [ "$live" != "$dep_id" ]; then
+        skip "served docs (a later deployment replaced this one)"
+    else
+        site=$(gh api "repos/$REPO/pages" --jq .html_url)
+        # A query string sidesteps the CDN's cached copy of the old site.
+        curl -fsSL "${site%/}/?verify=$RID" >"$WORK/site-index.html" 2>"$WORK/site.err"
+        check "Pages root redirects to $CRATE/index.html" grep -qF "url=$CRATE/index.html" "$WORK/site-index.html"
+        curl -fsSL "${site%/}/$CRATE/index.html?verify=$RID" >"$WORK/site-crate.html" 2>>"$WORK/site.err"
+        check "Pages serves the $BASE docs" grep -qF "\"version\">$BASE<" "$WORK/site-crate.html"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# crates.io
+# --------------------------------------------------------------------------
+if [ "$PRERELEASE" = true ]; then
+    skip "crates.io (pre-release)"
+else
+    status=$(curl -s -o /dev/null -w '%{http_code}' -A "verify-release ($REPO)" \
+        "https://crates.io/api/v1/crates/$CRATE/$BASE")
+    if [ "$PUBLISH" = false ]; then
+        check "crates.io does not have $CRATE $BASE (publish = false; HTTP $status)" test "$status" = 404
+    else
+        check "crates.io has $CRATE $BASE (HTTP $status)" test "$status" = 200
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# The host platform's binary runs
 # --------------------------------------------------------------------------
 case "$(uname -s)-$(uname -m)" in
     Darwin-arm64) host=aarch64-apple-darwin ;;
@@ -316,21 +445,14 @@ case "$(uname -s)-$(uname -m)" in
     Linux-aarch64 | Linux-arm64) host=aarch64-unknown-linux-gnu ;;
     *) host= ;;
 esac
-asset=$CRATE-$VERSION-$host.tar.gz
-if [ "$release_ok" != true ]; then
-    skip "host binary (no release to download from)"
-elif [ -z "$host" ] || ! grep -qxF -- "$asset" "$WORK/release.txt"; then
-    skip "host binary (no asset for $(uname -s)-$(uname -m))"
+bin=$WORK/assets/$host/x/$CRATE
+if [ -z "$host" ]; then
+    skip "host binary (no build target for $(uname -s)-$(uname -m))"
 elif version_lt "$BASE" 0.4.0; then
     skip "host binary ($BASE predates the zero-timeout check it relies on)"
-elif ! gh release download "$TAG" --pattern "$asset" --dir "$WORK/bin" >/dev/null 2>"$WORK/download.err"; then
-    fail "download $asset ($(head -n 1 "$WORK/download.err"))"
+elif [ ! -x "$bin" ]; then
+    skip "host binary (no $host asset was extracted above)"
 else
-    tar -tzf "$WORK/bin/$asset" >"$WORK/contents.txt"
-    # shellcheck disable=SC2016 # $1 and $2 are the inner shell's arguments
-    check "archive holds $CRATE, README.md and a LICENSE" \
-        sh -c 'grep -qx "$1" "$2" && grep -qx README.md "$2" && grep -q "^LICENSE" "$2"' _ "$CRATE" "$WORK/contents.txt"
-    tar -xzf "$WORK/bin/$asset" -C "$WORK/bin"
     # Config::validate rejects a zero OPERATION_TIMEOUT_SECS, so the binary
     # logs its version and exits with EX_CONFIG (78) before any network I/O.
     # Run it from an empty directory (the app loads a .env from its working
@@ -338,7 +460,7 @@ else
     # freshly downloaded binary the caller's tokens), and give it 30 seconds.
     mkdir -p "$WORK/run"
     (cd "$WORK/run" && env -i OPERATION_TIMEOUT_SECS=0 RUST_LOG=info \
-        "$PERL" -e 'alarm 30; exec @ARGV or exit 127' "$WORK/bin/$CRATE") >"$WORK/bin.raw" 2>&1
+        "$PERL" -e 'alarm 30; exec @ARGV or exit 127' "$bin") >"$WORK/bin.raw" 2>&1
     code=$?
     "$PERL" -pe 's/\e\[[0-9;]*m//g' "$WORK/bin.raw" >"$WORK/bin.log"
     if [ "$code" -eq 142 ]; then
@@ -355,5 +477,8 @@ if [ "$PRERELEASE" = true ] && [ "$release_ok" = true ]; then
     echo
     echo "If $TAG only exercised the workflow, delete it before the next release:"
     echo "  gh release delete $TAG --cleanup-tag --yes"
+    echo "Its docs job deployed ${SHA:0:7}'s docs to Pages, which deleting the tag does"
+    echo "not undo; re-run the Deploy Documentation job of the latest stable release's"
+    echo "run to restore them."
 fi
 [ "$failures" -eq 0 ]
