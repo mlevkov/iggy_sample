@@ -327,6 +327,46 @@ async fn test_stats_endpoint() {
 }
 
 // ============================================================================
+// Protocol Surface Tests
+// ============================================================================
+
+/// Tripwire for TD-2026-09-01: the API listener serves cleartext HTTP/2.
+///
+/// Nothing in this crate asks for HTTP/2. `metrics-exporter-prometheus`
+/// enables `hyper-util/server-auto` (which implies `hyper-util/http2`), and
+/// `axum::serve` hands every connection to the unrestricted `auto::Builder`,
+/// so an h2c prior-knowledge request is served. The fixture serves through
+/// the same `axum::serve` path as `main.rs`. This pins today's behavior so a
+/// dependency bump cannot flip it silently: if it fails, resolve
+/// TD-2026-09-01 (make HTTP/2 intentional or restrict the listener to
+/// HTTP/1) instead of editing the assertion to match.
+#[tokio::test]
+async fn test_api_listener_accepts_h2c_prior_knowledge() {
+    let fixture = TestFixture::new().await;
+
+    let h2c = Client::builder()
+        .http2_prior_knowledge()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create h2c client");
+
+    // The fixture already reached /health over HTTP/1.1, so an error here
+    // means the listener stopped serving HTTP/2, not that it is down.
+    let response = h2c
+        .get(fixture.url("/health"))
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            panic!("API listener no longer serves cleartext HTTP/2 ({e}): resolve TD-2026-09-01")
+        });
+
+    // Prior knowledge never falls back, so success already implies HTTP/2;
+    // asserting it states what this test pins.
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert!(response.status().is_success());
+}
+
+// ============================================================================
 // Message Tests
 // ============================================================================
 

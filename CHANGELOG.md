@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Tripwire tests for TD-2026-09-01: the API listener must serve an h2c
+  prior-knowledge request and the metrics listener must refuse one, so a
+  dependency bump that flips either protocol surface fails CI instead of
+  passing unnoticed
+
 ### Changed
 
 - Replaced three yanked lockfile entries with their successors:
