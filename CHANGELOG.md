@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced three yanked lockfile entries with their successors:
   `chacha20` 0.10.2 (via `rand`), `spin` 0.9.9 (via the iggy SDK) and
   `num-bigint` 0.4.8 (dev-only, via `testcontainers`)
+- Dependabot's cargo updates cover transitive dependencies
+  (`allow: dependency-type: all`), so the weekly grouped PR doubles as a
+  lockfile refresh. Version updates otherwise touch only what `Cargo.toml`
+  names, and the GitHub Advisory Database carried none of this release's
+  four advisories, so no Dependabot mode could have raised them
 - The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
   `main`, clearing that job's Node 20 deprecation annotation. Upstream has
   cut no release since v2.0.0; the bundled action code is byte-identical

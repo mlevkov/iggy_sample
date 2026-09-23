@@ -25,6 +25,11 @@ updates:
       time: "09:00"
       timezone: "UTC"
     open-pull-requests-limit: 10
+    # Include transitive crates. The default updates only what Cargo.toml
+    # names, while most RustSec fixes land in transitive crates that the
+    # GitHub Advisory Database (and so security updates) may not carry.
+    allow:
+      - dependency-type: "all"
     commit-message:
       # Must be a type the PR Checks conventional-commit regex accepts
       prefix: "chore(deps)"
