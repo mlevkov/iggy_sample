@@ -20,9 +20,11 @@ env:
     # Minimum supported Rust version
     MSRV: "1.93.0"
 
-# Cancel in-progress runs for the same branch
+# Cancel in-progress runs for the same branch and event. The event is part
+# of the key because only the scheduled run files audit issues: a push to
+# main must not cancel it, nor it the push run.
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
     cancel-in-progress: true
 
 jobs:

@@ -69,6 +69,10 @@ fired during this release (iggy 0.11.0), and it is deliberately not in it.
   to build below the MSRV, so the compose quick start's `app` service
   failed at build time. The builder now uses `rust:1.98.1`, the latest
   stable (as the release binaries do), and builds with `--locked`
+- A push to `main` while the Monday scheduled CI run was in progress
+  cancelled it, and with it that week's audit issue filing (only the
+  scheduled run files issues). CI's concurrency group now includes the
+  event, so scheduled and push runs no longer cancel each other
 
 ### Security
 
