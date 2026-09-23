@@ -7,6 +7,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-23
+
+Security patch for four RustSec advisories: one reachable on the public API
+listener (h2; the listener has been accepting cleartext HTTP/2,
+TD-2026-09-01), one exercised only on a TLS or QUIC Iggy connection
+(rustls), and two not reachable at all. The root cause of the drift is
+repaired too:
+Dependabot had never run, and its version updates could not have reached
+these transitive crates anyway. Reviewed with a four-agent double review
+(tier-graduated cadence); artifacts under
+`docs/code-reviews/rustsec-2026-09-round{1,2}.md`. TD-2026-07-02's trigger
+fired during this release (iggy 0.11.0), and it is deliberately not in it.
+TD-2026-09-02 records the check that would have caught the broken
+Dependabot config: validating the file in CI.
+
+### Added
+
+- Tripwires for TD-2026-09-01. CI checks that `hyper-util`'s `http2`
+  feature is still in the production dependency graph, the one thing that
+  makes the API listener serve h2c (test builds get it from dev-dependencies
+  too, so no test can see production lose it); tests pin that the API
+  listener serves an h2c prior-knowledge request and the metrics listener
+  refuses one. A dependency bump that flips either surface fails CI instead
+  of passing unnoticed
+- CI fails when the Dockerfile's Rust image falls below `rust-version`, the
+  gap that left the image unbuildable from 2026-07-04 (see Fixed)
+
+### Changed
+
+- Replaced three yanked lockfile entries with their successors:
+  `chacha20` 0.10.2 (via `rand`), `spin` 0.9.9 (via the iggy SDK) and
+  `num-bigint` 0.4.8 (built only for tests, via `testcontainers`)
+- Dependabot's cargo updates cover transitive dependencies
+  (`allow: dependency-type: all`), so the weekly grouped PR doubles as a
+  lockfile refresh. Version updates otherwise touch only what `Cargo.toml`
+  names, and all four of this release's advisories sat in transitive
+  crates: three needed lockfile-only bumps version updates never make, and
+  rkyv went only through the direct `rust_decimal` bump. The GitHub
+  Advisory Database carried none of the four, so no Dependabot mode would
+  have flagged them
+- `deny.toml` fails on yanked crates (`yanked = "deny"`) and on unsound
+  advisories in any crate (`unsound = "all"`). cargo-deny's defaults only
+  warned on the three yanked crates replaced above and never reported the
+  transitive event-listener unsoundness at all. Run against the pre-fix
+  lockfile, the stricter policy turns the unsoundness and all three yanked
+  crates into errors. The yanked check reads cargo's local index cache, so
+  the Dependency Policy job no longer restores one (an entry fetched before
+  a yank would hide it), and an unreadable entry now fails the check
+  (`-D index-failure`) instead of warning
+- Every dependency-resolving cargo call in CI, the extended tests, the
+  release build and the Dockerfile passes `--locked`. In CI's gating jobs
+  and the release build, a `Cargo.lock` that does not match `Cargo.toml`
+  now fails the job instead of being silently re-resolved on the runner
+  (while `cargo audit` would still scan the committed file). In the pr.yml
+  and extended-tests.yml steps that mask failures by design, it only stops
+  the re-resolve
+- The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
+  `main`, which takes it out of that job's Node 20 deprecation annotation
+  (`actions/checkout@v4` still triggers it until Dependabot bumps checkout).
+  Upstream has cut no release since v2.0.0; the bundled action code is
+  byte-identical
+
+### Fixed
+
+- Dependabot never ran: no run or PR appeared for either ecosystem after
+  `.github/dependabot.yml` landed on 2025-12-01. The file fails schema
+  validation on an ignore rule using the nonexistent
+  `version-update:semver-prerelease` and on the `reviewers` option GitHub
+  retired in 2025. Two settings that would have misfired once it ran are
+  fixed too: the cargo
+  commit prefix `deps(cargo)`, a type PR Checks rejects, is now
+  `chore(deps)`; and custom labels that do not exist in the repository,
+  which Dependabot silently drops, gave way to its auto-created defaults
+- `SECURITY.md` listed only 0.1.x as supported; it now names 0.4.x and
+  describes what each audit gate actually covers
+- The Docker image could not be built since 2026-07-04: its builder stage
+  used `rust:1.91.1` after `rust-version` rose to 1.93.0, and cargo refuses
+  to build below the MSRV, so the compose quick start's `app` service
+  failed at build time. The builder now uses `rust:1.98.1`, the current
+  stable (the release binaries build on the floating stable channel), and
+  builds with `--locked`
+- A push to `main` during the Monday scheduled CI run would have cancelled
+  it, since both shared one concurrency group, and with it that week's
+  audit issue filing (only the scheduled run files issues); none of the 28
+  scheduled runs so far was actually cancelled. CI's concurrency group now
+  includes the event, so scheduled and push runs cannot cancel each other
+
+### Security
+
+- Bumped transitive `h2` 0.4.15 -> 0.4.19 (lockfile-only) to patch
+  RUSTSEC-2026-0258: empty DATA frames were queued without limit, so a peer
+  could grow memory on a stream that was not being drained, or overflow a
+  length and panic, which this crate's `panic = "abort"` release profile
+  turns into a process exit. Reachable here
+  even though axum's `http2` feature is off: `metrics-exporter-prometheus`
+  enables `hyper-util/server-auto`, which compiles HTTP/2 into the builder
+  `axum::serve` uses, so the API listener accepts cleartext HTTP/2 (h2c)
+  from any client that can reach it. Whether to keep that surface is
+  tracked as TD-2026-09-01.
+- Bumped transitive `rustls` 0.23.41 -> 0.23.45 (lockfile-only, with the
+  `aws-lc-rs`, `aws-lc-sys` and `rustls-webpki` bumps it requires) to patch
+  RUSTSEC-2026-0285: TLS 1.3 handshake messages were accepted at the wrong
+  encryption level when packed into the same record as a key change. The
+  transcript stays authenticated, so a peer cannot alter a handshake with
+  it. Client-side only here: the service terminates no TLS, and rustls runs
+  only on the Iggy connection when `IGGY_CONNECTION_STRING` selects TLS: a
+  TLS-enabled transport, or `iggy+quic://`, which always uses it.
+- Bumped transitive `event-listener` 5.4.1 -> 5.4.2 (lockfile-only) to patch
+  RUSTSEC-2026-0221, an unsoundness: `StackSlot` was `Send + Sync`
+  unconditionally, so a `!Send` tag set with `Event::with_tag` could cross
+  threads through a `listener!` slot. Pulled in only under the iggy SDK:
+  directly by `async-broadcast`, and by `iggy_common`'s `moka`, both
+  directly and through `async-lock`. Not reachable: no crate in
+  the graph calls `Event::with_tag`, so every event carries the default,
+  `Send`, unit tag.
+- Removed `rkyv` 0.7.46 from `Cargo.lock` (RUSTSEC-2026-0235: out-of-bounds
+  reads through shared-pointer validation; only 0.8.17+ is patched) by
+  raising `rust_decimal` to 1.43. It was never compiled: `rust_decimal`
+  1.42 names it through the weak `rkyv?/std` feature, which pins an optional
+  dependency in the lockfile without activating it. That is why
+  `cargo deny` (resolved graph) stayed quiet while `cargo audit` (lockfile
+  scan) flagged it. `rust_decimal` 1.43 drops the rkyv 0.7 bridge, taking
+  `rkyv` and 13 crates that were in the lockfile only because of it.
+
 ## [0.4.0] - 2026-08-01
 
 Session-03 tech-debt sweep: TD-2026-07-09 resolved. Plan review ran three
@@ -255,7 +379,8 @@ triggers (`docs/tech-debt/`):
 - Trusted proxy configuration for X-Forwarded-For validation
 - Input validation to prevent injection attacks
 
-[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/mlevkov/iggy_sample/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mlevkov/iggy_sample/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mlevkov/iggy_sample/compare/v0.1.0...v0.2.0

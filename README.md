@@ -12,7 +12,7 @@ A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) m
 This project showcases how to build a production-ready message streaming service using:
 
 - **Apache Iggy server 0.8.0** - High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy Rust SDK 0.10.0** - Latest stable SDK, paired with the server 0.8 release line
+- **Iggy Rust SDK 0.10.0** - Paired with the server 0.8 release line; the 0.11 SDK is a tracked upgrade (TD-2026-07-02)
 - **Axum 0.8** - Ergonomic and modular Rust web framework
 - **Tokio** - Async runtime for Rust
 
@@ -43,7 +43,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (194 unit tests, 30 integration tests, 18 model tests, plus a metrics exporter smoke test)
+- Comprehensive test suite (194 unit tests, 31 integration tests, 18 model tests, plus a metrics exporter smoke test)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
@@ -125,7 +125,7 @@ Expected response:
 {
   "status": "healthy",
   "iggy_connected": true,
-  "version": "0.2.0",
+  "version": "0.4.1",
   "timestamp": "2024-01-15T10:30:00Z"
 }
 ```
@@ -405,6 +405,8 @@ iggy_sample/
 │   │   ├── mod.rs          # Middleware exports
 │   │   ├── rate_limit.rs   # Token bucket rate limiting
 │   │   ├── auth.rs         # API key authentication
+│   │   ├── ip.rs           # Client IP extraction (trusted proxies)
+│   │   ├── timeout.rs      # X-Request-Timeout handling
 │   │   └── request_id.rs   # Request ID propagation
 │   ├── models/
 │   │   ├── mod.rs          # Model exports
@@ -423,6 +425,7 @@ iggy_sample/
 │       └── util.rs         # Shared handler utilities
 ├── tests/
 │   ├── integration_tests.rs # End-to-end API tests
+│   ├── metrics_smoke_test.rs # Prometheus exporter smoke test
 │   └── model_tests.rs       # Unit tests for models
 └── fuzz/
     ├── Cargo.toml           # Fuzz testing configuration
@@ -631,7 +634,7 @@ This application implements multiple security layers suitable for production dep
 | Input Validation | `src/validation.rs` | Sanitization of stream names, topic names, and event types |
 | Trusted Proxy Support | `src/middleware/ip.rs` | X-Forwarded-For validation against configurable CIDR ranges |
 | Request ID Propagation | `src/middleware/request_id.rs` | UUIDv4 generation for distributed tracing |
-| Security Audit | `.github/workflows/ci.yml` | Automated `cargo-audit` vulnerability scanning in CI |
+| Dependency Auditing | `.github/workflows/ci.yml`, `deny.toml` | `cargo-deny` advisory, license and source policy plus `cargo-audit` vulnerability scanning in CI (see [SECURITY.md](SECURITY.md#dependency-updates)) |
 | Vulnerability Reporting | `SECURITY.md` | Responsible disclosure policy |
 
 ### Not Included (by design)
@@ -667,7 +670,7 @@ Key dependencies (see `Cargo.toml` for full list):
 | `governor` | 0.10 | Rate limiting (token bucket) |
 | `subtle` | 2.6 | Constant-time comparison |
 | `tower-http` | 0.7 | HTTP middleware (CORS, tracing) |
-| `rust_decimal` | 1.42 | Exact decimal arithmetic for money |
+| `rust_decimal` | 1.43 | Exact decimal arithmetic for money |
 | `uuid` | 1.23 | UUID generation |
 | `chrono` | 0.4 | Date/time handling |
 | `testcontainers` | 0.27 | Integration testing |
@@ -678,7 +681,7 @@ This project uses GitHub Actions for continuous integration and deployment:
 
 | Workflow | Trigger | Description |
 |----------|---------|-------------|
-| `ci.yml` | Push, PR | Tests, linting, coverage, security audit |
+| `ci.yml` | Push, PR, weekly | Tests, linting, coverage, dependency policy, security audit |
 | `pr.yml` | PR | Size checks, conventional commits, semver |
 | `release.yml` | Tag `v*` | Multi-platform builds, GitHub release |
 | `extended-tests.yml` | Weekly | Benchmarks, stress tests, memory checks |
@@ -686,14 +689,16 @@ This project uses GitHub Actions for continuous integration and deployment:
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`
 - **Linting**: `cargo clippy -- -D warnings`
-- **Tests**: Matrix across 3 OSes × 3 Rust versions
+- **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV on Linux
 - **Coverage**: Uploaded to Codecov
-- **Security**: `cargo-audit` vulnerability scanning
-- **Licenses**: `cargo-deny` compliance checking
+- **Dependency policy**: `cargo deny --locked check` (advisories, bans,
+  licenses, sources)
+- **Security**: `cargo-audit` vulnerability scanning; blocking on pushes and
+  PRs, and the weekly run files an issue per new advisory
 
 ### Dependabot
 Automatically creates PRs for:
-- Cargo dependency updates (weekly)
+- Cargo dependency updates, direct and transitive (weekly)
 - GitHub Actions updates (weekly)
 
 ## Documentation

@@ -290,15 +290,15 @@ TRUSTED_PROXIES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
 ```
          ┌──────────────┐
-         │  Integration │  24 tests - Full API with real Iggy
+         │  Integration │  31 tests - Full API with real Iggy
          │    Tests     │  (testcontainers)
          └──────────────┘
         ┌────────────────┐
-        │   Unit Tests   │  93 tests - Individual components
+        │   Unit Tests   │  194 tests - Individual components
         │                │  (mock dependencies)
         └────────────────┘
        ┌──────────────────┐
-       │   Model Tests    │  20 tests - Serialization/validation
+       │   Model Tests    │  18 tests - Serialization/validation
        │                  │
        └──────────────────┘
       ┌────────────────────┐

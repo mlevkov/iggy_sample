@@ -1,6 +1,6 @@
 [package]
 name = "iggy_sample"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.93.0"
 description = "A comprehensive demonstration of Apache Iggy message streaming with Axum"
@@ -48,8 +48,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-# Decimal arithmetic for monetary values (avoids floating-point precision issues)
-rust_decimal = { version = "1.42", features = ["serde", "serde-with-str"] }
+# Decimal arithmetic for monetary values (avoids floating-point precision issues).
+# 1.43 floor: earlier releases pin an unpatchable rkyv 0.7 into Cargo.lock
+# (RUSTSEC-2026-0235) via the weak "rkyv?/std" feature, even though it is never built.
+rust_decimal = { version = "1.43", features = ["serde", "serde-with-str"] }
 
 # Random number generation (for jitter in backoff)
 rand = "0.10"

@@ -327,6 +327,64 @@ async fn test_stats_endpoint() {
 }
 
 // ============================================================================
+// Protocol Surface Tests
+// ============================================================================
+
+/// Tripwire for TD-2026-09-01: the API listener serves cleartext HTTP/2.
+///
+/// Nothing in this crate asks for HTTP/2. `metrics-exporter-prometheus`
+/// enables `hyper-util/server-auto` (which implies `hyper-util/http2`), and
+/// `axum::serve` hands every connection to the unrestricted `auto::Builder`,
+/// so an h2c prior-knowledge request is served. The fixture serves through
+/// the same `axum::serve` path as `main.rs`.
+///
+/// This pins what `axum::serve` does with that feature present. It cannot see
+/// the production graph lose the feature: test builds also enable it through
+/// dev-dependencies (reqwest, hyper-rustls). CI's Dependency Policy job checks
+/// the production graph for that. If either fails, resolve TD-2026-09-01 (make
+/// HTTP/2 intentional or restrict the listener to HTTP/1) instead of editing
+/// the assertion to match.
+#[tokio::test]
+async fn test_api_listener_accepts_h2c_prior_knowledge() {
+    let fixture = TestFixture::new().await;
+
+    let h2c = Client::builder()
+        .http2_prior_knowledge()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create h2c client");
+
+    let response = match h2c.get(fixture.url("/health")).send().await {
+        Ok(response) => response,
+        Err(e) => {
+            // Tell a protocol change from a listener that is down or slow:
+            // only a change is TD-2026-09-01's business. A refused h2
+            // preface fails fast, so a timeout means a slow listener.
+            if e.is_timeout() {
+                panic!("h2c probe timed out ({e}): the listener is slow, not changed");
+            }
+            let http1_up = fixture
+                .client
+                .get(fixture.url("/health"))
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success());
+            if http1_up {
+                panic!(
+                    "API listener no longer serves cleartext HTTP/2 ({e}): resolve TD-2026-09-01"
+                );
+            }
+            panic!("h2c probe failed and HTTP/1.1 /health failed too ({e}): the listener is down");
+        }
+    };
+
+    // Prior knowledge never falls back, so success already implies HTTP/2;
+    // asserting it states what this test pins.
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert!(response.status().is_success());
+}
+
+// ============================================================================
 // Message Tests
 // ============================================================================
 

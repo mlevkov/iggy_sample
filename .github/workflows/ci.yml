@@ -20,9 +20,11 @@ env:
     # Minimum supported Rust version
     MSRV: "1.93.0"
 
-# Cancel in-progress runs for the same branch
+# Cancel in-progress runs for the same branch and event. The event is part
+# of the key because only the scheduled run files audit issues: a push to
+# main must not cancel it, nor it the push run.
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
     cancel-in-progress: true
 
 jobs:
@@ -55,7 +57,7 @@ jobs:
                   components: clippy
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
             - name: Run Clippy
-              run: cargo clippy --all-targets --all-features -- -D warnings
+              run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
     # ==========================================================================
     # Test matrix across OS and Rust versions
@@ -83,13 +85,13 @@ jobs:
                   key: ${{ matrix.os }}-${{ matrix.rust }}
 
             - name: Build
-              run: cargo build --all-features
+              run: cargo build --locked --all-features
 
             - name: Run unit tests
-              run: cargo test --lib --all-features
+              run: cargo test --locked --lib --all-features
 
             - name: Run doc tests
-              run: cargo test --doc --all-features
+              run: cargo test --locked --doc --all-features
 
     # ==========================================================================
     # Integration tests (requires Docker for testcontainers)
@@ -106,7 +108,7 @@ jobs:
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
             - name: Run integration tests
-              run: cargo test --test '*' --all-features
+              run: cargo test --locked --test '*' --all-features
               env:
                   # Testcontainers will pull and run Iggy server automatically
                   TESTCONTAINERS: true
@@ -132,7 +134,7 @@ jobs:
                   tool: cargo-llvm-cov
 
             - name: Generate coverage report
-              run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+              run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
             - name: Upload coverage to Codecov
               uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
@@ -156,7 +158,7 @@ jobs:
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
             - name: Build documentation
-              run: cargo doc --no-deps --all-features
+              run: cargo doc --locked --no-deps --all-features
               env:
                   RUSTDOCFLAGS: -D warnings
 
@@ -172,12 +174,16 @@ jobs:
             issues: write
         steps:
             - uses: actions/checkout@v4
-            - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+            # main, not a release: upstream moved to Node 24 after v2.0.0
+            # (dist/index.js unchanged) but has not tagged it yet. Dependabot
+            # moves an untagged pin to main's head; switch back to a release
+            # SHA once upstream tags one.
+            - uses: rustsec/audit-check@858dc40f52ca2b8570b7a997c1c4e35c6fc9a432 # main
               with:
                   token: ${{ secrets.GITHUB_TOKEN }}
 
     # ==========================================================================
-    # Dependency policy check (advisories + licenses, gated by deny.toml)
+    # Dependency policy check (advisories, bans, licenses, sources; deny.toml)
     # ==========================================================================
     licenses:
         name: Dependency Policy (cargo-deny)
@@ -187,15 +193,58 @@ jobs:
             - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
               with:
                   toolchain: stable
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            # No rust-cache here, deliberately: cargo-deny compiles nothing,
+            # and its yanked check reads cargo's index cache, which
+            # `cargo fetch --locked` does not refresh. A restored cache can
+            # hold an entry fetched before a yank and hide it.
 
             - name: Install cargo-deny
               uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
               with:
                   tool: cargo-deny
 
+            # -D index-failure: an index entry cargo-deny cannot read would
+            # otherwise only warn, passing the check without it.
             - name: Check dependency policy (advisories, bans, licenses, sources)
-              run: cargo deny check
+              run: cargo deny --locked check -D index-failure
+
+            # TD-2026-09-01 tripwire, production side. The API listener serves
+            # cleartext HTTP/2 only because hyper-util's `http2` feature is in
+            # the production graph (via metrics-exporter-prometheus). Test
+            # builds also get it from dev-dependencies, so only this check
+            # can see production lose it. If cargo calls `hyper-util`
+            # ambiguous, a second version arrived: point -i at the version
+            # axum::serve uses (hyper-util@X) rather than loosening the grep.
+            - name: Pin the production HTTP/2 surface (TD-2026-09-01)
+              run: |
+                  tree=$(cargo tree --locked -e normal,build,features -i hyper-util)
+                  if grep -q 'hyper-util feature "http2"' <<< "$tree"; then
+                      echo "hyper-util/http2 is in the production graph: the API listener serves h2c"
+                  else
+                      echo "::error::hyper-util/http2 left the production graph, so the API listener is now HTTP/1-only; resolve TD-2026-09-01"
+                      exit 1
+                  fi
+
+            # cargo refuses to build below rust-version; the image sat
+            # unbuildable from 2026-07-04 until 0.4.1 because nothing checked.
+            - name: Dockerfile toolchain is at or above rust-version
+              run: |
+                  image=$(sed -nE 's/^FROM rust:([0-9]+(\.[0-9]+){1,2})-.*/\1/p' Dockerfile)
+                  msrv=$(sed -nE 's/^rust-version = "([0-9.]+)"/\1/p' Cargo.toml)
+                  if [ -z "$image" ] || [ -z "$msrv" ]; then
+                      echo "::error::could not read the Dockerfile's rust image ('$image') or rust-version ('$msrv')"
+                      exit 1
+                  fi
+                  # Compare as X.Y.Z: `rust:1.93` means the latest 1.93.x, and
+                  # sort -V would rank a bare "1.93" below "1.93.0".
+                  pad() { case "$1" in *.*.*) echo "$1" ;; *.*) echo "$1.0" ;; *) echo "$1.0.0" ;; esac; }
+                  image=$(pad "$image")
+                  msrv=$(pad "$msrv")
+                  if [ "$(printf '%s\n%s\n' "$msrv" "$image" | sort -V | head -n1)" != "$msrv" ]; then
+                      echo "::error::Dockerfile builds with rust $image, below rust-version $msrv; cargo would refuse to build the image"
+                      exit 1
+                  fi
+                  echo "Dockerfile rust $image is at or above rust-version $msrv"
 
     # ==========================================================================
     # Final status check (for branch protection)

@@ -67,7 +67,7 @@ Keep the subject line at 72 characters or fewer (`.commitlintrc.json`).
 
 ### Prerequisites
 
-- Rust 1.90+ (edition 2024)
+- Rust 1.93+ (edition 2024; the MSRV in `Cargo.toml`)
 - Docker & Docker Compose
 - cargo-deny (for license/security checks)
 
@@ -118,8 +118,8 @@ cargo clippy -- -D warnings
 # Check for security vulnerabilities
 cargo audit
 
-# Check licenses
-cargo deny check
+# Check dependency policy (advisories, bans, licenses, sources)
+cargo deny --locked check
 ```
 
 ### Fuzz Testing

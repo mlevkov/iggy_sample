@@ -65,10 +65,12 @@ skip = []
 # =============================================================================
 # Advisories
 # =============================================================================
-# Requires cargo-deny >= 0.18.2 (for the `unmaintained` scope field).
-# Under the current schema, vulnerability and unmaintained advisories are
-# errors by default; yanked crates only warn. Enforced in CI by the
-# "Dependency Policy" job (cargo deny check advisories licenses).
+# Requires cargo-deny >= 0.19.0 (for the `unsound` scope field).
+# Vulnerability advisories are always errors; the fields below make
+# unmaintained and unsound advisories errors for every crate, and yanked
+# crates errors too, instead of cargo-deny's defaults (unsound checked for
+# direct dependencies only, yanked a warning). Enforced in CI by the
+# "Dependency Policy" job (cargo deny --locked check).
 [advisories]
 # Path to the advisory database
 db-path = "~/.cargo/advisory-db"
@@ -78,6 +80,19 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 
 # Which dependencies to check for unmaintained advisories
 unmaintained = "all"
+
+# Which dependencies to check for unsound advisories. The default,
+# "workspace", let RUSTSEC-2026-0221 (event-listener, transitive) through.
+# Accept a reviewed one by adding it to `ignore` with its reasoning.
+unsound = "all"
+
+# A yanked version survives only in an existing lock; a fresh resolution
+# never picks it. The fix is usually one `cargo update -p <crate>`. When a
+# parent's requirement admits no unyanked version, accept it in `ignore` as
+# `{ crate = "name@version", reason = "..." }` until one is published.
+# The check reads cargo's local index cache, so CI runs it without a
+# restored cache: an entry fetched before a yank would hide it.
+yanked = "deny"
 
 # Ignore specific advisories
 # These are transitive dependencies we cannot directly update

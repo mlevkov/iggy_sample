@@ -1,5 +1,9 @@
-# Build stage
-FROM rust:1.91.1-slim-bookworm AS builder
+# Build stage: a pinned stable toolchain (current stable as of 2026-09-23;
+# release.yml's binaries track the floating `stable` channel). CI's
+# Dependency Policy job fails if it drops below Cargo.toml's `rust-version`,
+# which cargo refuses to build under. Keep the Debian release in step with
+# the runtime stage (glibc).
+FROM rust:1.98.1-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -16,7 +20,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 
 # Build dependencies only (for caching)
-RUN cargo build --release && rm -rf src
+RUN cargo build --locked --release && rm -rf src
 
 # Copy actual source code
 COPY src ./src
@@ -25,7 +29,7 @@ COPY src ./src
 RUN touch src/main.rs
 
 # Build the actual application
-RUN cargo build --release
+RUN cargo build --locked --release
 
 # Runtime stage
 FROM debian:bookworm-slim

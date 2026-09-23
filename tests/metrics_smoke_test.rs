@@ -79,4 +79,28 @@ async fn init_metrics_serves_recorded_counter_over_http() {
         body.contains(metrics::names::CONNECTION_STATUS),
         "gauge missing from scrape:\n{body}"
     );
+
+    // TD-2026-09-01 tripwire, metrics side. The exporter serves through
+    // hyper's http1::Builder, so a cleartext HTTP/2 (prior-knowledge)
+    // request must fail here even though the API listener accepts one
+    // (see test_api_listener_accepts_h2c_prior_knowledge). This lives in
+    // this test because the exporter can be installed once per process.
+    let h2c = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("h2c client");
+    let err = h2c
+        .get(&url)
+        .send()
+        .await
+        .expect_err("metrics listener unexpectedly accepted cleartext HTTP/2");
+    // Any error satisfies expect_err, including ones that say nothing about
+    // the protocol. The HTTP/1 listener refuses the h2 preface by closing
+    // the connection after accepting it, which is neither a timeout nor a
+    // connect failure.
+    assert!(
+        !err.is_timeout() && !err.is_connect(),
+        "h2c probe failed for an unrelated reason, so it proves nothing: {err:?}"
+    );
 }

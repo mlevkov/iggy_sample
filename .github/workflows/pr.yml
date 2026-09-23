@@ -119,7 +119,7 @@ jobs:
       - name: Check for missing documentation
         run: |
           # Check if public items have documentation
-          cargo doc --no-deps 2>&1 | grep -i "missing documentation" && {
+          cargo doc --locked --no-deps 2>&1 | grep -i "missing documentation" && {
             echo "::warning::Some public items are missing documentation"
           } || true
 
@@ -213,7 +213,7 @@ jobs:
 
       - name: Generate coverage summary
         run: |
-          cargo llvm-cov --all-features --workspace --summary-only 2>&1 | tee coverage-summary.txt
+          cargo llvm-cov --locked --all-features --workspace --summary-only 2>&1 | tee coverage-summary.txt
 
           # Extract coverage percentage
           COVERAGE=$(grep -oP 'Total coverage: \K[\d.]+' coverage-summary.txt || echo "unknown")

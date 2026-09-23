@@ -2,6 +2,16 @@
 #
 # Automatically creates PRs to update dependencies.
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+#
+# Validate edits against https://json.schemastore.org/dependabot-2.0.json.
+# This file failed that schema from 2025-12-01 until the RustSec 2026-09
+# remediation, and in that time no Dependabot run or PR appeared and no
+# check failed. Nothing in CI validates it yet (TD-2026-09-02).
+#
+# Reviewers come from .github/CODEOWNERS (GitHub removed the `reviewers`
+# key in 2025). Labels are left at Dependabot's defaults, which it creates
+# on first use: a custom `labels` list replaces them, and any listed label
+# missing from the repository is silently dropped.
 
 version: 2
 updates:
@@ -16,13 +26,15 @@ updates:
       time: "09:00"
       timezone: "UTC"
     open-pull-requests-limit: 10
+    # Include transitive crates. The default updates only what Cargo.toml
+    # names; three of the four RustSec advisories fixed in 0.4.1 needed
+    # lockfile-only bumps of transitive crates, and the GitHub Advisory
+    # Database, which security updates rely on, carried none of the four.
+    allow:
+      - dependency-type: "all"
     commit-message:
-      prefix: "deps(cargo)"
-    labels:
-      - "dependencies"
-      - "rust"
-    reviewers:
-      - "maxim"  # Update with actual GitHub username
+      # Must be a type the PR Checks conventional-commit regex accepts
+      prefix: "chore(deps)"
     groups:
       # Group minor/patch updates together
       rust-minor:
@@ -32,10 +44,8 @@ updates:
           - "minor"
           - "patch"
       # Keep major updates separate for review
-    ignore:
-      # Ignore pre-release versions
-      - dependency-name: "*"
-        update-types: ["version-update:semver-prerelease"]
+    # No pre-release ignore rule is needed: the cargo updater proposes a
+    # pre-release only when the current version or requirement is one.
 
   # ==========================================================================
   # GitHub Actions
@@ -50,9 +60,6 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci(deps)"
-    labels:
-      - "dependencies"
-      - "github-actions"
     groups:
       # Group all GitHub Actions updates
       github-actions:
