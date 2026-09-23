@@ -13,6 +13,10 @@
 # the changelog should start. By default it is what release.yml computes,
 # `git describe --tags --abbrev=0 <tagged commit>^`, over the tags on origin.
 #
+# .github/workflows/verify-release.yml runs this after every green Release
+# run. Until TD-2026-09-04 is resolved, a stable release fails "no step
+# failed silently": its crates.io publish step fails under continue-on-error.
+#
 # A tag with a hyphen (v0.4.1-ci.1) is a pre-release: the publish job must be
 # skipped and the release must not become Latest. The docs job still deploys
 # the tagged commit's docs to Pages, and deleting the tag does not undo that.

@@ -1,0 +1,41 @@
+# Verify every green Release run step by step.
+#
+# A Release run can conclude success while a step failed under
+# continue-on-error, and nothing else inspects what a run produced, so this
+# runs scripts/verify-release.sh after each one: a problem shows up as a
+# failed run here instead of waiting for someone to remember the script.
+# Until TD-2026-09-04 is resolved it fails on every stable release, by
+# design: the crates.io publish step fails silently there.
+
+name: Verify Release
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  deployments: read
+  pages: read
+
+jobs:
+  verify:
+    name: Verify release run
+    # Green runs from a tag push only: a failed run is already visible.
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify the release run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Through the environment, not interpolated into the script, so a
+          # crafted tag name cannot inject shell.
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: scripts/verify-release.sh "$TAG"
