@@ -40,14 +40,23 @@ This project implements several security measures:
 ## Dependency Updates
 
 Dependencies are monitored via:
-- Dependabot version updates every Monday: one grouped PR for minor/patch
-  Cargo updates, a separate PR per major bump, and one grouped PR for
-  GitHub Actions
-- `cargo deny check` in CI, gating every pull request through the required
-  `CI Success` check and also run weekly: vulnerability and unmaintained
-  advisories fail it, yanked crates only warn, and unsound advisories are
-  checked for direct dependencies only
-- `cargo-audit` (`rustsec/audit-check`), whose weekly scheduled run opens a
-  GitHub issue for each new advisory, including those the `cargo-deny`
-  gate lets through and crates that sit in `Cargo.lock` without being built
+- Dependabot version updates every Monday, for direct and transitive Cargo
+  dependencies alike: one grouped PR for minor and patch updates, a
+  separate PR per major bump (a pre-1.0 minor bump such as 0.8 to 0.9
+  counts as major), and one grouped PR for GitHub Actions
+- `cargo deny --locked check` in CI, gating every pull request through the
+  required `CI Success` check and also run weekly: vulnerability,
+  unmaintained and unsound advisories in any crate fail it, and so does a
+  yanked crate
+- `cargo-audit` (`rustsec/audit-check`) on every CI run. On pushes and pull
+  requests a vulnerability advisory fails the job, and with it `CI
+  Success`, including one in a crate that sits in `Cargo.lock` without being
+  built, which the `cargo-deny` gate never sees; unsound, unmaintained and
+  yanked findings only warn there. The weekly scheduled run never fails: it
+  opens a GitHub issue per new advisory instead, skipping any advisory ID
+  already named in an issue or PR title, open or closed
 - Manual review of security advisories
+
+Dependabot alerts and security updates are not relied on for Rust crates:
+the GitHub Advisory Database does not mirror every RustSec advisory, and it
+carried none of the four fixed in 0.4.1.
