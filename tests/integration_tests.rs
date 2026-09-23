@@ -336,10 +336,14 @@ async fn test_stats_endpoint() {
 /// enables `hyper-util/server-auto` (which implies `hyper-util/http2`), and
 /// `axum::serve` hands every connection to the unrestricted `auto::Builder`,
 /// so an h2c prior-knowledge request is served. The fixture serves through
-/// the same `axum::serve` path as `main.rs`. This pins today's behavior so a
-/// dependency bump cannot flip it silently: if it fails, resolve
-/// TD-2026-09-01 (make HTTP/2 intentional or restrict the listener to
-/// HTTP/1) instead of editing the assertion to match.
+/// the same `axum::serve` path as `main.rs`.
+///
+/// This pins what `axum::serve` does with that feature present. It cannot see
+/// the production graph lose the feature: test builds also enable it through
+/// dev-dependencies (reqwest, hyper-rustls). CI's Dependency Policy job checks
+/// the production graph for that. If either fails, resolve TD-2026-09-01 (make
+/// HTTP/2 intentional or restrict the listener to HTTP/1) instead of editing
+/// the assertion to match.
 #[tokio::test]
 async fn test_api_listener_accepts_h2c_prior_knowledge() {
     let fixture = TestFixture::new().await;
@@ -350,15 +354,25 @@ async fn test_api_listener_accepts_h2c_prior_knowledge() {
         .build()
         .expect("Failed to create h2c client");
 
-    // The fixture already reached /health over HTTP/1.1, so an error here
-    // means the listener stopped serving HTTP/2, not that it is down.
-    let response = h2c
-        .get(fixture.url("/health"))
-        .send()
-        .await
-        .unwrap_or_else(|e| {
-            panic!("API listener no longer serves cleartext HTTP/2 ({e}): resolve TD-2026-09-01")
-        });
+    let response = match h2c.get(fixture.url("/health")).send().await {
+        Ok(response) => response,
+        Err(e) => {
+            // Tell a protocol change from a listener that is down or slow:
+            // only a change is TD-2026-09-01's business.
+            let http1_up = fixture
+                .client
+                .get(fixture.url("/health"))
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success());
+            if http1_up {
+                panic!(
+                    "API listener no longer serves cleartext HTTP/2 ({e}): resolve TD-2026-09-01"
+                );
+            }
+            panic!("h2c probe failed and HTTP/1.1 /health failed too ({e}): the listener is down");
+        }
+    };
 
     // Prior knowledge never falls back, so success already implies HTTP/2;
     // asserting it states what this test pins.

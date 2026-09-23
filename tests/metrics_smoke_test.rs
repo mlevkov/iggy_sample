@@ -90,10 +90,17 @@ async fn init_metrics_serves_recorded_counter_over_http() {
         .timeout(Duration::from_secs(2))
         .build()
         .expect("h2c client");
-    let h2c_result = h2c.get(&url).send().await;
+    let err = h2c
+        .get(&url)
+        .send()
+        .await
+        .expect_err("metrics listener unexpectedly accepted cleartext HTTP/2");
+    // Any error satisfies expect_err, including ones that say nothing about
+    // the protocol. The HTTP/1 listener refuses the h2 preface by closing
+    // the connection after accepting it, which is neither a timeout nor a
+    // connect failure.
     assert!(
-        h2c_result.is_err(),
-        "metrics listener unexpectedly accepted cleartext HTTP/2: {:?}",
-        h2c_result.map(|response| response.version())
+        !err.is_timeout() && !err.is_connect(),
+        "h2c probe failed for an unrelated reason, so it proves nothing: {err:?}"
     );
 }
