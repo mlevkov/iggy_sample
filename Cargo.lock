@@ -173,15 +173,15 @@ dependencies = [
 
 [[package]]
 name = "astral-tokio-tar"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08648fef353ab39a9d26f909ad53fc4f071be4c91853b78523f5cc3d9e5ebffd"
+checksum = "b18457efd137254e016bbde5e1d88df61c4e1a5ae2223746e56123bac6af2463"
 dependencies = [
  "futures-core",
  "libc",
  "portable-atomic",
  "rustc-hash",
- "rustix 0.38.44",
+ "rustix",
  "tokio",
  "tokio-stream",
  "xattr",
@@ -2349,7 +2349,7 @@ checksum = "1838759bb8c2f24cf05a35429d83145c4aa6af43f8ad38477295e12a7320a80e"
 dependencies = [
  "bytes",
  "io-uring",
- "rustix 1.1.5",
+ "rustix",
 ]
 
 [[package]]
@@ -2556,12 +2556,6 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
-
-[[package]]
-name = "linux-raw-sys"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -3094,7 +3088,7 @@ dependencies = [
  "concurrent-queue",
  "hermit-abi",
  "pin-project-lite",
- "rustix 1.1.5",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -3653,19 +3647,6 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
-dependencies = [
- "bitflags 2.13.2",
- "errno",
- "libc",
- "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rustix"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
@@ -3673,7 +3654,7 @@ dependencies = [
  "bitflags 2.13.2",
  "errno",
  "libc",
- "linux-raw-sys 0.12.1",
+ "linux-raw-sys",
  "windows-sys 0.61.2",
 ]
 
@@ -4252,7 +4233,7 @@ version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
- "rustix 1.1.5",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -5261,7 +5242,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix 1.1.5",
+ "rustix",
 ]
 
 [[package]]
