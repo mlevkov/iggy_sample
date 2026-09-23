@@ -358,7 +358,11 @@ async fn test_api_listener_accepts_h2c_prior_knowledge() {
         Ok(response) => response,
         Err(e) => {
             // Tell a protocol change from a listener that is down or slow:
-            // only a change is TD-2026-09-01's business.
+            // only a change is TD-2026-09-01's business. A refused h2
+            // preface fails fast, so a timeout means a slow listener.
+            if e.is_timeout() {
+                panic!("h2c probe timed out ({e}): the listener is slow, not changed");
+            }
             let http1_up = fixture
                 .client
                 .get(fixture.url("/health"))
