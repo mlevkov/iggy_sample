@@ -43,7 +43,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (194 unit tests, 30 integration tests, 18 model tests, plus a metrics exporter smoke test)
+- Comprehensive test suite (194 unit tests, 31 integration tests, 18 model tests, plus a metrics exporter smoke test)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
@@ -125,7 +125,7 @@ Expected response:
 {
   "status": "healthy",
   "iggy_connected": true,
-  "version": "0.2.0",
+  "version": "0.4.1",
   "timestamp": "2024-01-15T10:30:00Z"
 }
 ```

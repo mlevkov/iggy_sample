@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-23
+
+Security patch for four RustSec advisories, one of them reachable: the API
+listener has been accepting cleartext HTTP/2, which exposed it to the h2
+advisory (TD-2026-09-01). The root cause of the drift is repaired too:
+Dependabot had never run, and its version updates could not have reached
+these transitive crates anyway. Reviewed with a four-agent double review
+(tier-graduated cadence); artifacts under
+`docs/code-reviews/rustsec-2026-09-round{1,2}.md`. TD-2026-07-02's trigger
+fired during this release (iggy 0.11.0), and it is deliberately not in it.
+
 ### Added
 
 - Tripwire tests for TD-2026-09-01: the API listener must serve an h2c
@@ -344,7 +355,8 @@ triggers (`docs/tech-debt/`):
 - Trusted proxy configuration for X-Forwarded-For validation
 - Input validation to prevent injection attacks
 
-[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/mlevkov/iggy_sample/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mlevkov/iggy_sample/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mlevkov/iggy_sample/compare/v0.1.0...v0.2.0
