@@ -136,6 +136,9 @@ jobs:
             - name: Generate coverage report
               run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
+            # TD-2026-09-03: without a CODECOV_TOKEN secret Codecov rejects
+            # this upload, and fail_ci_if_error: false keeps the job green.
+            # Resolve the record before editing this step.
             - name: Upload coverage to Codecov
               uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
               with:
