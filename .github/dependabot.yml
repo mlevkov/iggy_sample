@@ -2,6 +2,15 @@
 #
 # Automatically creates PRs to update dependencies.
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+#
+# Validate edits against https://json.schemastore.org/dependabot-2.0.json:
+# GitHub rejects a file with any schema error and then runs no updates for
+# any ecosystem, without failing a single check.
+#
+# Reviewers come from .github/CODEOWNERS (GitHub removed the `reviewers`
+# key in 2025). Labels are left at Dependabot's defaults, which it creates
+# on first use: a custom `labels` list replaces them, and any listed label
+# missing from the repository is silently dropped.
 
 version: 2
 updates:
@@ -17,12 +26,8 @@ updates:
       timezone: "UTC"
     open-pull-requests-limit: 10
     commit-message:
-      prefix: "deps(cargo)"
-    labels:
-      - "dependencies"
-      - "rust"
-    reviewers:
-      - "maxim"  # Update with actual GitHub username
+      # Must be a type the PR Checks conventional-commit regex accepts
+      prefix: "chore(deps)"
     groups:
       # Group minor/patch updates together
       rust-minor:
@@ -32,10 +37,8 @@ updates:
           - "minor"
           - "patch"
       # Keep major updates separate for review
-    ignore:
-      # Ignore pre-release versions
-      - dependency-name: "*"
-        update-types: ["version-update:semver-prerelease"]
+    # No pre-release ignore rule is needed: the cargo updater proposes a
+    # pre-release only when the current version or requirement is one.
 
   # ==========================================================================
   # GitHub Actions
@@ -50,9 +53,6 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci(deps)"
-    labels:
-      - "dependencies"
-      - "github-actions"
     groups:
       # Group all GitHub Actions updates
       github-actions:
