@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enables `hyper-util/server-auto`, which compiles HTTP/2 into the builder
   `axum::serve` uses, so the API listener accepts cleartext HTTP/2 (h2c)
   from any client that can reach it.
+- Bumped transitive `rustls` 0.23.41 -> 0.23.45 (lockfile-only, with the
+  `aws-lc-rs`, `aws-lc-sys` and `rustls-webpki` bumps it requires) to patch
+  RUSTSEC-2026-0285: TLS 1.3 handshake messages were accepted at the wrong
+  encryption level when packed into the same record as a key change. The
+  transcript stays authenticated, so a peer cannot alter a handshake with
+  it. Client-side only here: the service terminates no TLS, and rustls runs
+  only on the Iggy connection when `IGGY_CONNECTION_STRING` selects TLS: a
+  TLS-enabled transport, or `iggy+quic://`, which always uses it.
 
 ## [0.4.0] - 2026-08-01
 
