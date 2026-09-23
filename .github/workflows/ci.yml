@@ -35,8 +35,8 @@ jobs:
         name: Rustfmt
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
-            - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+            - uses: actions/checkout@v7
+            - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
               with:
                   toolchain: nightly
                   components: rustfmt
@@ -50,12 +50,12 @@ jobs:
         name: Clippy
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
-            - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+            - uses: actions/checkout@v7
+            - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
               with:
                   toolchain: stable
                   components: clippy
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
             - name: Run Clippy
               run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
@@ -76,11 +76,11 @@ jobs:
                     - os: ubuntu-latest
                       rust: "1.93.0"
         steps:
-            - uses: actions/checkout@v4
-            - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+            - uses: actions/checkout@v7
+            - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
               with:
                   toolchain: ${{ matrix.rust }}
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
               with:
                   key: ${{ matrix.os }}-${{ matrix.rust }}
 
@@ -101,11 +101,11 @@ jobs:
         runs-on: ubuntu-latest
         needs: [fmt, clippy]
         steps:
-            - uses: actions/checkout@v4
-            - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+            - uses: actions/checkout@v7
+            - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
               with:
                   toolchain: stable
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
             - name: Run integration tests
               run: cargo test --locked --test '*' --all-features
@@ -121,15 +121,15 @@ jobs:
         runs-on: ubuntu-latest
         needs: [test]
         steps:
-            - uses: actions/checkout@v4
-            - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+            - uses: actions/checkout@v7
+            - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
               with:
                   toolchain: stable
                   components: llvm-tools-preview
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
             - name: Install cargo-llvm-cov
-              uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+              uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
               with:
                   tool: cargo-llvm-cov
 
@@ -137,7 +137,7 @@ jobs:
               run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
             - name: Upload coverage to Codecov
-              uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
+              uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
               with:
                   files: lcov.info
                   fail_ci_if_error: false
@@ -151,11 +151,11 @@ jobs:
         name: Documentation
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
-            - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+            - uses: actions/checkout@v7
+            - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
               with:
                   toolchain: stable
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
             - name: Build documentation
               run: cargo doc --locked --no-deps --all-features
@@ -173,7 +173,7 @@ jobs:
             contents: read
             issues: write
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v7
             # main, not a release: upstream moved to Node 24 after v2.0.0
             # (dist/index.js unchanged) but has not tagged it yet. Dependabot
             # moves an untagged pin to main's head; switch back to a release
@@ -189,8 +189,8 @@ jobs:
         name: Dependency Policy (cargo-deny)
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
-            - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+            - uses: actions/checkout@v7
+            - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
               with:
                   toolchain: stable
             # No rust-cache here, deliberately: cargo-deny compiles nothing,
@@ -199,7 +199,7 @@ jobs:
             # hold an entry fetched before a yank and hide it.
 
             - name: Install cargo-deny
-              uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+              uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
               with:
                   tool: cargo-deny
 
