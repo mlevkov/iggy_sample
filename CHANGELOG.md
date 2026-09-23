@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scan) flagged it. `rust_decimal` 1.43 drops the rkyv 0.7 bridge, taking
   `rkyv` and 13 crates that were in the lockfile only because of it.
 
+### Changed
+
+- Replaced three yanked lockfile entries with their successors:
+  `chacha20` 0.10.2 (via `rand`), `spin` 0.9.9 (via the iggy SDK) and
+  `num-bigint` 0.4.8 (dev-only, via `testcontainers`).
+
 ## [0.4.0] - 2026-08-01
 
 Session-03 tech-debt sweep: TD-2026-07-09 resolved. Plan review ran three
