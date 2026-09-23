@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced three yanked lockfile entries with their successors:
+  `chacha20` 0.10.2 (via `rand`), `spin` 0.9.9 (via the iggy SDK) and
+  `num-bigint` 0.4.8 (dev-only, via `testcontainers`)
+- The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
+  `main`, clearing that job's Node 20 deprecation annotation. Upstream has
+  cut no release since v2.0.0; the bundled action code is byte-identical
+
+### Fixed
+
+- Dependabot never ran. `.github/dependabot.yml` failed schema validation
+  from the day it landed (the `reviewers` key GitHub removed in 2025, and an
+  ignore rule using the nonexistent `version-update:semver-prerelease`), and
+  GitHub runs no updates for any ecosystem while the file is invalid. Two
+  settings that would have misfired once it ran are fixed too: the cargo
+  commit prefix `deps(cargo)`, a type PR Checks rejects, is now
+  `chore(deps)`; and custom labels that do not exist in the repository,
+  which Dependabot silently drops, gave way to its auto-created defaults
+- `SECURITY.md` listed only 0.1.x as supported; it now names 0.4.x and
+  describes what each audit gate actually covers
+
 ### Security
 
 - Bumped transitive `h2` 0.4.15 -> 0.4.19 (lockfile-only) to patch
@@ -40,12 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo deny` (resolved graph) stayed quiet while `cargo audit` (lockfile
   scan) flagged it. `rust_decimal` 1.43 drops the rkyv 0.7 bridge, taking
   `rkyv` and 13 crates that were in the lockfile only because of it.
-
-### Changed
-
-- Replaced three yanked lockfile entries with their successors:
-  `chacha20` 0.10.2 (via `rand`), `spin` 0.9.9 (via the iggy SDK) and
-  `num-bigint` 0.4.8 (dev-only, via `testcontainers`).
 
 ## [0.4.0] - 2026-08-01
 
