@@ -3,9 +3,10 @@
 # Automatically creates PRs to update dependencies.
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
 #
-# Validate edits against https://json.schemastore.org/dependabot-2.0.json:
-# GitHub rejects a file with any schema error and then runs no updates for
-# any ecosystem, without failing a single check.
+# Validate edits against https://json.schemastore.org/dependabot-2.0.json.
+# This file failed that schema from 2025-12-01 until the RustSec 2026-09
+# remediation, and in that time no Dependabot run or PR appeared and no
+# check failed. Nothing in CI validates it yet (TD-2026-09-02).
 #
 # Reviewers come from .github/CODEOWNERS (GitHub removed the `reviewers`
 # key in 2025). Labels are left at Dependabot's defaults, which it creates
@@ -26,8 +27,9 @@ updates:
       timezone: "UTC"
     open-pull-requests-limit: 10
     # Include transitive crates. The default updates only what Cargo.toml
-    # names, while most RustSec fixes land in transitive crates that the
-    # GitHub Advisory Database (and so security updates) may not carry.
+    # names; three of the four RustSec advisories fixed in 0.4.1 sat in
+    # transitive crates, and the GitHub Advisory Database, which security
+    # updates rely on, carried none of the four.
     allow:
       - dependency-type: "all"
     commit-message:

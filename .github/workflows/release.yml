@@ -156,8 +156,9 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [validate, build]
-    # No protection rules are configured on this environment, so nothing
-    # gates publishing; add required reviewers under Settings > Environments.
+    # This environment gates nothing unless protection rules are configured
+    # under Settings > Environments (none were as of 2026-09-23); add
+    # required reviewers there to put an approval step before publishing.
     environment: release
     steps:
       - uses: actions/checkout@v4

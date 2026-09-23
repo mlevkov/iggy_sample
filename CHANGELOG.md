@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.1] - 2026-09-23
 
-Security patch for four RustSec advisories, one of them reachable: the API
-listener has been accepting cleartext HTTP/2, which exposed it to the h2
-advisory (TD-2026-09-01). The root cause of the drift is repaired too:
+Security patch for four RustSec advisories: one reachable on the public API
+listener (h2; the listener has been accepting cleartext HTTP/2,
+TD-2026-09-01), one exercised only on a TLS or QUIC Iggy connection
+(rustls), and two not reachable at all. The root cause of the drift is
+repaired too:
 Dependabot had never run, and its version updates could not have reached
 these transitive crates anyway. Reviewed with a four-agent double review
 (tier-graduated cadence); artifacts under
@@ -51,10 +53,13 @@ Dependabot config: validating the file in CI.
   the Dependency Policy job no longer restores one (an entry fetched before
   a yank would hide it), and an unreadable entry now fails the check
   (`-D index-failure`) instead of warning
-- Every cargo invocation in CI, the extended tests and the release build
-  passes `--locked`, so a `Cargo.lock` that does not match `Cargo.toml`
-  fails the job instead of being silently re-resolved on the runner (while
-  `cargo audit` would still scan the committed file)
+- Every dependency-resolving cargo call in CI, the extended tests, the
+  release build and the Dockerfile passes `--locked`. In CI's gating jobs
+  and the release build, a `Cargo.lock` that does not match `Cargo.toml`
+  now fails the job instead of being silently re-resolved on the runner
+  (while `cargo audit` would still scan the committed file). The
+  informational pr.yml and extended-tests.yml steps mask failures by
+  design, so there it only stops the re-resolve
 - The Security Audit job pins `rustsec/audit-check` to its Node 24 commit on
   `main`, which takes it out of that job's Node 20 deprecation annotation
   (`actions/checkout@v4` still triggers it until Dependabot bumps checkout).
@@ -80,10 +85,11 @@ Dependabot config: validating the file in CI.
   failed at build time. The builder now uses `rust:1.98.1`, the current
   stable (the release binaries build on the floating stable channel), and
   builds with `--locked`
-- A push to `main` while the Monday scheduled CI run was in progress
-  cancelled it, and with it that week's audit issue filing (only the
-  scheduled run files issues). CI's concurrency group now includes the
-  event, so scheduled and push runs no longer cancel each other
+- A push to `main` during the Monday scheduled CI run would have cancelled
+  it, since both shared one concurrency group, and with it that week's
+  audit issue filing (only the scheduled run files issues); none of the 28
+  scheduled runs so far was actually cancelled. CI's concurrency group now
+  includes the event, so scheduled and push runs cannot cancel each other
 
 ### Security
 

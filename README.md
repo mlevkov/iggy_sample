@@ -12,7 +12,7 @@ A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) m
 This project showcases how to build a production-ready message streaming service using:
 
 - **Apache Iggy server 0.8.0** - High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy Rust SDK 0.10.0** - Latest stable SDK, paired with the server 0.8 release line
+- **Iggy Rust SDK 0.10.0** - Paired with the server 0.8 release line; the 0.11 SDK is a tracked upgrade (TD-2026-07-02)
 - **Axum 0.8** - Ergonomic and modular Rust web framework
 - **Tokio** - Async runtime for Rust
 
@@ -405,6 +405,8 @@ iggy_sample/
 │   │   ├── mod.rs          # Middleware exports
 │   │   ├── rate_limit.rs   # Token bucket rate limiting
 │   │   ├── auth.rs         # API key authentication
+│   │   ├── ip.rs           # Client IP extraction (trusted proxies)
+│   │   ├── timeout.rs      # X-Request-Timeout handling
 │   │   └── request_id.rs   # Request ID propagation
 │   ├── models/
 │   │   ├── mod.rs          # Model exports
@@ -423,6 +425,7 @@ iggy_sample/
 │       └── util.rs         # Shared handler utilities
 ├── tests/
 │   ├── integration_tests.rs # End-to-end API tests
+│   ├── metrics_smoke_test.rs # Prometheus exporter smoke test
 │   └── model_tests.rs       # Unit tests for models
 └── fuzz/
     ├── Cargo.toml           # Fuzz testing configuration
@@ -678,7 +681,7 @@ This project uses GitHub Actions for continuous integration and deployment:
 
 | Workflow | Trigger | Description |
 |----------|---------|-------------|
-| `ci.yml` | Push, PR | Tests, linting, coverage, security audit |
+| `ci.yml` | Push, PR, weekly | Tests, linting, coverage, dependency policy, security audit |
 | `pr.yml` | PR | Size checks, conventional commits, semver |
 | `release.yml` | Tag `v*` | Multi-platform builds, GitHub release |
 | `extended-tests.yml` | Weekly | Benchmarks, stress tests, memory checks |
@@ -686,7 +689,7 @@ This project uses GitHub Actions for continuous integration and deployment:
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`
 - **Linting**: `cargo clippy -- -D warnings`
-- **Tests**: Matrix across 3 OSes × 3 Rust versions
+- **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV (1.93.0) on Linux
 - **Coverage**: Uploaded to Codecov
 - **Dependency policy**: `cargo deny --locked check` (advisories, bans,
   licenses, sources)
