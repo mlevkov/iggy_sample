@@ -17,6 +17,8 @@ these transitive crates anyway. Reviewed with a four-agent double review
 (tier-graduated cadence); artifacts under
 `docs/code-reviews/rustsec-2026-09-round{1,2}.md`. TD-2026-07-02's trigger
 fired during this release (iggy 0.11.0), and it is deliberately not in it.
+TD-2026-09-02 records the check that would have caught the broken
+Dependabot config: validating the file in CI.
 
 ### Added
 

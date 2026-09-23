@@ -15,3 +15,4 @@ condition under which the record MUST be resolved (not "someday").
 | [TD-2026-07-08](TD-2026-07-08.md) | Client-visible feedback for X-Request-Timeout | Review session 02 (silentfail M3) | Before documenting the header in any external API reference | open |
 | [TD-2026-07-09](TD-2026-07-09.md) | Breaker per-state data as enum with payloads | Review session 02 (types MEDIUM) | Next behavioral change to the breaker state or admission gate | resolved (session 03) |
 | [TD-2026-09-01](TD-2026-09-01.md) | API listener serves cleartext HTTP/2 by feature unification | RUSTSEC-2026-0258 remediation (h2 exposure) | Either h2c tripwire test failing, next change to the serving path, next `h2` advisory, or next minor bump of `axum`/`hyper-util`/`metrics-exporter-prometheus` | open |
+| [TD-2026-09-02](TD-2026-09-02.md) | Validate dependabot.yml in CI | RustSec 2026-09 remediation review (silent-failure LOW) | Next edit to `.github/dependabot.yml` | open |
