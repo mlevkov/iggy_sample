@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. Client-side only here: the service terminates no TLS, and rustls runs
   only on the Iggy connection when `IGGY_CONNECTION_STRING` selects TLS: a
   TLS-enabled transport, or `iggy+quic://`, which always uses it.
+- Bumped transitive `event-listener` 5.4.1 -> 5.4.2 (lockfile-only) to patch
+  RUSTSEC-2026-0221, an unsoundness: `StackSlot` was `Send + Sync`
+  unconditionally, so a `!Send` tag set with `Event::with_tag` could cross
+  threads through a `listener!` slot. Pulled in via the iggy SDK
+  (`async-broadcast`) and `moka` (`async-lock`). Not reachable: no crate in
+  the graph calls `Event::with_tag`, so every event carries the default,
+  `Send`, unit tag.
 
 ## [0.4.0] - 2026-08-01
 
