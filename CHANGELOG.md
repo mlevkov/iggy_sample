@@ -10,13 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `scripts/verify-release.sh` checks a release.yml run step by step instead
-  of trusting its conclusion: what each step printed, the artifacts, the
-  GitHub Release and its assets, the Pages deployment record, and that the
-  published binary for the host platform runs and reports its version. It
-  also fails on a step that failed under `continue-on-error`, which the
-  Actions API reports as a success; the crates.io publish step has failed
-  that way on every stable release (TD-2026-09-04). CONTRIBUTING.md now
-  describes releasing and exercising `release.yml` with a pre-release tag
+  of trusting its conclusion: that the tag names the commit the run built;
+  what each step printed; the release notes; that every asset is
+  byte-identical to its build job's artifact and holds a binary for its
+  target; the Pages deployment and the served docs; crates.io against
+  Cargo.toml's `publish`; and that the host platform's binary runs, isolated
+  and time-bounded. It fails on a step that failed under `continue-on-error`,
+  which the Actions API reports as a success: the crates.io publish step has
+  failed that way on every stable release (TD-2026-09-04)
+- The Verify Release workflow runs it after every green Release run, so a
+  hidden failure fails a run instead of waiting for someone to look. Until
+  TD-2026-09-04 is resolved it fails on every stable release, by design
+- CI lints shell scripts with shellcheck, as part of the required CI Success
+  check
+- CONTRIBUTING.md describes releasing, and exercising `release.yml` with a
+  pre-release tag, including the two things that outlive the exercise: the
+  Pages deployment and the tag itself
+
+### Fixed
+
+- The README no longer says coverage is uploaded to Codecov: every upload
+  whose log is still retained was rejected for want of a token
+  (TD-2026-09-03)
 
 ## [0.4.1] - 2026-09-23
 

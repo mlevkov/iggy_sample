@@ -185,23 +185,36 @@ src/
 
 ## Releasing
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the
-binaries, creates the GitHub Release and deploys the docs; only admins can
-create tags. A green run does not mean every step worked (a step under
-`continue-on-error` fails silently), so once the run completes, check what it
-did:
+Pushing a `vX.Y.Z` tag (or `vX.Y.Z-<suffix>` for a pre-release) runs
+`.github/workflows/release.yml`, which builds the binaries, creates the GitHub
+Release and deploys the docs to GitHub Pages; only admins can create tags.
+Before tagging, set `version` in `Cargo.toml` (the validate job requires the
+tag to match it), move the `[Unreleased]` changelog entries under the new
+version, and resolve or re-bind every record in `docs/tech-debt/` whose
+trigger is the next release.
+
+A green run does not mean every step worked, since a step under
+`continue-on-error` fails silently. So `.github/workflows/verify-release.yml`
+runs `scripts/verify-release.sh` after every green Release run; until
+TD-2026-09-04 is resolved it fails on every stable release, by design. To
+check a run by hand:
 
 ```bash
 scripts/verify-release.sh v0.4.2
 ```
 
-To exercise a `release.yml` change without releasing, push a pre-release tag
-of the current `Cargo.toml` version, such as `v0.4.1-ci.1` (the validate job
-compares only the part before the hyphen), and verify it the same way. Then
-delete it with `gh release delete v0.4.1-ci.1 --cleanup-tag --yes`. Do not
-leave it behind: the changelog starts from the nearest earlier tag
-(`git describe --tags`), so a leftover pre-release tag drops every commit
-before it from the next release's notes.
+To exercise a `release.yml` change before a real release, push a pre-release
+tag of the current `Cargo.toml` version, such as `v0.4.1-ci.1` (the validate
+job compares only the part before the hyphen), and verify its run the same
+way. Two things outlive the exercise:
+
+- The docs job deploys the tagged commit's docs to Pages even for a
+  pre-release, and deleting the tag does not undo that. Re-run the Deploy
+  Documentation job of the latest stable release's run to restore its docs.
+- The tag. Delete it with `gh release delete v0.4.1-ci.1 --cleanup-tag --yes`
+  from your clone (this also deletes the local tag). Left behind, it becomes
+  where `release.yml` starts the changelog it writes for the next release
+  (`git describe --tags`), which drops every commit before it.
 
 ## Questions?
 
