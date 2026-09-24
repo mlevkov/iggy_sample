@@ -220,11 +220,12 @@ way. Two things outlive the exercise:
     stable release's commit as a pre-release instead
     (`git tag v0.4.1-docs.1 'v0.4.1^{}'`) and push it: its run deploys that
     commit's docs. Delete the tag afterwards like any exercise tag.
-  - deploy-pages refuses a run that holds more than one `github-pages`
-    artifact: v0.2.0's second re-run failed with `Multiple artifacts named
-    "github-pages"` beside the first attempt's, which had not expired yet
-    (whether an expired one also counts is untested). If that happens,
-    delete the run's `github-pages` artifacts and re-run the job again. `gh api repos/mlevkov/iggy_sample/actions/runs/<run-id>/artifacts`
+  - deploy-pages refuses a run that holds more than one unexpired
+    `github-pages` artifact, and the first attempt's expires after a day:
+    v0.2.0's second re-run, within that day, failed with `Multiple
+    artifacts named "github-pages"`, while v0.4.1's, a day later, deployed
+    beside its expired one. If it happens, delete the run's `github-pages`
+    artifacts and re-run the job again. `gh api repos/mlevkov/iggy_sample/actions/runs/<run-id>/artifacts`
     lists them, and
     `gh api -X DELETE repos/mlevkov/iggy_sample/actions/artifacts/<id>`
     deletes one.
