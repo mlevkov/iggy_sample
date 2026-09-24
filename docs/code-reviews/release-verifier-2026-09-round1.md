@@ -125,10 +125,12 @@ skipped publish job and the unchanged Latest. But the docs job has no
 pre-release guard (release.yml's Deploy Documentation job; V26): the
 v0.4.1-ci.1 run deployed `b7aba82`'s docs to Pages, and deleting the tag did
 not undo it (V27). Those docs are not v0.4.1's either: 25 files differ (21
-HTML, 4 JS) and a `.lock` exists only in v0.4.1's artifact, all from the
-dependency bumps between `98f14d5` and `b7aba82`. And the documented
-procedure generalizes to commits with unreleased API changes. *(Corrected
-in round 2, R2-T7: this said the two sets of docs match.)*
+HTML, 4 JS), all from the Dependabot merges between `98f14d5` and
+`b7aba82`, and a `.lock` exists only in v0.4.1's artifact, because the
+upload-pages-artifact v5 that PR #37 brought leaves out hidden files. And
+the documented procedure generalizes to commits with unreleased API
+changes. *(Corrected in round 2, R2-T7: this said the two sets of docs
+match.)*
 
 **Remediation:** `docs: say what exercising release.yml leaves behind`.
 CONTRIBUTING lists both things that outlive an exercise, the Pages
