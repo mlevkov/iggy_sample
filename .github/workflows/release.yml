@@ -206,28 +206,8 @@ jobs:
           files: artifacts/**/*
           generate_release_notes: true
 
-  # ==========================================================================
-  # Publish to crates.io (optional)
-  # ==========================================================================
-  # TD-2026-09-04: this job cannot succeed (there is no CRATES_IO_TOKEN
-  # secret, and Cargo.toml sets publish = false), and continue-on-error hides
-  # that. Resolve the record before editing the job.
-  publish:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
-    needs: [validate, release]
-    # Only publish stable releases
-    if: needs.validate.outputs.is_prerelease == 'false'
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-
-      - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true  # Don't fail if already published
+  # No crates.io publish job: the crate is publish = false and releases are
+  # repo-level only (TD-2026-09-04).
 
   # ==========================================================================
   # Deploy documentation
