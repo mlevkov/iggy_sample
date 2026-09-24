@@ -195,9 +195,10 @@ trigger is the next release.
 
 A green run does not mean every step worked, since a step under
 `continue-on-error` fails silently. So `.github/workflows/verify-release.yml`
-runs `scripts/verify-release.sh` after every green Release run; until
-TD-2026-09-04 is resolved it fails on every stable release, by design. To
-check a run by hand:
+runs `scripts/verify-release.sh` after every green Release run. It fails
+on the stable releases up to v0.4.1, by design: their crates.io publish
+step failed silently, and release.yml has had no publish job since
+(TD-2026-09-04). To check a run by hand:
 
 ```bash
 scripts/verify-release.sh v0.4.2

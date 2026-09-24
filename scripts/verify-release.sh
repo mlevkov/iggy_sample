@@ -16,9 +16,10 @@
 # runs instead, and VERIFY_RUN_ATTEMPT an earlier attempt.
 #
 # .github/workflows/verify-release.yml runs this after every green Release
-# run, for the run and attempt that triggered it, and on demand. Until
-# TD-2026-09-04 is resolved every stable release gets one FAIL, for its
-# crates.io publish step, which fails under continue-on-error.
+# run, for the run and attempt that triggered it, and on demand. Stable
+# releases up to v0.4.1 get one FAIL, for the crates.io publish step their
+# release.yml ran, which failed under continue-on-error; release.yml has had
+# no publish job since TD-2026-09-04 was resolved.
 #
 # A tag with a hyphen (v0.4.1-ci.1) is a pre-release: the publish job must be
 # skipped and the release must not become Latest. The docs job still deploys
@@ -239,10 +240,12 @@ if gh api --paginate "repos/$REPO/actions/runs/$RID/attempts/$ATTEMPT/jobs" \
     check "one build job per release.yml target ($(wc -l <"$WORK/targets.txt" | tr -d ' '))" \
         cmp -s "$WORK/targets.txt" "$WORK/built.txt"
     # shellcheck disable=SC2016 # $1 and $2 are awk fields
-    check "every job except publish succeeded" \
+    check "every job$([ "$HAS_PUBLISH" = true ] && echo " except publish") succeeded" \
         awk -F'\t' '$1 != "Publish to crates.io" && $2 != "success" { bad = 1 } END { exit bad }' "$WORK/jobs.tsv"
     publish=$(awk -F'\t' '$1 == "Publish to crates.io" { print $2 }' "$WORK/jobs.tsv")
-    if [ "$HAS_PUBLISH" = false ]; then
+    if [ "$HAS_PUBLISH" = false ] && [ "$PUBLISH" = false ]; then
+        pass "no publish job, as Cargo.toml's publish = false wants (release.yml at ${SHA:0:7})"
+    elif [ "$HAS_PUBLISH" = false ]; then
         skip "publish job (release.yml at ${SHA:0:7} has none)"
     elif [ -z "$publish" ]; then
         fail "publish job is in the run"

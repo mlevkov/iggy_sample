@@ -5,10 +5,10 @@
 # runs scripts/verify-release.sh after each one: a problem shows up as a
 # failed run here instead of waiting for someone to remember the script.
 # Re-running jobs of a Release run makes a new attempt of it, which runs
-# this again once it succeeds. Until TD-2026-09-04 is resolved it fails on
-# every stable release, by design: the crates.io publish step fails
-# silently there. It can also be run by hand for any tag (Actions > Verify
-# Release > Run workflow).
+# this again once it succeeds. It fails on the stable releases up to
+# v0.4.1, by design: their crates.io publish step failed silently, and the
+# job is gone since (TD-2026-09-04). It can also be run by hand for any tag
+# (Actions > Verify Release > Run workflow).
 
 name: Verify Release
 
