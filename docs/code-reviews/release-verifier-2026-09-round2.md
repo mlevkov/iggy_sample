@@ -107,7 +107,9 @@ Open, both for the restore after merge to show (see the end): whether an
 expired `github-pages` artifact also blocks a re-run, and the re-run
 trigger itself, which rests on GitHub's documentation ("The `requested`
 activity type does not occur when a workflow is re-run", which exempts no
-other type), since Verify Release cannot run before it is on main.
+other type), since Verify Release cannot run before it is on main. *Both
+settled after merge: an expired artifact does not block a re-run, and a
+green re-run attempt does trigger Verify Release.*
 
 ## R2-T3 — MEDIUM — A failed tag lookup skipped with a false reason
 
@@ -319,13 +321,22 @@ attempt always has one.
 
 ## After merge
 
-- Restore v0.4.1's docs by re-running its Release run's Deploy
-  Documentation job (run 35888419705, within 30 days of 2026-09-23). That
-  replaces the exercise's docs (R2-T7), shows whether the expired
-  `github-pages` artifact blocks a re-run (R2-T2), and, if the attempt
-  succeeds, whether it triggers Verify Release, which would then check
-  attempt 2 on its carried-over logs. Expected on the Linux runner: 40
-  passed, 1 failed, 0 skipped, since the served docs are then v0.4.1's.
-  Otherwise, run Verify Release by hand for v0.4.1 (R2-T5).
-- Resolve TD-2026-09-04 before the next stable tag, or Verify Release stays
-  red by design.
+PR #43 merged as `09b4459` on 2026-09-24. The same day, v0.4.1's docs were
+restored by re-running its Release run's Deploy Documentation job (attempt
+2 of run 35888419705), in place of the dispatch R2-T5 planned. It settled
+both questions R2-T2 left open:
+
+- An expired `github-pages` artifact does not block a re-run. The attempt
+  deployed (deployment 6649629484) beside the run's artifact from
+  2026-09-23, which had expired; the site serves the restored build again,
+  `.lock` included (R2-T7).
+- A green re-run attempt triggers Verify Release. Its first run,
+  36068815000, started two seconds after the attempt completed, with
+  `VERIFY_RUN_ID` 35888419705 and `VERIFY_RUN_ATTEMPT` 2, and gave 40
+  passed, 1 failed, 0 skipped, as expected: its NOTE named the one job the
+  attempt re-ran, its one FAIL is TD-2026-09-04's masked publish step, read
+  from the carried-over log, the served-docs checks ran, and the x86_64
+  Linux binary exited 78.
+
+Still open: TD-2026-09-04, the maintainer's decision before the next
+stable tag, without which Verify Release stays red by design.
