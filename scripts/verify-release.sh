@@ -3,35 +3,39 @@
 #
 # Usage: scripts/verify-release.sh <tag> [<previous-tag>]
 #
-# Checks the newest release.yml run for <tag> against the workflow file and
-# Cargo.toml at the commit it built: that the tag names that commit; the job
-# conclusions; what the steps printed; the GitHub Release, its notes and its
-# assets; that every asset is byte-identical to its build job's artifact and
-# holds a binary for its target; the Pages deployment and, while it is the
-# live one, the served docs; that crates.io agrees with Cargo.toml's
-# `publish`; and that the host platform's binary runs. <previous-tag> is where
-# the changelog should start. By default it is what release.yml computes,
-# `git describe --tags --abbrev=0 <tagged commit>^`, over the tags on origin.
+# Checks the newest release.yml run for <tag>, at its latest attempt, against
+# the workflow file and Cargo.toml at the commit it built: that the tag names
+# that commit; the job conclusions; what the steps printed; the GitHub
+# Release, its notes and its assets; that every asset is byte-identical to its
+# build job's artifact and holds a binary for its target; the Pages
+# deployment and, while it is the live one, the served docs; that crates.io
+# agrees with Cargo.toml's `publish`; and that the host platform's binary
+# runs. <previous-tag> is where the changelog should start. By default it is
+# what release.yml computes, `git describe --tags --abbrev=0 <tagged
+# commit>^`, over the tags on origin. VERIFY_RUN_ID picks another of <tag>'s
+# runs instead, and VERIFY_RUN_ATTEMPT an earlier attempt.
 #
 # .github/workflows/verify-release.yml runs this after every green Release
-# run, and on demand. Until TD-2026-09-04 is resolved every stable release
-# gets one FAIL, for its crates.io publish step, which fails under
-# continue-on-error.
+# run, for the run and attempt that triggered it, and on demand. Until
+# TD-2026-09-04 is resolved every stable release gets one FAIL, for its
+# crates.io publish step, which fails under continue-on-error.
 #
 # A tag with a hyphen (v0.4.1-ci.1) is a pre-release: the publish job must be
 # skipped and the release must not become Latest. The docs job still deploys
 # the tagged commit's docs to Pages, and deleting the tag does not undo that.
 # CONTRIBUTING.md ("Releasing") describes exercising release.yml this way.
 #
-# Requires gh (authenticated), git, perl, tar and curl; unzip and file are
-# used when present. Exits 0 when every check passes (skips allowed), 1 when
-# any fails, 2 when it cannot start. The work directory is kept on failure.
+# Re-running failed jobs, or one job (CONTRIBUTING's Pages restore), makes a
+# new attempt of the run that lists every job but runs only the chosen ones.
+# The others carry over with their conclusions and their original logs, which
+# gh 2.75 or later fetches for them (checked on v0.2.0's run 28759754600,
+# attempts 2 to 4). A NOTE names the jobs an attempt re-ran.
 #
-# Not yet exercised: a run whose jobs come from different attempts, as
-# "Re-run failed jobs" or re-running one job (CONTRIBUTING's Pages restore)
-# produces; a NOTE flags a run past its first attempt. Binaries before v0.4.0
-# are not executed: they accept a zero OPERATION_TIMEOUT_SECS and go on to
-# open network listeners.
+# Requires gh 2.75 or later (authenticated), git, perl, tar and curl; unzip
+# and file are used when present. Exits 0 when every check passes (skips
+# allowed), 1 when any fails, 2 when it cannot start. The work directory is
+# kept on failure. Binaries before v0.4.0 are not executed: they accept a
+# zero OPERATION_TIMEOUT_SECS and go on to open network listeners.
 
 set -uo pipefail
 
@@ -88,6 +92,8 @@ pass() { printf 'PASS  %s\n' "$1"; passes=$((passes + 1)); }
 fail() { printf 'FAIL  %s\n' "$1"; failures=$((failures + 1)); }
 skip() { printf 'SKIP  %s\n' "$1"; skips=$((skips + 1)); }
 note() { printf 'NOTE  %s\n' "$1"; }
+# join_lines: stdin's lines as one "a, b, c" line (job names hold spaces).
+join_lines() { awk 'NR > 1 { printf ", " } { printf "%s", $0 } END { if (NR) print "" }'; }
 # check <description> <command> [args...]: PASS when the command succeeds.
 check() {
     local desc=$1
@@ -121,17 +127,44 @@ version_lt() {
         exit 1' "$1" "$2"
 }
 
+# gh 2.75 is the first to fetch the logs of jobs a re-run carries over.
+GH_VERSION=$(gh --version 2>/dev/null | awk 'NR == 1 { print $3 }')
+if version_lt "${GH_VERSION:-0}" 2.75.0; then
+    echo "gh ${GH_VERSION:-of unknown version} is too old: 2.75 or later is required" >&2
+    exit 2
+fi
+
 # --------------------------------------------------------------------------
 # The run, and the commit it built
 # --------------------------------------------------------------------------
 runs=$(gh run list --workflow release.yml --branch "$TAG" --limit 20 \
-    --json databaseId,headSha,status,attempt,url \
-    -q '.[] | "\(.databaseId) \(.headSha) \(.status) \(.attempt) \(.url)"') ||
+    --json databaseId,headSha,attempt,url \
+    -q '.[] | "\(.databaseId) \(.headSha) \(.attempt) \(.url)"') ||
     { echo "listing release.yml runs for $TAG failed" >&2; exit 2; }
 [ -n "$runs" ] || { echo "no release.yml run found for $TAG" >&2; exit 2; }
-read -r RID SHA STATUS ATTEMPT URL <<<"${runs%%$'\n'*}"
 nruns=$(printf '%s\n' "$runs" | wc -l | tr -d ' ')
-[ "$STATUS" = completed ] || { echo "run $RID is $STATUS; verify it once it completes" >&2; exit 2; }
+if [ -n "${VERIFY_RUN_ID:-}" ]; then
+    # shellcheck disable=SC2016 # $1 is an awk field
+    run=$(printf '%s\n' "$runs" | awk -v id="$VERIFY_RUN_ID" '$1 == id')
+    [ -n "$run" ] || { echo "run $VERIFY_RUN_ID is not one of $TAG's release.yml runs" >&2; exit 2; }
+else
+    run=${runs%%$'\n'*}
+fi
+read -r RID SHA LATEST URL <<<"$run"
+ATTEMPT=${VERIFY_RUN_ATTEMPT:-$LATEST}
+case $ATTEMPT in
+    *[!0-9]*) echo "VERIFY_RUN_ATTEMPT is not a number: $ATTEMPT" >&2; exit 2 ;;
+esac
+if [ "$ATTEMPT" -lt 1 ] || [ "$ATTEMPT" -gt "$LATEST" ]; then
+    echo "run $RID has attempts 1 to $LATEST, not $ATTEMPT" >&2
+    exit 2
+fi
+# The attempt's own status: a newer attempt may be running while this one
+# is complete.
+attempt_info=$(gh api "repos/$REPO/actions/runs/$RID/attempts/$ATTEMPT" --jq '"\(.status) \(.run_started_at)"') ||
+    { echo "reading attempt $ATTEMPT of run $RID failed" >&2; exit 2; }
+read -r STATUS STARTED <<<"$attempt_info"
+[ "$STATUS" = completed ] || { echo "run $RID attempt $ATTEMPT is $STATUS; verify it once it completes" >&2; exit 2; }
 
 git fetch --quiet --tags origin || { echo "fetching from origin failed" >&2; exit 2; }
 git cat-file -e "$SHA^{commit}" 2>/dev/null ||
@@ -166,11 +199,11 @@ fi
 [ -n "$PREV" ] || { echo "cannot determine the previous tag; pass it as the second argument" >&2; exit 2; }
 
 echo "repo $REPO, tag $TAG ($([ "$PRERELEASE" = true ] && echo pre-release || echo stable)), commit ${SHA:0:7}"
-echo "run $RID, attempt $ATTEMPT: $URL"
+echo "run $RID, attempt $ATTEMPT of $LATEST: $URL"
 echo "changelog base: $PREV"
-[ "$nruns" -gt 1 ] && note "$nruns release.yml runs exist for $TAG; verifying the newest"
-[ "$ATTEMPT" -gt 1 ] && note "attempt $ATTEMPT: jobs an earlier attempt ran, and this one did not re-run, may be missing from its log and job list (not yet exercised)"
-[ -s "$WORK/local-only.txt" ] && note "ignored tags that exist only in this clone: $(tr '\n' ' ' <"$WORK/local-only.txt")"
+[ "$nruns" -gt 1 ] && note "$nruns release.yml runs exist for $TAG; verifying $([ -n "${VERIFY_RUN_ID:-}" ] && echo "the one asked for" || echo "the newest")"
+[ "$ATTEMPT" -lt "$LATEST" ] && note "attempt $ATTEMPT is not the latest: the release, its assets and Pages may be a later attempt's"
+[ -s "$WORK/local-only.txt" ] && note "ignored tags that exist only in this clone: $(join_lines <"$WORK/local-only.txt")"
 echo
 
 # Only a tag missing from origin's (fail-closed) listing may skip; for one
@@ -190,9 +223,18 @@ fi
 # Jobs
 # --------------------------------------------------------------------------
 jobs_ok=false
-if gh run view "$RID" --json jobs --jq '.jobs[] | "\(.name)\t\(.conclusion)"' \
+if gh api --paginate "repos/$REPO/actions/runs/$RID/attempts/$ATTEMPT/jobs" \
+    --jq '.jobs[] | "\(.name)\t\(.conclusion)\t\(.started_at)"' \
     >"$WORK/jobs.tsv" 2>"$WORK/jobs.err" && [ -s "$WORK/jobs.tsv" ]; then
     jobs_ok=true
+    # An attempt's jobs that started before it did are carried over from an
+    # earlier attempt (under new IDs, with their original start times).
+    # shellcheck disable=SC2016 # $1 and $3 are awk fields
+    awk -F'\t' -v s="$STARTED" '$3 >= s { print $1 }' "$WORK/jobs.tsv" >"$WORK/reran.txt"
+    reran=$(wc -l <"$WORK/reran.txt" | tr -d ' ')
+    total=$(wc -l <"$WORK/jobs.tsv" | tr -d ' ')
+    [ "$reran" -lt "$total" ] &&
+        note "attempt $ATTEMPT re-ran $reran of the $total jobs ($(join_lines <"$WORK/reran.txt")); the others carry over from earlier attempts, with their conclusions and logs"
     awk -F'\t' '$1 ~ /^Build \(/ { t = $1; sub(/^Build \(/, "", t); sub(/\)$/, "", t); print t }' \
         "$WORK/jobs.tsv" | LC_ALL=C sort >"$WORK/built.txt"
     check "one build job per release.yml target ($(wc -l <"$WORK/targets.txt" | tr -d ' '))" \
@@ -223,7 +265,11 @@ fi
 # output only, as "<job>\t<message>", without timestamps or colors. gh writes
 # a log's escape sequences in caret notation ("^[[1m") when not on a
 # terminal, so strip both that and the raw ESC form.
-gh run view "$RID" --log >"$WORK/raw.log" 2>"$WORK/raw.err" || : >"$WORK/raw.log"
+#
+# An attempt's log archive holds only the jobs it ran; gh fetches each other
+# job's log through the API, which serves a carried-over job's original log.
+# A job with no log at all, one that never started, fails the whole fetch.
+gh run view "$RID" --attempt "$ATTEMPT" --log >"$WORK/raw.log" 2>"$WORK/raw.err" || : >"$WORK/raw.log"
 : >"$WORK/output.log"
 if [ -s "$WORK/raw.log" ]; then
     # shellcheck disable=SC2016 # perl's variables, not the shell's
@@ -249,10 +295,14 @@ elif [ ! -s "$WORK/output.log" ]; then
     fail "parse the run log (no step output left after filtering; has its format changed?)"
     skip "step-output checks (no step output)"
 else
+    unlogged=
     if [ "$jobs_ok" = true ]; then
-        logged=$(cut -f1 "$WORK/output.log" | sort -u | wc -l | tr -d ' ')
-        ran=$(awk -F'\t' '$2 != "skipped"' "$WORK/jobs.tsv" | wc -l | tr -d ' ')
-        check "log covers every job that ran ($ran)" test "$logged" -eq "$ran"
+        # shellcheck disable=SC2016 # $1 and $2 are awk fields
+        awk -F'\t' '$2 != "skipped" { print $1 }' "$WORK/jobs.tsv" | LC_ALL=C sort -u >"$WORK/ran.txt"
+        cut -f1 "$WORK/output.log" | LC_ALL=C sort -u >"$WORK/logged.txt"
+        unlogged=$(LC_ALL=C comm -23 "$WORK/ran.txt" "$WORK/logged.txt" | join_lines)
+        check "log covers every job that ran ($(wc -l <"$WORK/ran.txt" | tr -d ' ')${unlogged:+; missing: $unlogged})" \
+            test -z "$unlogged"
     fi
     check "validate parsed the tag as $VERSION" has_line "Validate Release${TAB}Version: $VERSION" "$WORK/output.log"
     check "validate matched Cargo.toml version $BASE" has_line "Validate Release${TAB}Version verified: $BASE" "$WORK/output.log"
@@ -279,7 +329,7 @@ else
             awk -F'\t' -v j="$job" '$1 == j && index($2, "##[error]") == 1 { print "        " $2 }' "$WORK/output.log"
         done <"$WORK/error-jobs.txt"
     else
-        pass "no step failed silently"
+        pass "no step failed silently${unlogged:+ (in the jobs with a log)}"
     fi
     awk -F'\t' 'index($2, "##[warning]") == 1 { print substr($2, 12, 150) }' "$WORK/output.log" |
         sort | uniq -c >"$WORK/warnings.txt"
@@ -296,7 +346,7 @@ fi
 artifact_field() { awk -F'\t' -v n="$1" -v f="$2" '$1 == n { print $f; exit }' "$WORK/artifacts.tsv"; }
 if gh api --paginate "repos/$REPO/actions/runs/$RID/artifacts" \
     --jq '.artifacts[] | "\(.name)\t\(.expired)"' >"$WORK/artifacts.tsv" 2>"$WORK/artifacts.err"; then
-    missing=$(while IFS= read -r t; do [ -n "$(artifact_field "$CRATE-$t" 1)" ] || printf '%s ' "$t"; done <"$WORK/targets.txt")
+    missing=$(while IFS= read -r t; do [ -n "$(artifact_field "$CRATE-$t" 1)" ] || echo "$t"; done <"$WORK/targets.txt" | join_lines)
     check "a build artifact for every target${missing:+ (missing: $missing)}" test -z "$missing"
     check "Pages artifact uploaded" test -n "$(artifact_field github-pages 1)"
 else

@@ -4,9 +4,11 @@
 # continue-on-error, and nothing else inspects what a run produced, so this
 # runs scripts/verify-release.sh after each one: a problem shows up as a
 # failed run here instead of waiting for someone to remember the script.
-# Until TD-2026-09-04 is resolved it fails on every stable release, by
-# design: the crates.io publish step fails silently there. It can also be
-# run by hand for any tag (Actions > Verify Release > Run workflow).
+# Re-running jobs of a Release run makes a new attempt of it, which runs
+# this again. Until TD-2026-09-04 is resolved it fails on every stable
+# release, by design: the crates.io publish step fails silently there. It
+# can also be run by hand for any tag (Actions > Verify Release > Run
+# workflow).
 
 name: Verify Release
 
@@ -50,6 +52,11 @@ jobs:
           # Through the environment, not interpolated into the script, so a
           # crafted tag name cannot inject shell.
           TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+          # The run and attempt that triggered this one, not the tag's
+          # newest; both are empty when run by hand, which verifies the
+          # newest run at its latest attempt.
+          VERIFY_RUN_ID: ${{ github.event.workflow_run.id }}
+          VERIFY_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set +e
           scripts/verify-release.sh "$TAG" 2>&1 | tee verify.out
