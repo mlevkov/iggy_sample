@@ -183,6 +183,56 @@ src/
 └── services/         # Business logic
 ```
 
+## Releasing
+
+Pushing a `vX.Y.Z` tag (or `vX.Y.Z-<suffix>` for a pre-release) runs
+`.github/workflows/release.yml`, which builds the binaries, creates the GitHub
+Release and deploys the docs to GitHub Pages; only admins can create tags.
+Before tagging, set `version` in `Cargo.toml` (the validate job requires the
+tag to match it), move the `[Unreleased]` changelog entries under the new
+version, and resolve or re-bind every record in `docs/tech-debt/` whose
+trigger is the next release.
+
+A green run does not mean every step worked, since a step under
+`continue-on-error` fails silently. So `.github/workflows/verify-release.yml`
+runs `scripts/verify-release.sh` after every green Release run; until
+TD-2026-09-04 is resolved it fails on every stable release, by design. To
+check a run by hand:
+
+```bash
+scripts/verify-release.sh v0.4.2
+```
+
+It checks the tag's newest run at its latest attempt; `VERIFY_RUN_ID` and
+`VERIFY_RUN_ATTEMPT` pick another run of the tag or an earlier attempt.
+
+To exercise a `release.yml` change before a real release, push a pre-release
+tag of the current `Cargo.toml` version, such as `v0.4.1-ci.1` (the validate
+job compares only the part before the hyphen), and verify its run the same
+way. Two things outlive the exercise:
+
+- The docs job deploys the tagged commit's docs to Pages even for a
+  pre-release, and deleting the tag does not undo that. To restore the latest
+  stable release's docs, re-run the Deploy Documentation job of its Release
+  run (a new attempt that succeeds runs Verify Release again), with two
+  limits:
+  - GitHub re-runs jobs only within 30 days of a run. Past that, tag the
+    stable release's commit as a pre-release instead
+    (`git tag v0.4.1-docs.1 'v0.4.1^{}'`) and push it: its run deploys that
+    commit's docs. Delete the tag afterwards like any exercise tag.
+  - deploy-pages refuses a run that holds more than one `github-pages`
+    artifact: v0.2.0's second re-run failed with `Multiple artifacts named
+    "github-pages"` beside the first attempt's, which had not expired yet
+    (whether an expired one also counts is untested). If that happens,
+    delete the run's `github-pages` artifacts and re-run the job again. `gh api repos/mlevkov/iggy_sample/actions/runs/<run-id>/artifacts`
+    lists them, and
+    `gh api -X DELETE repos/mlevkov/iggy_sample/actions/artifacts/<id>`
+    deletes one.
+- The tag. Delete it with `gh release delete v0.4.1-ci.1 --cleanup-tag --yes`
+  from your clone (this also deletes the local tag). Left behind, it becomes
+  where `release.yml` starts the changelog it writes for the next release
+  (`git describe --tags`), which drops every commit before it.
+
 ## Questions?
 
 - Open a [Discussion](https://github.com/mlevkov/iggy_sample/discussions) for questions

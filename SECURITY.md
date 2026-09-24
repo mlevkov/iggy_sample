@@ -43,7 +43,9 @@ Dependencies are monitored via:
 - Dependabot version updates every Monday, for direct and transitive Cargo
   dependencies alike: one grouped PR for minor and patch updates, a
   separate PR per major bump (a pre-1.0 minor bump such as 0.8 to 0.9
-  counts as major), and one grouped PR for GitHub Actions
+  counts as major), and one grouped PR for GitHub Actions. Dependabot
+  silently skips a version that needs a newer Rust than this crate's
+  `rust-version` (TD-2026-07-02); the checks below still flag it
 - `cargo deny --locked check` in CI, gating every pull request through the
   required `CI Success` check and also run weekly: vulnerability,
   unmaintained and unsound advisories in any crate fail it, and so does a

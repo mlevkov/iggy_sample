@@ -379,7 +379,8 @@ iggy_sample/
 │   ├── workflows/
 │   │   ├── ci.yml              # Main CI (tests, lint, coverage)
 │   │   ├── pr.yml              # PR checks (size, commits, docs)
-│   │   ├── release.yml         # Multi-platform release builds
+│   │   ├── release.yml         # Release builds, GitHub release, docs deploy
+│   │   ├── verify-release.yml  # Checks each green release run
 │   │   └── extended-tests.yml  # Weekly stress/benchmark tests
 │   ├── dependabot.yml          # Automated dependency updates
 │   └── pull_request_template.md
@@ -423,6 +424,8 @@ iggy_sample/
 │       ├── streams.rs      # Stream management
 │       ├── topics.rs       # Topic management
 │       └── util.rs         # Shared handler utilities
+├── scripts/
+│   └── verify-release.sh    # Checks a release run step by step
 ├── tests/
 │   ├── integration_tests.rs # End-to-end API tests
 │   ├── metrics_smoke_test.rs # Prometheus exporter smoke test
@@ -683,14 +686,16 @@ This project uses GitHub Actions for continuous integration and deployment:
 |----------|---------|-------------|
 | `ci.yml` | Push, PR, weekly | Tests, linting, coverage, dependency policy, security audit |
 | `pr.yml` | PR | Size checks, conventional commits, semver |
-| `release.yml` | Tag `v*` | Multi-platform builds, GitHub release |
+| `release.yml` | Tag `vX.Y.Z` or `vX.Y.Z-<suffix>` | Multi-platform builds, GitHub release, docs deploy |
+| `verify-release.yml` | Green Release run, or by hand | Checks the run with `scripts/verify-release.sh` |
 | `extended-tests.yml` | Weekly | Benchmarks, stress tests, memory checks |
 
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`
-- **Linting**: `cargo clippy -- -D warnings`
+- **Linting**: `cargo clippy -- -D warnings`, and `shellcheck` for `scripts/`
 - **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV on Linux
-- **Coverage**: Uploaded to Codecov
+- **Coverage**: `cargo llvm-cov`; the Codecov upload is not authenticated
+  yet (TD-2026-09-03)
 - **Dependency policy**: `cargo deny --locked check` (advisories, bans,
   licenses, sources)
 - **Security**: `cargo-audit` vulnerability scanning; blocking on pushes and
@@ -698,7 +703,8 @@ This project uses GitHub Actions for continuous integration and deployment:
 
 ### Dependabot
 Automatically creates PRs for:
-- Cargo dependency updates, direct and transitive (weekly)
+- Cargo dependency updates, direct and transitive (weekly), except a
+  version that needs a newer Rust than the MSRV (TD-2026-07-02)
 - GitHub Actions updates (weekly)
 
 ## Documentation

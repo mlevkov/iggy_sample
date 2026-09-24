@@ -1,7 +1,8 @@
 # Continuous Integration workflow for iggy-sample
 #
-# Runs on every push to main and on all pull requests.
-# Includes: formatting, linting, testing, coverage, documentation, and security audit.
+# Runs on pushes to main and develop, on pull requests to main, and weekly.
+# Includes: formatting, linting, testing, coverage, documentation, security
+# audit, dependency policy, and shell-script linting.
 
 name: CI
 
@@ -55,6 +56,8 @@ jobs:
               with:
                   toolchain: stable
                   components: clippy
+            # TD-2026-09-05: this file's rust-cache pins are a branch head, not
+            # the release their comment names; re-pin every workflow's together.
             - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
             - name: Run Clippy
               run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -136,6 +139,9 @@ jobs:
             - name: Generate coverage report
               run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
+            # TD-2026-09-03: without a CODECOV_TOKEN secret Codecov rejects
+            # this upload, and fail_ci_if_error: false keeps the job green.
+            # Resolve the record before editing this step.
             - name: Upload coverage to Codecov
               uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
               with:
@@ -247,12 +253,27 @@ jobs:
                   echo "Dockerfile rust $image is at or above rust-version $msrv"
 
     # ==========================================================================
+    # Shell scripts (scripts/verify-release.sh runs after every release)
+    # ==========================================================================
+    shellcheck:
+        name: Shellcheck
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            # Preinstalled on GitHub's ubuntu runners; -s bash because the
+            # scripts are bash, and they must stay clean under it.
+            - name: Lint shell scripts
+              run: |
+                  shellcheck --version
+                  shellcheck -s bash scripts/*.sh
+
+    # ==========================================================================
     # Final status check (for branch protection)
     # ==========================================================================
     ci-success:
         name: CI Success
         runs-on: ubuntu-latest
-        needs: [fmt, clippy, test, integration, docs, audit, licenses]
+        needs: [fmt, clippy, test, integration, docs, audit, licenses, shellcheck]
         if: always()
         steps:
             - name: Check all jobs passed
@@ -263,7 +284,8 @@ jobs:
                      [[ "${{ needs.integration.result }}" != "success" ]] || \
                      [[ "${{ needs.docs.result }}" != "success" ]] || \
                      [[ "${{ needs.audit.result }}" != "success" ]] || \
-                     [[ "${{ needs.licenses.result }}" != "success" ]]; then
+                     [[ "${{ needs.licenses.result }}" != "success" ]] || \
+                     [[ "${{ needs.shellcheck.result }}" != "success" ]]; then
                     echo "One or more jobs failed"
                     exit 1
                   fi

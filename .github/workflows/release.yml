@@ -3,6 +3,8 @@
 # Triggered when a version tag is pushed (e.g., v0.1.0).
 # Builds release binaries for multiple platforms and creates a GitHub release.
 
+# .github/workflows/verify-release.yml runs after this workflow by this name
+# (workflow_run); rename both together.
 name: Release
 
 on:
@@ -46,6 +48,7 @@ jobs:
             echo "is_prerelease=false" >> $GITHUB_OUTPUT
           fi
 
+          # scripts/verify-release.sh matches this line exactly
           echo "Version: $VERSION"
 
       - name: Verify Cargo.toml version matches tag
@@ -61,6 +64,7 @@ jobs:
             exit 1
           fi
 
+          # scripts/verify-release.sh matches this line exactly
           echo "Version verified: $CARGO_VERSION"
 
   # ==========================================================================
@@ -104,6 +108,8 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # TD-2026-09-05: this file's rust-cache pins are a branch head, not
+      # the release their comment names; re-pin every workflow's together.
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: release-${{ matrix.target }}
@@ -176,6 +182,9 @@ jobs:
           # Get the previous tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
 
+          # scripts/verify-release.sh matches the first echo line below
+          # exactly, which also rules out the fallback, and counts the
+          # "- %s (%h)" entries; change them together.
           if [ -n "$PREV_TAG" ]; then
             echo "Generating changelog since $PREV_TAG"
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
@@ -200,6 +209,9 @@ jobs:
   # ==========================================================================
   # Publish to crates.io (optional)
   # ==========================================================================
+  # TD-2026-09-04: this job cannot succeed (there is no CRATES_IO_TOKEN
+  # secret, and Cargo.toml sets publish = false), and continue-on-error hides
+  # that. Resolve the record before editing the job.
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest

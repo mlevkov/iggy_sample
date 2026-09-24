@@ -6,7 +6,7 @@ condition under which the record MUST be resolved (not "someday").
 | ID | Title | Source | Trigger | Status |
 |----|-------|--------|---------|--------|
 | [TD-2026-07-01](TD-2026-07-01.md) | `with_reconnect` composition test matrix | Review session 01 (tests #2) | Any behavioral change to `with_reconnect`/`retry_once` | resolved (session 02) |
-| [TD-2026-07-02](TD-2026-07-02.md) | DiagnosticEvents-driven connection state | Review session 01 (architect #2) | Next iggy SDK minor bump | open (trigger FIRED: iggy 0.11.0 released 2026-09-18) |
+| [TD-2026-07-02](TD-2026-07-02.md) | DiagnosticEvents-driven connection state | Review session 01 (architect #2) | Next iggy SDK minor bump | open (trigger FIRED: iggy 0.11.0 released 2026-09-18; due with the upgrade, by hand: Dependabot cannot propose it below Rust 1.95) |
 | [TD-2026-07-03](TD-2026-07-03.md) | Half-open probe limiting | Review session 01 (architect #9, types F5) | First production incident involving breaker recovery, or breaker config exposure | resolved (session 02) |
 | [TD-2026-07-04](TD-2026-07-04.md) | X-Request-Timeout enforcement | Review session 01 (silentfail M4) | Before advertising the header in any client-facing docs beyond CLAUDE.md | resolved (session 02) |
 | [TD-2026-07-05](TD-2026-07-05.md) | Metrics exporter smoke test | Review session 01 (tests #7) | Next metrics-exporter-prometheus major/minor bump | resolved (session 02) |
@@ -16,3 +16,7 @@ condition under which the record MUST be resolved (not "someday").
 | [TD-2026-07-09](TD-2026-07-09.md) | Breaker per-state data as enum with payloads | Review session 02 (types MEDIUM) | Next behavioral change to the breaker state or admission gate | resolved (session 03) |
 | [TD-2026-09-01](TD-2026-09-01.md) | API listener serves cleartext HTTP/2 by feature unification | RUSTSEC-2026-0258 remediation (h2 exposure) | A tripwire failing (CI feature-graph check or either h2c test), next change to the serving path, next `h2` advisory, or next minor bump of `axum`/`hyper-util`/`metrics-exporter-prometheus` | open |
 | [TD-2026-09-02](TD-2026-09-02.md) | Validate dependabot.yml in CI, and put the Dockerfile on an updater | RustSec 2026-09 remediation review, rounds 1-2 | Next edit to `.github/dependabot.yml` after it lands, or the next `rust-version` change | open |
+| [TD-2026-09-03](TD-2026-09-03.md) | The Codecov upload fails silently for want of a token | Dependabot first-wave triage (codecov-action bump, PR #37) | Next edit to ci.yml's coverage job, the next major `codecov-action` bump, or the next release | open |
+| [TD-2026-09-04](TD-2026-09-04.md) | The crates.io publish job cannot succeed | Dependabot first-wave triage (release.yml exercise, PR #37) | The next stable release tag, or the next edit to the publish job or to `publish` in Cargo.toml | open |
+| [TD-2026-09-05](TD-2026-09-05.md) | rust-cache is pinned to a branch head under a release comment | Dependabot first-wave triage (SHA pin check, PR #37); carries TD-2026-07-07's addendum | The next github-actions Dependabot PR that moves the rust-cache or audit-check pin | open |
+| [TD-2026-09-06](TD-2026-09-06.md) | main accepts a pull request whose checks ran against an older main | Dependabot first-wave triage (merging PRs #37-#42) | Before merging the next Dependabot wave (next scheduled run 2026-09-28) | open |
