@@ -5,7 +5,8 @@
 # runs scripts/verify-release.sh after each one: a problem shows up as a
 # failed run here instead of waiting for someone to remember the script.
 # Until TD-2026-09-04 is resolved it fails on every stable release, by
-# design: the crates.io publish step fails silently there.
+# design: the crates.io publish step fails silently there. It can also be
+# run by hand for any tag (Actions > Verify Release > Run workflow).
 
 name: Verify Release
 
@@ -13,29 +14,46 @@ on:
   workflow_run:
     workflows: [Release]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag whose Release run to verify, e.g. v0.4.1"
+        required: true
+        type: string
 
 permissions:
   actions: read
   contents: read
   deployments: read
-  pages: read
 
 jobs:
   verify:
     name: Verify release run
-    # Green runs from a tag push only: a failed run is already visible.
-    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
+    # By hand, or after a green run from a tag push: a failed run is already
+    # visible.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # The job runs a downloaded binary; keep the token off the disk
+          # (git fetch and ls-remote work anonymously on this public repo).
+          persist-credentials: false
 
       - name: Verify the release run
         env:
           GH_TOKEN: ${{ github.token }}
           # Through the environment, not interpolated into the script, so a
           # crafted tag name cannot inject shell.
-          TAG: ${{ github.event.workflow_run.head_branch }}
-        run: scripts/verify-release.sh "$TAG"
+          TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          set +e
+          scripts/verify-release.sh "$TAG" 2>&1 | tee verify.out
+          status=${PIPESTATUS[0]}
+          # The PASS/FAIL lines on the run's summary page, not only its log.
+          { echo '```'; cat verify.out; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"
