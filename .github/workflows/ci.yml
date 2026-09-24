@@ -2,7 +2,7 @@
 #
 # Runs on pushes to main and develop, on pull requests to main, and weekly.
 # Includes: formatting, linting, testing, coverage, documentation, security
-# audit, and shell-script linting.
+# audit, dependency policy, and shell-script linting.
 
 name: CI
 

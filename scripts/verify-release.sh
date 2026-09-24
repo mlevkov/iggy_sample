@@ -29,7 +29,7 @@
 # new attempt of the run that lists every job but runs only the chosen ones.
 # The others carry over with their conclusions and their original logs, which
 # gh 2.75 or later fetches for them (checked on v0.2.0's run 28759754600,
-# attempts 2 to 4). A NOTE names the jobs an attempt re-ran.
+# attempts 3 and 4). A NOTE names the jobs an attempt re-ran.
 #
 # Requires gh 2.75 or later (authenticated), git, perl, tar and curl; unzip
 # and file are used when present. Exits 0 when every check passes (skips
@@ -153,18 +153,17 @@ fi
 read -r RID SHA LATEST URL <<<"$run"
 ATTEMPT=${VERIFY_RUN_ATTEMPT:-$LATEST}
 case $ATTEMPT in
-    *[!0-9]*) echo "VERIFY_RUN_ATTEMPT is not a number: $ATTEMPT" >&2; exit 2 ;;
+    '' | *[!0-9]* | 0*) echo "VERIFY_RUN_ATTEMPT is not an attempt number: $ATTEMPT" >&2; exit 2 ;;
 esac
-if [ "$ATTEMPT" -lt 1 ] || [ "$ATTEMPT" -gt "$LATEST" ]; then
-    echo "run $RID has attempts 1 to $LATEST, not $ATTEMPT" >&2
-    exit 2
-fi
-# The attempt's own status: a newer attempt may be running while this one
-# is complete.
-attempt_info=$(gh api "repos/$REPO/actions/runs/$RID/attempts/$ATTEMPT" --jq '"\(.status) \(.run_started_at)"') ||
-    { echo "reading attempt $ATTEMPT of run $RID failed" >&2; exit 2; }
+# The attempt's own record decides, not the run listing: a newer attempt may
+# be running while this one is complete, and the listing can lag behind the
+# attempt whose completion triggered the workflow.
+attempt_info=$(gh api "repos/$REPO/actions/runs/$RID/attempts/$ATTEMPT" \
+    --jq '"\(.status) \(.run_started_at)"' 2>"$WORK/attempt.err") ||
+    { echo "reading attempt $ATTEMPT of run $RID failed ($(first_line "$WORK/attempt.err"))" >&2; exit 2; }
 read -r STATUS STARTED <<<"$attempt_info"
 [ "$STATUS" = completed ] || { echo "run $RID attempt $ATTEMPT is $STATUS; verify it once it completes" >&2; exit 2; }
+[ "$ATTEMPT" -gt "$LATEST" ] && LATEST=$ATTEMPT
 
 git fetch --quiet --tags origin || { echo "fetching from origin failed" >&2; exit 2; }
 git cat-file -e "$SHA^{commit}" 2>/dev/null ||
@@ -268,8 +267,12 @@ fi
 #
 # An attempt's log archive holds only the jobs it ran; gh fetches each other
 # job's log through the API, which serves a carried-over job's original log.
-# A job with no log at all, one that never started, fails the whole fetch.
-gh run view "$RID" --attempt "$ATTEMPT" --log >"$WORK/raw.log" 2>"$WORK/raw.err" || : >"$WORK/raw.log"
+# A job with no log at all fails the whole fetch (v0.2.0's attempt 2 re-ran
+# a job that failed within two seconds and left none). An empty cache
+# directory makes gh download the archive rather than reuse a copy cached
+# earlier on this machine, whose layout may differ from what CI sees.
+XDG_CACHE_HOME=$WORK/gh-cache gh run view "$RID" --attempt "$ATTEMPT" --log \
+    >"$WORK/raw.log" 2>"$WORK/raw.err" || : >"$WORK/raw.log"
 : >"$WORK/output.log"
 if [ -s "$WORK/raw.log" ]; then
     # shellcheck disable=SC2016 # perl's variables, not the shell's
@@ -295,14 +298,25 @@ elif [ ! -s "$WORK/output.log" ]; then
     fail "parse the run log (no step output left after filtering; has its format changed?)"
     skip "step-output checks (no step output)"
 else
-    unlogged=
+    # Set when the silent-failure check below cannot vouch for every job.
+    partial=
     if [ "$jobs_ok" = true ]; then
         # shellcheck disable=SC2016 # $1 and $2 are awk fields
         awk -F'\t' '$2 != "skipped" { print $1 }' "$WORK/jobs.tsv" | LC_ALL=C sort -u >"$WORK/ran.txt"
         cut -f1 "$WORK/output.log" | LC_ALL=C sort -u >"$WORK/logged.txt"
         unlogged=$(LC_ALL=C comm -23 "$WORK/ran.txt" "$WORK/logged.txt" | join_lines)
-        check "log covers every job that ran ($(wc -l <"$WORK/ran.txt" | tr -d ' ')${unlogged:+; missing: $unlogged})" \
-            test -z "$unlogged"
+        # gh prints no log for a skipped job, so a run in which no job ran
+        # never gets here: an empty list means building it failed.
+        if [ ! -s "$WORK/ran.txt" ]; then
+            fail "log covers every job that ran (no job is listed as having run)"
+        else
+            check "log covers every job that ran ($(wc -l <"$WORK/ran.txt" | tr -d ' ')${unlogged:+; missing: $unlogged})" \
+                test -z "$unlogged"
+        fi
+        [ -n "$unlogged" ] && partial=" (in the jobs with a log)"
+    else
+        skip "log covers every job that ran (no job list)"
+        partial=" (in the jobs with a log)"
     fi
     check "validate parsed the tag as $VERSION" has_line "Validate Release${TAB}Version: $VERSION" "$WORK/output.log"
     check "validate matched Cargo.toml version $BASE" has_line "Validate Release${TAB}Version verified: $BASE" "$WORK/output.log"
@@ -329,7 +343,7 @@ else
             awk -F'\t' -v j="$job" '$1 == j && index($2, "##[error]") == 1 { print "        " $2 }' "$WORK/output.log"
         done <"$WORK/error-jobs.txt"
     else
-        pass "no step failed silently${unlogged:+ (in the jobs with a log)}"
+        pass "no step failed silently$partial"
     fi
     awk -F'\t' 'index($2, "##[warning]") == 1 { print substr($2, 12, 150) }' "$WORK/output.log" |
         sort | uniq -c >"$WORK/warnings.txt"
