@@ -7,7 +7,8 @@ description = "A comprehensive demonstration of Apache Iggy message streaming wi
 license = "MIT"
 # Repo-level releases only - never published to crates.io (enforced here,
 # not just in CI: cargo refuses to publish with this set). release.yml still
-# runs a publish job, which this makes fail silently: TD-2026-09-04.
+# runs a publish job, which fails silently: with no token it stops before
+# reaching this setting, and with one this would stop it. TD-2026-09-04.
 publish = false
 repository = "https://github.com/mlevkov/iggy_sample"
 homepage = "https://github.com/mlevkov/iggy_sample"

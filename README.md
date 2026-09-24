@@ -686,13 +686,13 @@ This project uses GitHub Actions for continuous integration and deployment:
 |----------|---------|-------------|
 | `ci.yml` | Push, PR, weekly | Tests, linting, coverage, dependency policy, security audit |
 | `pr.yml` | PR | Size checks, conventional commits, semver |
-| `release.yml` | Tag `vX.Y.Z` | Multi-platform builds, GitHub release, docs deploy |
-| `verify-release.yml` | Green Release run | Checks the run with `scripts/verify-release.sh` |
+| `release.yml` | Tag `vX.Y.Z` or `vX.Y.Z-<suffix>` | Multi-platform builds, GitHub release, docs deploy |
+| `verify-release.yml` | Green Release run, or by hand | Checks the run with `scripts/verify-release.sh` |
 | `extended-tests.yml` | Weekly | Benchmarks, stress tests, memory checks |
 
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`
-- **Linting**: `cargo clippy -- -D warnings`
+- **Linting**: `cargo clippy -- -D warnings`, and `shellcheck` for `scripts/`
 - **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV on Linux
 - **Coverage**: `cargo llvm-cov`; the Codecov upload is not authenticated
   yet (TD-2026-09-03)
