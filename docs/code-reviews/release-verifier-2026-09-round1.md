@@ -124,9 +124,11 @@ releasing", and the script's header described a pre-release only by the
 skipped publish job and the unchanged Latest. But the docs job has no
 pre-release guard (release.yml's Deploy Documentation job; V26): the
 v0.4.1-ci.1 run deployed `b7aba82`'s docs to Pages, and deleting the tag did
-not undo it (V27). It was harmless this time, since those docs match v0.4.1's,
-but the documented procedure generalizes to commits with unreleased API
-changes.
+not undo it (V27). Those docs are not v0.4.1's either: 25 files differ (21
+HTML, 4 JS) and a `.lock` exists only in v0.4.1's artifact, all from the
+dependency bumps between `98f14d5` and `b7aba82`. And the documented
+procedure generalizes to commits with unreleased API changes. *(Corrected
+in round 2, R2-T7: this said the two sets of docs match.)*
 
 **Remediation:** `docs: say what exercising release.yml leaves behind`.
 CONTRIBUTING lists both things that outlive an exercise, the Pages
@@ -192,9 +194,10 @@ with a clone-only `v0.3.0-stale.1`.
 Premise corrected: [consistency], [reviewer] and [silent] said the
 documented cleanup, `gh release delete --cleanup-tag`, leaves the local tag
 behind. gh's source deletes it too when no `-R` is given (cli/cli
-`pkg/cmd/release/delete/delete.go:105-107`; V20), so the documented in-clone
-usage is clean. The gap is narrower: another clone, a deletion from the web
-UI, or `-R`. [tests] had it right.
+`pkg/cmd/release/delete/delete.go`, lines 105-107 on trunk and 106-108 in
+v2.97.0, the version used here; V20), so the documented in-clone usage is
+clean. The gap is narrower: another clone, a deletion from the web UI, or
+`-R`. [tests] had it right. *(Line numbers corrected in round 2, R2-T7.)*
 
 **Remediation:** `ci(verify-release): tie the run to its tag and fail
 closed on fetches`. The base is computed excluding tags that exist only in
@@ -350,6 +353,11 @@ that ran" could FAIL spuriously.
 exercise tag can test it by failing or cancelling one build job and
 choosing "Re-run failed jobs".
 
+*(Corrected in round 2, R2-T2: V44 was wrong. v0.2.0's attempts 2 to 4
+each re-ran only Deploy Documentation, so the case was on record already;
+round 2 measured it there and made the verifier check the attempt that
+triggered it.)*
+
 ---
 
 ## Declined, with reasons
@@ -364,6 +372,7 @@ choosing "Re-run failed jobs".
   its trigger places the re-pin in the next github-actions PR.
 - **Check Cargo.toml's version at the run's commit independently** [tests]:
   the validate job prints the comparison, and the verifier checks that line.
-- **Restore v0.4.1's Pages deployment now**: the exercise deployed docs
-  identical to v0.4.1's (same crate version, no source change since), so
-  restoring changes nothing a reader sees.
+- **Restore v0.4.1's Pages deployment now**: declined on the premise that
+  the exercise deployed docs identical to v0.4.1's (same crate version, no
+  source change since), so restoring would change nothing a reader sees.
+  The premise was false (T5); round 2 reopens the restore (R2-T7).
