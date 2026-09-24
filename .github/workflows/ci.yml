@@ -1,7 +1,8 @@
 # Continuous Integration workflow for iggy-sample
 #
-# Runs on every push to main and on all pull requests.
-# Includes: formatting, linting, testing, coverage, documentation, and security audit.
+# Runs on pushes to main and develop, on pull requests to main, and weekly.
+# Includes: formatting, linting, testing, coverage, documentation, security
+# audit, and shell-script linting.
 
 name: CI
 
@@ -55,6 +56,8 @@ jobs:
               with:
                   toolchain: stable
                   components: clippy
+            # TD-2026-09-05: this file's rust-cache pins are a branch head, not
+            # the release their comment names; re-pin every workflow's together.
             - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
             - name: Run Clippy
               run: cargo clippy --locked --all-targets --all-features -- -D warnings
