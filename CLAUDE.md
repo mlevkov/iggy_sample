@@ -6,7 +6,7 @@ A comprehensive demonstration of Apache Iggy message streaming with Axum.
 
 This application showcases how to build a production-ready message streaming service using:
 - **Apache Iggy server 0.8.0**: High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy Rust SDK 0.10.0**: Latest stable SDK, paired with the server 0.8 release line (server image pinned in `docker-compose.yaml`)
+- **Iggy Rust SDK 0.10.0**: Paired with the server 0.8 release line (server image pinned in `docker-compose.yaml`). Builds use the latest stable Rust, but the declared MSRV (`rust-version = "1.93.0"`) keeps cargo and Dependabot below SDK 0.11.0, which needs 1.95; the upgrade raises the MSRV by hand (TD-2026-07-02)
 - **Axum 0.8**: Ergonomic and modular Rust web framework
 - **Tokio**: Async runtime for Rust
 
