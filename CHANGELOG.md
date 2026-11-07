@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose log is still retained was rejected for want of a token
   (TD-2026-09-03)
 
+### Security
+
+- The auth brute-force block is now checked before the API key is compared.
+  The key used to be compared first, so a blocked IP still got an answer to
+  every guess (200 for the right key, 429 for a wrong one), and the block
+  did not slow guessing below the general rate limit. Every request from a
+  blocked IP now gets the same 429 until the failure budget refills. A
+  client that shares an IP with an attacker is now locked out along with it
+
 ## [0.4.1] - 2026-09-23
 
 Security patch for four RustSec advisories: one reachable on the public API
