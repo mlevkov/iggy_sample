@@ -176,7 +176,8 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
   it is blocked, and the block is checked **before** the key is compared:
   every request from a blocked IP gets the same 429, valid key or not, so the
   block cannot serve as a hit/miss oracle (`AuthFailureGuard` in
-  `src/middleware/auth.rs`).
+  `src/middleware/auth.rs`). Startup warns when `API_KEY` is set without
+  `TRUSTED_PROXIES`, since the block is then keyed on spoofable headers.
 - Auth bypass for `/health` and `/ready` uses exact path matching.
 
 ### Request Timeout (`src/middleware/timeout.rs`)
