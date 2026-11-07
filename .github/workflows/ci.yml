@@ -56,9 +56,9 @@ jobs:
               with:
                   toolchain: stable
                   components: clippy
-            # TD-2026-09-05: this file's rust-cache pins are a branch head, not
-            # the release their comment names; re-pin every workflow's together.
-            - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+            # rust-cache is pinned to a release commit, never a branch head, so
+            # Dependabot proposes releases (TD-2026-09-05).
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
             - name: Run Clippy
               run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
@@ -83,7 +83,7 @@ jobs:
             - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
               with:
                   toolchain: ${{ matrix.rust }}
-            - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: ${{ matrix.os }}-${{ matrix.rust }}
 
@@ -108,7 +108,7 @@ jobs:
             - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
               with:
                   toolchain: stable
-            - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
             - name: Run integration tests
               run: cargo test --locked --test '*' --all-features
@@ -129,7 +129,7 @@ jobs:
               with:
                   toolchain: stable
                   components: llvm-tools-preview
-            - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
             - name: Install cargo-llvm-cov
               uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
@@ -161,7 +161,7 @@ jobs:
             - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
               with:
                   toolchain: stable
-            - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
             - name: Build documentation
               run: cargo doc --locked --no-deps --all-features

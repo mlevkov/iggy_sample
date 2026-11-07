@@ -86,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Iggy Web UI is served by the server itself at `http://localhost:3000/ui`
   (`IGGY_HTTP_WEB_UI=true`); the separate `iggy-web-ui` container and its
   port 3050 are gone
+- CI pins `Swatinem/rust-cache` to its v2.9.3 release commit in all 16
+  uses (TD-2026-09-05). The pin had been an untagged `master` head under a
+  `# v2` comment, so every github-actions Dependabot PR moved it to whatever
+  upstream merged last; with a tagged SHA Dependabot proposes releases
 
 ### Removed
 
