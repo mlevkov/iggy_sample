@@ -175,6 +175,7 @@ impl TestFixture {
             auth_bypass_paths: vec!["/health".to_string(), "/ready".to_string()],
             cors_allowed_origins: vec!["*".to_string()],
             trusted_proxies: vec![], // Empty = trust all (test mode)
+            allow_unverified_client_ips: false,
             // Observability
             log_level: "warn".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
@@ -1434,6 +1435,7 @@ impl SecureTestFixture {
             // 127.0.0.1 (untrusted), so spoofed forwarded headers must be
             // ignored - this makes the enforcement path itself wire-tested.
             trusted_proxies: vec!["10.0.0.0/8".to_string()],
+            allow_unverified_client_ips: false,
             log_level: "warn".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
             metrics_port: 0, // Disabled for tests

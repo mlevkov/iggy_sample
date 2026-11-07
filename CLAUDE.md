@@ -35,6 +35,7 @@ convey on its own.
 | `AUTH_BYPASS_PATHS` | `/health,/ready` | Comma-separated paths that bypass auth |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
 | `TRUSTED_PROXIES` | (none) | Comma-separated CIDR ranges for trusted reverse proxies |
+| `ALLOW_UNVERIFIED_CLIENT_IPS` | `false` | Accept `API_KEY` without `TRUSTED_PROXIES` (local development only) |
 
 #### Trusted Proxy Configuration
 
@@ -68,6 +69,11 @@ TRUSTED_PROXIES="10.0.1.5,10.0.1.6"
 ```
 
 When empty (default), all X-Forwarded-For headers are trusted. **This is not recommended for production.**
+With `API_KEY` set, an empty `TRUSTED_PROXIES` fails startup (`Config::validate`)
+unless `ALLOW_UNVERIFIED_CLIENT_IPS=true`: the brute-force block applies only to
+verified client IPs, so an API key without trusted proxies would look protected
+without being so. The flag accepts `true`/`false` in any case; empty means unset,
+and any other value fails startup.
 
 ### Log Levels
 
@@ -185,8 +191,9 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
   oracle (`AuthFailureGuard` in `src/middleware/auth.rs`). Unverified IPs come
   from spoofable headers, so they are throttled on failures but never
   blocked: blocking them would buy no protection (rotate the header) and
-  would let anyone lock out the shared `"unknown"` bucket. Startup warns when
-  `API_KEY` is set without `TRUSTED_PROXIES`.
+  would let anyone lock out the shared `"unknown"` bucket. Startup therefore
+  refuses `API_KEY` without `TRUSTED_PROXIES` unless
+  `ALLOW_UNVERIFIED_CLIENT_IPS=true`, and warns while that opt-out is in use.
 - Auth bypass for `/health` and `/ready` uses exact path matching.
 
 ### Request Timeout (`src/middleware/timeout.rs`)
