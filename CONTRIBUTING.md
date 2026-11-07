@@ -24,6 +24,10 @@ By participating in this project, you agree to maintain a respectful and inclusi
 5. **Run lints**: `cargo clippy -- -D warnings`
 6. **Format code**: `cargo fmt`
 7. **Update documentation** if needed
+8. **Keep the branch up to date with `main`**: the `main` ruleset requires
+   it, and merges only once the required checks (CI Success, Clippy,
+   Integration Tests, Rustfmt, Dependabot Config) pass on the updated
+   branch
 
 ### Commit Convention
 
