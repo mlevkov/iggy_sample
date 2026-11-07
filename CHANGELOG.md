@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- PR Checks validates `.github/dependabot.yml` against Dependabot's schema
+  (`check-jsonschema==0.38.2`, "Dependabot Config" job), and Dependabot now
+  proposes the Dockerfile's base-image updates (TD-2026-09-02)
 - The SDK's diagnostic events drive the tracked connection state
   (`src/iggy_client/events.rs`, resolving TD-2026-07-02): `Connected` triggers
   an immediate ping, so an outage ends as soon as the SDK reconnects, and

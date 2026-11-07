@@ -3,10 +3,11 @@
 # Automatically creates PRs to update dependencies.
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
 #
-# Validate edits against https://json.schemastore.org/dependabot-2.0.json.
-# This file failed that schema from 2025-12-01 until the RustSec 2026-09
-# remediation, and in that time no Dependabot run or PR appeared and no
-# check failed. Nothing in CI validates it yet (TD-2026-09-02).
+# PR Checks' "Dependabot Config" job validates this file against
+# Dependabot's published schema (check-jsonschema's vendor.dependabot) on
+# every pull request (TD-2026-09-02). It failed that schema from 2025-12-01
+# until the RustSec 2026-09 remediation, and in that time no Dependabot run
+# or PR appeared and no check failed.
 #
 # Reviewers come from .github/CODEOWNERS (GitHub removed the `reviewers`
 # key in 2025). Labels are left at Dependabot's defaults, which it creates
@@ -63,5 +64,29 @@ updates:
     groups:
       # Group all GitHub Actions updates
       github-actions:
+        patterns:
+          - "*"
+
+  # ==========================================================================
+  # Docker base images (Dockerfile only)
+  # ==========================================================================
+  # The Dockerfile's FROM images (the Rust builder and the Debian runtime) are
+  # pinned tags nothing else updates; the image sat unbuildable from
+  # 2026-07-04 until 0.4.1 (TD-2026-09-02). CI fails a Rust image below
+  # Cargo.toml's rust-version. docker-compose.yaml is deliberately not
+  # covered: its apache/iggy tag must move in lockstep with the Rust SDK
+  # (ADR-0001), so a lone image bump would be a broken PR.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      docker:
         patterns:
           - "*"
