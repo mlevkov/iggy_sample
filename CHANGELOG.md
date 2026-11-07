@@ -71,6 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The provisioned Grafana "Iggy Overview" dashboard charted metric names
+  the server does not export (`iggy_messages_bytes_total`,
+  `http_request_duration_seconds_bucket`, `iggy_streams_count`), so four of
+  its six panels never showed data. They now chart what 0.9 exports: request
+  rate (`http_requests_total`), net stored-message rate (`deriv(messages)`),
+  connected `clients`, and `streams`/`topics`/`partitions`. The status panel
+  no longer renders `up` as a percentage
 - The README no longer says coverage is uploaded to Codecov: every upload
   whose log is still retained was rejected for want of a token
   (TD-2026-09-03)
