@@ -48,7 +48,7 @@ use subtle::ConstantTimeEq;
 use tower::{Layer, Service};
 use tracing::{debug, error, warn};
 
-use super::ip::extract_client_ip_with_validation;
+use super::ip::{client_ip_is_verified, extract_client_ip_with_validation};
 use super::rate_limit::TrustedProxyConfig;
 
 /// Header name for API key.
@@ -101,14 +101,21 @@ type AuthFailureLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, De
 
 /// Per-IP brute-force guard: a failure budget plus the deadlines of active blocks.
 ///
-/// The service consults [`AuthFailureGuard::remaining_block`] BEFORE it compares
-/// the API key. While an IP is blocked, every request from it receives the same
-/// `429`, so the block tells an attacker nothing about whether a guess was
-/// correct. Comparing first (as this module once did) let a blocked IP keep
-/// guessing at the general rate limit and tell a hit (`200`) from a miss (`429`).
-///
 /// Only failures are charged to the budget, so valid-key clients are never
-/// throttled by it unless their IP is blocked by failures.
+/// throttled by it. What happens once an IP exhausts it depends on whether the
+/// IP is verified (see [`client_ip_is_verified`]):
+///
+/// - **Verified** (`TRUSTED_PROXIES` set, peer address available): the IP is
+///   blocked, and the service consults [`AuthFailureGuard::remaining_block`]
+///   BEFORE it compares the key. Every request from a blocked IP gets the same
+///   `429`, so the block tells an attacker nothing about whether a guess was
+///   correct. Comparing first let a blocked IP keep guessing at the general
+///   rate limit and tell a hit (`200`) from a miss (`429`).
+/// - **Unverified**: further failures get `429`, but a valid key still
+///   passes. The IP comes from headers any client can set, so an attacker
+///   escapes a block by rotating them; a block that refused valid keys would
+///   buy no protection and would let anyone lock out the shared `"unknown"`
+///   bucket or a spoofed victim IP.
 struct AuthFailureGuard {
     /// GCRA failure budget per IP (`DEFAULT_AUTH_FAILURE_LIMIT`/min, burst
     /// `DEFAULT_AUTH_FAILURE_BURST`).
@@ -152,21 +159,25 @@ impl AuthFailureGuard {
         }
     }
 
-    /// Charge one authentication failure to `client_ip` at `now`.
+    /// Charge one authentication failure to `client_ip`.
     ///
-    /// Returns the block duration when this failure found the budget
-    /// exhausted (the IP is blocked from `now` for that long), or `None` when
-    /// the failure fit in the budget.
-    fn record_failure(&self, client_ip: &str, now: Instant) -> Option<Duration> {
+    /// Returns how long until the budget admits another failure when this one
+    /// found it exhausted, or `None` when the failure fit in the budget.
+    fn charge_failure(&self, client_ip: &str) -> Option<Duration> {
         let not_until = self.limiter.check_key(&client_ip.to_owned()).err()?;
-        let block = not_until.wait_time_from(self.limiter.clock().now());
+        Some(not_until.wait_time_from(self.limiter.clock().now()))
+    }
 
+    /// Block `client_ip` for `duration` from `now`.
+    ///
+    /// Expired entries are swept first once the map reaches
+    /// `BLOCK_SWEEP_THRESHOLD`.
+    fn block(&self, client_ip: &str, now: Instant, duration: Duration) {
         let mut blocks = self.lock_blocks();
         if blocks.len() >= BLOCK_SWEEP_THRESHOLD {
             blocks.retain(|_, deadline| *deadline > now);
         }
-        blocks.insert(client_ip.to_owned(), now + block);
-        Some(block)
+        blocks.insert(client_ip.to_owned(), now + duration);
     }
 
     #[cfg(test)]
@@ -183,15 +194,17 @@ impl AuthFailureGuard {
 /// # Brute Force Protection
 ///
 /// Authentication FAILURES are charged to a per-IP budget; valid-key requests
-/// never consume from it. Once an IP exhausts its budget it is blocked: every
-/// request from it, valid key or not, receives `429 Too Many Requests` until
-/// the budget refills. The block is checked before the key is compared, so a
-/// blocked IP cannot use the response to tell a correct guess from a wrong one.
+/// never consume from it. Once a verified IP (`TRUSTED_PROXIES` set, peer
+/// address available) exhausts its budget it is blocked: every request from
+/// it, valid key or not, receives `429 Too Many Requests` until the budget
+/// refills. The block is checked before the key is compared, so a blocked IP
+/// cannot use the response to tell a correct guess from a wrong one. A client
+/// sharing that IP with an attacker is locked out with it.
 ///
-/// The block is keyed on the client IP, so a client sharing an IP with an
-/// attacker is locked out with it. Without `TRUSTED_PROXIES`, that IP comes
-/// from client-supplied headers and header-less clients share one bucket
-/// (see `middleware::ip`).
+/// Without `TRUSTED_PROXIES` the client IP comes from client-supplied headers,
+/// so the protection is advisory: failures past the budget get `429`, valid
+/// keys still pass, and rotating the headers escapes it. Startup warns about
+/// this configuration.
 #[derive(Clone)]
 pub struct ApiKeyAuth {
     /// Expected API key (None = auth disabled)
@@ -320,12 +333,15 @@ where
                 return inner.call(req).await;
             }
 
+            let ip_verified = client_ip_is_verified(&req, &trusted_proxies);
             let client_ip = extract_client_ip_with_validation(&req, &trusted_proxies).into_owned();
 
             // Refuse a blocked IP BEFORE comparing its key. Comparing first
             // would answer every guess (200 for a hit, 429 for a miss), so the
-            // block would not slow a brute-force attack at all.
-            if let Some(ref guard) = failure_guard
+            // block would not slow a brute-force attack at all. Unverified
+            // IPs are never blocked (see AuthFailureGuard).
+            if ip_verified
+                && let Some(ref guard) = failure_guard
                 && let Some(remaining) = guard.remaining_block(&client_ip, Instant::now())
             {
                 debug!(client_ip = %client_ip, "Refusing request from blocked IP");
@@ -348,14 +364,18 @@ where
                 }
                 provided => {
                     // Auth failure: charge it to this IP. A failure that finds
-                    // the budget exhausted blocks the IP.
+                    // the budget exhausted gets 429, and blocks a verified IP.
                     if let Some(ref guard) = failure_guard
-                        && let Some(block) = guard.record_failure(&client_ip, Instant::now())
+                        && let Some(wait) = guard.charge_failure(&client_ip)
                     {
-                        let retry_after = retry_after_secs(block);
+                        if ip_verified {
+                            guard.block(&client_ip, Instant::now(), wait);
+                        }
+                        let retry_after = retry_after_secs(wait);
 
                         error!(
                             client_ip = %client_ip,
+                            ip_verified,
                             retry_after_secs = retry_after,
                             "IP blocked due to excessive auth failures"
                         );
@@ -493,6 +513,8 @@ fn rate_limited_response(retry_after: u64) -> Response<Body> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
 
     /// Minimal inner service returning 200 OK, for driving the auth layer.
     #[derive(Clone)]
@@ -541,27 +563,35 @@ mod tests {
         }
     }
 
-    fn request_with_key_from(key: Option<&str>, forwarded_for: &str) -> Request<Body> {
+    /// Auth layer with `TRUSTED_PROXIES` set, so peer-addressed requests are
+    /// verified.
+    fn verified_auth() -> ApiKeyAuth {
+        let trusted = TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string()]).unwrap();
+        ApiKeyAuth::with_trusted_proxies(Some("secret".to_string()), vec![], Arc::new(trusted))
+    }
+
+    /// Request from the direct peer `peer`. Outside the trusted range, so a
+    /// verified layer keys it on the peer address.
+    fn request_from_peer(key: Option<&str>, peer: [u8; 4]) -> Request<Body> {
         let mut req = request_with_key(key);
-        req.headers_mut()
-            .insert("x-forwarded-for", forwarded_for.parse().unwrap());
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((peer, 40_000))));
         req
     }
 
-    /// Send failing requests until one is refused with 429; return how many
-    /// were answered 401 first. Panics if the budget is never exhausted.
-    async fn exhaust_failure_budget<S>(svc: &mut S, forwarded_for: &str) -> u32
+    /// Send failing requests built by `make_request` until one is refused
+    /// with 429; return how many were answered 401 first. Panics if the
+    /// budget is never exhausted.
+    async fn exhaust_failure_budget<S, F>(svc: &mut S, make_request: F) -> u32
     where
         S: Service<Request<Body>, Response = Response<Body>, Error = std::convert::Infallible>,
+        F: Fn(Option<&str>) -> Request<Body>,
     {
         let beyond_budget =
             2 * (DEFAULT_AUTH_FAILURE_LIMIT.get() + DEFAULT_AUTH_FAILURE_BURST.get()) + 10;
         let mut unauthorized = 0;
         for _ in 0..beyond_budget {
-            let resp = svc
-                .call(request_with_key_from(Some("wrong"), forwarded_for))
-                .await
-                .unwrap();
+            let resp = svc.call(make_request(Some("wrong"))).await.unwrap();
             match resp.status() {
                 StatusCode::UNAUTHORIZED => unauthorized += 1,
                 StatusCode::TOO_MANY_REQUESTS => return unauthorized,
@@ -586,29 +616,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_failures_throttled_after_budget_exhausted() {
-        let auth = ApiKeyAuth::with_defaults(Some("secret".to_string()));
-        let mut svc = auth.layer(OkService);
+        let mut svc = verified_auth().layer(OkService);
 
         // Failures are answered 401 until the burst is spent, then 429.
-        let unauthorized = exhaust_failure_budget(&mut svc, "203.0.113.1").await;
+        let unauthorized =
+            exhaust_failure_budget(&mut svc, |key| request_from_peer(key, [203, 0, 113, 1])).await;
         assert_eq!(unauthorized, DEFAULT_AUTH_FAILURE_BURST.get());
     }
 
     #[tokio::test]
-    async fn test_blocked_ip_is_refused_even_with_valid_key() {
-        let auth = ApiKeyAuth::with_defaults(Some("secret".to_string()));
-        let mut svc = auth.layer(OkService);
-        exhaust_failure_budget(&mut svc, "203.0.113.1").await;
+    async fn test_blocked_verified_ip_is_refused_even_with_valid_key() {
+        let mut svc = verified_auth().layer(OkService);
+        exhaust_failure_budget(&mut svc, |key| request_from_peer(key, [203, 0, 113, 1])).await;
 
         // While blocked, the correct key gets the same answer as a wrong one.
         // A regression to comparing the key before the block check returns
         // 200 here, which turns the block into a hit/miss oracle.
         let with_valid = svc
-            .call(request_with_key_from(Some("secret"), "203.0.113.1"))
+            .call(request_from_peer(Some("secret"), [203, 0, 113, 1]))
             .await
             .unwrap();
         let with_wrong = svc
-            .call(request_with_key_from(Some("wrong"), "203.0.113.1"))
+            .call(request_from_peer(Some("wrong"), [203, 0, 113, 1]))
             .await
             .unwrap();
         let (valid_status, valid_retry, valid_body) = response_parts(with_valid).await;
@@ -621,55 +650,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_block_does_not_affect_valid_key_from_other_ip() {
-        let auth = ApiKeyAuth::with_defaults(Some("secret".to_string()));
-        let mut svc = auth.layer(OkService);
-        exhaust_failure_budget(&mut svc, "203.0.113.1").await;
+    async fn test_block_does_not_affect_valid_key_from_other_verified_ip() {
+        let mut svc = verified_auth().layer(OkService);
+        exhaust_failure_budget(&mut svc, |key| request_from_peer(key, [203, 0, 113, 1])).await;
 
         let resp = svc
-            .call(request_with_key_from(Some("secret"), "203.0.113.2"))
+            .call(request_from_peer(Some("secret"), [203, 0, 113, 2]))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    #[test]
-    fn test_record_failure_blocks_only_once_budget_is_exhausted() {
-        let guard = AuthFailureGuard::new();
-        let now = Instant::now();
+    #[tokio::test]
+    async fn test_unverified_ip_throttles_failures_but_never_blocks_valid_key() {
+        // No TRUSTED_PROXIES: every header-less client shares the "unknown"
+        // bucket. One client's failures must not lock the others out. A
+        // regression that blocks unverified IPs returns 429 for the valid key.
+        let mut svc = ApiKeyAuth::with_defaults(Some("secret".to_string())).layer(OkService);
+        exhaust_failure_budget(&mut svc, request_with_key).await;
+        let guard = svc.failure_guard.as_ref().unwrap();
+        assert_eq!(
+            guard.tracked_blocks(),
+            0,
+            "unverified IPs must not enter the block map (spoofed values would fill it)"
+        );
 
-        for i in 0..DEFAULT_AUTH_FAILURE_BURST.get() {
-            assert!(
-                guard.record_failure("198.51.100.7", now).is_none(),
-                "failure {i} within the burst must not block"
-            );
-            assert!(guard.remaining_block("198.51.100.7", now).is_none());
-        }
+        let valid = svc.call(request_with_key(Some("secret"))).await.unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
 
-        let block = guard
-            .record_failure("198.51.100.7", now)
-            .expect("the failure past the burst must block");
-        assert!(block > Duration::ZERO);
-        assert_eq!(guard.remaining_block("198.51.100.7", now), Some(block));
+        let wrong = svc.call(request_with_key(Some("wrong"))).await.unwrap();
+        assert_eq!(wrong.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn test_trusted_proxies_without_peer_address_is_unverified() {
+        // TRUSTED_PROXIES set but no ConnectInfo: the IP falls back to
+        // headers, so it is unverified and must not block a valid key.
+        let mut svc = verified_auth().layer(OkService);
+        let from_header = |key: Option<&str>| {
+            let mut req = request_with_key(key);
+            req.headers_mut()
+                .insert("x-forwarded-for", "203.0.113.1".parse().unwrap());
+            req
+        };
+        exhaust_failure_budget(&mut svc, from_header).await;
+
+        let resp = svc.call(from_header(Some("secret"))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[test]
-    fn test_remaining_block_expires_and_drops_entry() {
+    fn test_charge_failure_reports_exhaustion_only_past_the_burst() {
+        let guard = AuthFailureGuard::new();
+
+        for i in 0..DEFAULT_AUTH_FAILURE_BURST.get() {
+            assert!(
+                guard.charge_failure("198.51.100.7").is_none(),
+                "failure {i} within the burst must fit the budget"
+            );
+        }
+        let wait = guard
+            .charge_failure("198.51.100.7")
+            .expect("the failure past the burst must find the budget exhausted");
+        assert!(wait > Duration::ZERO);
+        assert_eq!(guard.tracked_blocks(), 0, "charging alone must not block");
+    }
+
+    #[test]
+    fn test_block_sets_remaining_and_expires_with_entry_removed() {
         let guard = AuthFailureGuard::new();
         let now = Instant::now();
-        for _ in 0..DEFAULT_AUTH_FAILURE_BURST.get() {
-            guard.record_failure("198.51.100.7", now);
-        }
-        let block = guard.record_failure("198.51.100.7", now).unwrap();
+        let duration = Duration::from_secs(6);
+        guard.block("198.51.100.7", now, duration);
+
+        assert_eq!(guard.remaining_block("198.51.100.7", now), Some(duration));
         assert_eq!(guard.tracked_blocks(), 1);
 
-        let after = now + block;
-        assert!(guard.remaining_block("198.51.100.7", after).is_none());
+        assert!(
+            guard
+                .remaining_block("198.51.100.7", now + duration)
+                .is_none()
+        );
         assert_eq!(guard.tracked_blocks(), 0, "expired block was not removed");
     }
 
     #[test]
-    fn test_record_failure_sweeps_expired_blocks_at_threshold() {
+    fn test_block_sweeps_expired_entries_at_threshold() {
         let guard = AuthFailureGuard::new();
         let past = Instant::now();
         {
@@ -679,10 +745,11 @@ mod tests {
             }
         }
 
-        let now = past + Duration::from_secs(1);
-        for _ in 0..=DEFAULT_AUTH_FAILURE_BURST.get() {
-            guard.record_failure("198.51.100.7", now);
-        }
+        guard.block(
+            "198.51.100.7",
+            past + Duration::from_secs(1),
+            Duration::from_secs(6),
+        );
         assert_eq!(guard.tracked_blocks(), 1, "expired blocks were not swept");
     }
 

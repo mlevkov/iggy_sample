@@ -50,12 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The auth brute-force block is now checked before the API key is compared.
   The key used to be compared first, so a blocked IP still got an answer to
   every guess (200 for the right key, 429 for a wrong one), and the block
-  did not slow guessing below the general rate limit. Every request from a
-  blocked IP now gets the same 429 until the failure budget refills. A
-  client that shares an IP with an attacker is now locked out along with it
-- Startup warns when `API_KEY` is set without `TRUSTED_PROXIES`: the block
-  is then keyed on client-supplied headers, which an attacker can rotate to
-  escape it or spoof to lock out others
+  did not slow guessing below the general rate limit. With `TRUSTED_PROXIES`
+  set, every request from a blocked IP now gets the same 429 until the
+  failure budget refills, and a client that shares an IP with an attacker is
+  locked out along with it. Without `TRUSTED_PROXIES` the client IP comes
+  from spoofable headers, so failures are still throttled but valid keys are
+  never blocked; otherwise anyone could lock out every header-less client
+- Startup warns when `API_KEY` is set without `TRUSTED_PROXIES`: brute-force
+  protection is then advisory, since rotating `X-Forwarded-For` gives an
+  attacker a fresh failure budget
 
 ## [0.4.1] - 2026-09-23
 

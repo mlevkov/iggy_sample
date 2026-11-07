@@ -311,6 +311,23 @@ pub fn extract_client_ip_with_validation<B>(
     extract_client_ip(req)
 }
 
+/// Whether [`extract_client_ip_with_validation`] attributes `req` to a
+/// verified address rather than to client-supplied headers.
+///
+/// True exactly when that function takes its trusted-proxy branch:
+/// `TRUSTED_PROXIES` is configured and the peer address (`ConnectInfo`) is
+/// available. The client IP is then the peer address, or a forwarded value
+/// vouched for by a trusted proxy, and is never [`UNKNOWN_IP`]. Otherwise it
+/// comes from headers any client can set (or is the shared `"unknown"`
+/// bucket), so it cannot be relied on to single out one client.
+///
+/// Keep this in step with the first branch of
+/// [`extract_client_ip_with_validation`].
+#[inline]
+pub fn client_ip_is_verified<B>(req: &Request<B>, trusted_proxies: &TrustedProxyConfig) -> bool {
+    trusted_proxies.is_enabled() && req.extensions().get::<ConnectInfo<SocketAddr>>().is_some()
+}
+
 /// Extract client IP from request headers only (no peer-address validation).
 ///
 /// This is the header-only fallback path used by
@@ -452,6 +469,36 @@ mod tests {
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from((peer, 12345))));
         req
+    }
+
+    #[test]
+    fn test_client_ip_is_verified_requires_trusted_proxies_and_peer_address() {
+        let trusted = TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string()]).unwrap();
+        let untrusted_default = TrustedProxyConfig::default();
+        let with_peer = req_with_peer(None, [203, 0, 113, 9]);
+        let without_peer = Request::builder()
+            .header("x-forwarded-for", "203.0.113.9")
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(client_ip_is_verified(&with_peer, &trusted));
+        assert!(!client_ip_is_verified(&with_peer, &untrusted_default));
+        assert!(!client_ip_is_verified(&without_peer, &trusted));
+    }
+
+    #[test]
+    fn test_verified_requests_never_resolve_to_unknown() {
+        // The guarantee client_ip_is_verified documents: a verified request
+        // is keyed on a real address even when it carries no headers.
+        let trusted = TrustedProxyConfig::try_new(&["10.0.0.0/8".to_string()]).unwrap();
+        for peer in [[203, 0, 113, 9], [10, 0, 0, 5]] {
+            let req = req_with_peer(None, peer);
+            assert!(client_ip_is_verified(&req, &trusted));
+            assert_ne!(
+                extract_client_ip_with_validation(&req, &trusted),
+                UNKNOWN_IP
+            );
+        }
     }
 
     #[test]

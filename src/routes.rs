@@ -171,11 +171,11 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
         info!("API key authentication enabled");
         if config.trusted_proxies.is_empty() {
             warn!(
-                "API_KEY is set but TRUSTED_PROXIES is empty: the brute-force block \
-                 is keyed on client-supplied X-Forwarded-For/X-Real-IP, so attackers \
-                 can rotate it to escape the block or spoof it to lock out other \
-                 clients, and every client without those headers shares one bucket. \
-                 Set TRUSTED_PROXIES in production"
+                "API_KEY is set but TRUSTED_PROXIES is empty: brute-force protection \
+                 is advisory. Client IPs come from client-supplied X-Forwarded-For/\
+                 X-Real-IP, which an attacker can rotate for a fresh failure budget, \
+                 so failing IPs are throttled but never blocked. Set TRUSTED_PROXIES \
+                 in production"
             );
         }
         router = router.layer(auth_layer);
