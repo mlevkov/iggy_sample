@@ -88,7 +88,7 @@ pub use params::PollParams;
 
 // Internal-only: the error classifier's fallback contract (must be a
 // NON-connection variant) is too easy to violate to expose publicly.
-use helpers::classify_iggy_error;
+use helpers::{classify_connect_error, classify_iggy_error};
 
 // =============================================================================
 // Constants
@@ -240,8 +240,15 @@ impl IggyClientWrapper {
         tokio::time::timeout(timeout, wrapper.connect())
             .await
             .map_err(|_| {
+                // Against a 0.8 server, SDK 0.11 connects and then waits
+                // forever for a sign-in reply it cannot parse: no error, just
+                // this timeout. Say so, since it is the likeliest cause once
+                // the address is known to be right.
                 AppError::ConnectionFailed(format!(
-                    "Initial connection timed out after {:?}",
+                    "Initial connection timed out after {:?}. If the server is \
+                     reachable, check that it runs Iggy server 0.9.x: this build's \
+                     SDK (0.11) speaks only the 0.9 wire protocol, and against a \
+                     0.8 server sign-in hangs instead of failing",
                     timeout
                 ))
             })??;
@@ -261,10 +268,7 @@ impl IggyClientWrapper {
     pub async fn connect(&self) -> AppResult<()> {
         let client = self.client.read().await;
 
-        client
-            .connect()
-            .await
-            .map_err(|e| AppError::ConnectionFailed(e.to_string()))?;
+        client.connect().await.map_err(classify_connect_error)?;
 
         self.state.set_connected(true);
         info!("Successfully connected to Iggy server");
@@ -408,6 +412,14 @@ impl IggyClientWrapper {
                     let attempt_timeout = self.config.operation_timeout / 2;
                     match tokio::time::timeout(attempt_timeout, new_client.connect()).await {
                         Ok(Ok(())) => {}
+                        // A protocol mismatch will not heal on retry; with the
+                        // default MAX_RECONNECT_ATTEMPTS=0 (infinite) the
+                        // session would otherwise spin forever.
+                        Ok(Err(e @ IggyError::IncompatibleProtocolVersion(..))) => {
+                            error!(attempt, error = %e, "Server protocol is incompatible; giving up reconnection");
+                            let _ = new_client.shutdown().await;
+                            return Err(classify_connect_error(e));
+                        }
                         Ok(Err(e)) => {
                             warn!(attempt, error = %e, "Reconnection attempt failed");
                             // Best-effort cleanup: connect() may already have

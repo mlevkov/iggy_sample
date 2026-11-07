@@ -629,13 +629,22 @@ All errors return structured JSON responses:
 | `disconnected` | 503 | Lost connection during operation |
 | `connection_reset` | 503 | Connection was reset by peer |
 | `circuit_open` | 503 | Circuit breaker open, failing fast |
-| `operation_timeout` | 503 | Iggy operation exceeded the timeout |
+| `not_accepted` | 503 | Iggy did not admit the request; nothing was applied, safe to retry |
+| `outcome_unknown` | 503 | Iggy could not confirm whether the request was applied; resending may duplicate it |
+| `incompatible_broker` | 502 | Iggy speaks a protocol version this build cannot use |
+| `timeout` | 504 | Iggy operation exceeded the timeout |
 | `stream_error` | 500 | Stream operation failed |
 | `topic_error` | 500 | Topic operation failed |
 | `send_error` | 500 | Message send failed |
 | `poll_error` | 500 | Message poll failed |
 | `not_found` | 404 | Resource not found |
 | `bad_request` | 400 | Invalid request data |
+
+One Iggy outcome is not an error: when the server reports that a write was
+already applied but its reply is gone (`RequestAlreadyApplied`), the
+service answers **`202 Accepted`** with
+`{"status": "applied", "message": "..."}`, so clients treat the write as done
+and do not resend it.
 
 ## Security
 

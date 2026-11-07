@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Iggy 0.9 request outcomes get their own responses instead of a generic
+  500: `TransientNotAccepted` -> `503 not_accepted` (nothing applied, safe to
+  retry), `TransientNotCommitted` -> `503 outcome_unknown` (resending may
+  duplicate), and `RequestAlreadyApplied` -> `202 Accepted` with
+  `{"status":"applied"}`. None of them triggers the wrapper's
+  reconnect-and-retry or counts as a circuit-breaker failure, since the SDK
+  has already replayed each one
+- `IncompatibleProtocolVersion` maps to `502 incompatible_broker`, ends a
+  reconnect session instead of retrying it forever, and makes startup exit
+  with `EX_PROTOCOL` (76) rather than `EX_UNAVAILABLE`
+- The startup connection-timeout message says to check the server version:
+  against a 0.8 server, SDK 0.11 hangs at sign-in instead of failing
 - `scripts/verify-release.sh` checks a release.yml run step by step instead
   of trusting its conclusion: that the tag names the commit the run built;
   what each step printed; the release notes; that every asset is
@@ -74,6 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The README's error table listed `operation_timeout` as 503; the service
+  answers `timeout` with 504
 - The provisioned Grafana "Iggy Overview" dashboard charted metric names
   the server does not export (`iggy_messages_bytes_total`,
   `http_request_duration_seconds_bucket`, `iggy_streams_count`), so four of

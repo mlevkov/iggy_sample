@@ -506,6 +506,55 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn request_outcome_errors_are_never_retried_or_counted() {
+        // Iggy 0.9 request outcomes: a retry could resend a request the
+        // server applied (AlreadyApplied) or may have applied
+        // (OutcomeUnknown). Threshold 1, so one recorded failure would open
+        // the circuit.
+        let outcomes: [fn() -> AppError; 4] = [
+            || AppError::NotAccepted("not admitted".into()),
+            || AppError::OutcomeUnknown("not committed".into()),
+            || AppError::AlreadyApplied("reply gone".into()),
+            || AppError::IncompatibleServer("protocol".into()),
+        ];
+        for make_error in outcomes {
+            let breaker = breaker_with(1);
+            let calls = Arc::new(AtomicU32::new(0));
+            let reconnects = Arc::new(AtomicU32::new(0));
+
+            let op_calls = Arc::clone(&calls);
+            let result: AppResult<u32> = run_resilient(
+                &breaker,
+                TIMEOUT,
+                true,
+                || true,
+                fake_reconnect(&reconnects, Ok(())),
+                move || {
+                    let calls = Arc::clone(&op_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err(make_error())
+                    }
+                },
+            )
+            .await;
+
+            let error = result.expect_err("the outcome error must surface");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{error:?} was retried");
+            assert_eq!(
+                reconnects.load(Ordering::SeqCst),
+                0,
+                "{error:?} reconnected"
+            );
+            assert_eq!(
+                breaker.state(),
+                CircuitState::Closed,
+                "{error:?} counted as a breaker failure"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn reconnect_failure_propagates_without_retry() {
         let breaker = breaker_with(5);
         let calls = Arc::new(AtomicU32::new(0));

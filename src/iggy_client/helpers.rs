@@ -36,7 +36,32 @@ pub fn classify_iggy_error(error: IggyError, fallback: fn(String) -> AppError) -
         | IggyError::WebSocketReceiveError
         | IggyError::WebSocketSendError => AppError::ConnectionReset(error.to_string()),
         IggyError::CannotEstablishConnection => AppError::ConnectionFailed(error.to_string()),
+        // Request outcomes a 0.9 server reports. The SDK has already replayed
+        // each one before it surfaces, so none is a connection error: a
+        // reconnect-and-retry here would resend a request whose outcome the
+        // server could not confirm (TransientNotCommitted) or that it already
+        // applied (RequestAlreadyApplied).
+        IggyError::TransientNotAccepted => AppError::NotAccepted(error.to_string()),
+        IggyError::TransientNotCommitted => AppError::OutcomeUnknown(error.to_string()),
+        IggyError::RequestAlreadyApplied => AppError::AlreadyApplied(error.to_string()),
+        IggyError::IncompatibleProtocolVersion(..) => {
+            AppError::IncompatibleServer(error.to_string())
+        }
         other => fallback(other.to_string()),
+    }
+}
+
+/// Classify an error from `connect()` (connect plus sign-in).
+///
+/// A protocol-version mismatch becomes `IncompatibleServer`, which is not a
+/// connection error, so neither startup nor a reconnect session retries it.
+/// Every other failure is a `ConnectionFailed`, as before.
+pub fn classify_connect_error(error: IggyError) -> AppError {
+    match error {
+        IggyError::IncompatibleProtocolVersion(..) => {
+            AppError::IncompatibleServer(error.to_string())
+        }
+        other => AppError::ConnectionFailed(other.to_string()),
     }
 }
 
@@ -178,6 +203,52 @@ mod tests {
         let classified =
             classify_iggy_error(IggyError::CannotEstablishConnection, AppError::SendError);
         assert!(matches!(classified, AppError::ConnectionFailed(_)));
+    }
+
+    #[test]
+    fn test_classify_request_outcome_variants_are_not_connection_errors() {
+        // A connection classification would send these down the
+        // reconnect-and-retry path and resend the request.
+        type IsExpected = fn(&AppError) -> bool;
+        let cases: [(IggyError, IsExpected); 4] = [
+            (IggyError::TransientNotAccepted, |e| {
+                matches!(e, AppError::NotAccepted(_))
+            }),
+            (IggyError::TransientNotCommitted, |e| {
+                matches!(e, AppError::OutcomeUnknown(_))
+            }),
+            (IggyError::RequestAlreadyApplied, |e| {
+                matches!(e, AppError::AlreadyApplied(_))
+            }),
+            (IggyError::IncompatibleProtocolVersion(1, 2, 3), |e| {
+                matches!(e, AppError::IncompatibleServer(_))
+            }),
+        ];
+        for (error, is_expected) in cases {
+            let label = format!("{error:?}");
+            let classified = classify_iggy_error(error, AppError::SendError);
+            assert!(is_expected(&classified), "{label}: got {classified:?}");
+            assert!(
+                !super::super::resilience::is_connection_error(&classified),
+                "{label} must not be a connection error"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_connect_error_isolates_protocol_mismatch() {
+        assert!(matches!(
+            classify_connect_error(IggyError::IncompatibleProtocolVersion(1, 2, 3)),
+            AppError::IncompatibleServer(_)
+        ));
+        assert!(matches!(
+            classify_connect_error(IggyError::CannotEstablishConnection),
+            AppError::ConnectionFailed(_)
+        ));
+        assert!(matches!(
+            classify_connect_error(IggyError::InvalidCredentials),
+            AppError::ConnectionFailed(_)
+        ));
     }
 
     #[test]

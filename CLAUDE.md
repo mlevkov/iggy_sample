@@ -121,6 +121,14 @@ The fuzz tests verify that validation functions never panic on any input.
 - Connection errors are detected by matching explicit `AppError` enum variants
   (`ConnectionFailed`/`Disconnected`/`ConnectionReset`), never by string
   matching on error text — the reconnection logic depends on this.
+- Iggy 0.9 request outcomes (`TransientNotAccepted`, `TransientNotCommitted`,
+  `RequestAlreadyApplied`) map to `NotAccepted`/`OutcomeUnknown`/
+  `AlreadyApplied`, deliberately **not** connection errors: the SDK has
+  already replayed them, and the wrapper's reconnect-and-retry would resend a
+  write the server applied or may have applied. `AlreadyApplied` answers
+  `202`. `IncompatibleProtocolVersion` maps to `IncompatibleServer`, which
+  stops a reconnect session (otherwise infinite at `MAX_RECONNECT_ATTEMPTS=0`)
+  and exits startup with `EX_PROTOCOL`.
 
 ## Partition Indexing
 
