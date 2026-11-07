@@ -227,6 +227,24 @@ jobs:
           fi
 
   # ==========================================================================
+  # Dependabot configuration (TD-2026-09-02)
+  # ==========================================================================
+  # GitHub raises no alert for an invalid dependabot.yml: it simply stops
+  # running, which looks the same as "nothing to update". This file failed
+  # the schema for nine months unnoticed. check-jsonschema bundles
+  # Dependabot's schema (vendor.dependabot); pinned per TD-2026-07-07's
+  # supply-chain posture, to a release older than two weeks when chosen.
+  dependabot-config:
+    name: Dependabot Config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # pipx is preinstalled on GitHub's ubuntu runners
+      - name: Validate .github/dependabot.yml
+        run: pipx run check-jsonschema==0.38.2 --builtin-schema vendor.dependabot .github/dependabot.yml
+
+  # ==========================================================================
   # PR checklist reminder
   # ==========================================================================
   checklist:

@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use iggy_sample::{AppState, Config, IggyClientWrapper, build_router, utils};
+use iggy_sample::{AppError, AppState, Config, IggyClientWrapper, build_router, utils};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -69,7 +69,12 @@ async fn run() -> Result<(), exitcode::ExitCode> {
     info!("Connecting to Iggy server...");
     let iggy_client = IggyClientWrapper::new(config.clone()).await.map_err(|e| {
         error!("Failed to connect to Iggy server: {e}");
-        exitcode::UNAVAILABLE
+        // A protocol mismatch is not an outage: EX_PROTOCOL tells a
+        // supervisor that restarting will not help.
+        match e {
+            AppError::IncompatibleServer(_) => exitcode::PROTOCOL,
+            _ => exitcode::UNAVAILABLE,
+        }
     })?;
     info!("Successfully connected to Iggy server");
     iggy_sample::metrics::set_connection_status(true);

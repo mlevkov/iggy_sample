@@ -27,7 +27,7 @@
               { "color": "red", "value": 90 }
             ]
           },
-          "unit": "percent"
+          "unit": "none"
         }
       },
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
@@ -112,7 +112,7 @@
       "targets": [
         {
           "expr": "rate(http_requests_total{job=\"iggy\"}[1m])",
-          "legendFormat": "{{method}} {{path}}",
+          "legendFormat": "requests/s",
           "refId": "A"
         }
       ]
@@ -156,7 +156,7 @@
             "mode": "absolute",
             "steps": [{ "color": "green", "value": null }]
           },
-          "unit": "bytes"
+          "unit": "short"
         }
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
@@ -170,12 +170,12 @@
         },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
-      "title": "Messages Throughput",
+      "title": "Message Rate (net)",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(iggy_messages_bytes_total{job=\"iggy\"}[1m])",
-          "legendFormat": "{{stream}} / {{topic}}",
+          "expr": "deriv(messages{job=\"iggy\"}[2m])",
+          "legendFormat": "stored messages/s",
           "refId": "A"
         }
       ]
@@ -219,7 +219,7 @@
             "mode": "absolute",
             "steps": [{ "color": "green", "value": null }]
           },
-          "unit": "s"
+          "unit": "short"
         }
       },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
@@ -233,18 +233,13 @@
         },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
-      "title": "Request Latency",
+      "title": "Connected Clients",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"iggy\"}[5m]))",
-          "legendFormat": "p95 {{method}}",
+          "expr": "clients{job=\"iggy\"}",
+          "legendFormat": "clients",
           "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"iggy\"}[5m]))",
-          "legendFormat": "p50 {{method}}",
-          "refId": "B"
         }
       ]
     },
@@ -280,13 +275,23 @@
         },
         "textMode": "auto"
       },
-      "title": "Active Streams",
+      "title": "Streams / Topics / Partitions",
       "type": "stat",
       "targets": [
         {
-          "expr": "iggy_streams_count{job=\"iggy\"}",
-          "legendFormat": "Streams",
+          "expr": "streams{job=\"iggy\"}",
+          "legendFormat": "streams",
           "refId": "A"
+        },
+        {
+          "expr": "topics{job=\"iggy\"}",
+          "legendFormat": "topics",
+          "refId": "B"
+        },
+        {
+          "expr": "partitions{job=\"iggy\"}",
+          "legendFormat": "partitions",
+          "refId": "C"
         }
       ]
     }
@@ -300,5 +305,5 @@
   "timezone": "browser",
   "title": "Iggy Overview",
   "uid": "iggy-overview",
-  "version": 1
+  "version": 2
 }
