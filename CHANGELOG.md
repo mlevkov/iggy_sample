@@ -86,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The integration fixture advertised `127.0.0.1` with the in-container port
+  8090. SDK 0.11 dials a node's advertised endpoint on failover, so a test
+  whose container stopped signed in to whatever Iggy listened on the host's
+  8090 (a local docker-compose stack). The container's listener now binds the
+  same free port the host maps
 - The README's error table listed `operation_timeout` as 503; the service
   answers `timeout` with 504
 - The provisioned Grafana "Iggy Overview" dashboard charted metric names

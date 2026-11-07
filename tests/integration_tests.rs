@@ -42,14 +42,22 @@ impl IggyContainer {
     // 0.9 speaks only the VSR wire protocol, so the two move together.
     const IMAGE: &'static str = "apache/iggy";
     const TAG: &'static str = "0.9.0";
-    const TCP_PORT: u16 = 8090;
 
     /// Start an Iggy container and return the mapped TCP port
     async fn start() -> (ContainerAsync<GenericImage>, Self) {
+        // The server advertises its address plus its OWN TCP port, and SDK
+        // 0.11 dials that endpoint on failover even against a single node.
+        // So the container listens on the same port the host maps, chosen
+        // free up front. With a fixed in-container 8090 the advertised
+        // endpoint was the host's 127.0.0.1:8090, and a client whose
+        // container stopped silently failed over to, and signed in at,
+        // whatever Iggy ran there (a local docker-compose stack).
+        let tcp_port = find_available_port();
+
         // Note: GenericImage methods (with_exposed_port, with_wait_for) must come before
         // ImageExt methods (with_env_var, with_privileged) due to type transformations
         let container = GenericImage::new(Self::IMAGE, Self::TAG)
-            .with_exposed_port(Self::TCP_PORT.tcp())
+            .with_exposed_port(tcp_port.tcp())
             // 0.9 no longer prints "Iggy server is running"; the HTTP
             // listener is the last listener to come up.
             .with_wait_for(WaitFor::message_on_stdout("server HTTP listener started"))
@@ -58,12 +66,13 @@ impl IggyContainer {
             .with_env_var("IGGY_ROOT_PASSWORD", "iggy")
             // The image's listeners default to loopback; bind 0.0.0.0 so the
             // mapped ports reach them.
-            .with_env_var("IGGY_TCP_ADDRESS", "0.0.0.0:8090")
+            .with_env_var("IGGY_TCP_ADDRESS", format!("0.0.0.0:{tcp_port}"))
             .with_env_var("IGGY_HTTP_ADDRESS", "0.0.0.0:3000")
             .with_env_var("IGGY_QUIC_ADDRESS", "0.0.0.0:8080")
             // 0.9 refuses to boot on a wildcard bind unless it knows the
-            // address clients dial. Tests dial the mapped port on loopback.
+            // address clients dial: loopback, at the identity-mapped port.
             .with_env_var("IGGY_NODE_ADVERTISED_ADDRESS", "127.0.0.1")
+            .with_mapped_port(tcp_port, tcp_port.tcp())
             // The default "numa:auto" aborts where the host exposes no NUMA
             // topology (Docker Desktop's VM among them).
             .with_env_var("IGGY_SHARDING_CPU_ALLOCATION", "all")
@@ -76,10 +85,14 @@ impl IggyContainer {
         // Give the server a moment to fully initialize all shards
         sleep(Duration::from_secs(3)).await;
 
-        let tcp_port = container
-            .get_host_port_ipv4(Self::TCP_PORT)
+        let mapped = container
+            .get_host_port_ipv4(tcp_port)
             .await
             .expect("Failed to get Iggy TCP port");
+        assert_eq!(
+            mapped, tcp_port,
+            "the advertised endpoint must be the one clients dial"
+        );
 
         (container, Self { tcp_port })
     }

@@ -157,6 +157,13 @@ the SDK error variants that do escape (`classify_iggy_error`), and runs live
 `ping` health probes so `/health` and `/ready` reflect reality during an
 outage rather than a latched startup flag.
 
+**Advertised endpoint = dialled endpoint.** After sign-in SDK 0.11 records a
+node's advertised address plus its own TCP port and fails over to it, even
+against a single node. If that endpoint reaches a different server, a client
+silently signs in there. docker-compose advertises `iggy` (the in-network
+name, port 8090). The integration fixture binds the container's listener to
+the same free port it maps on the host.
+
 ## Structured Concurrency
 
 Background tasks (stats refresh, health checks) are owned by a
