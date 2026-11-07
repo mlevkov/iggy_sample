@@ -86,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Iggy Web UI is served by the server itself at `http://localhost:3000/ui`
   (`IGGY_HTTP_WEB_UI=true`); the separate `iggy-web-ui` container and its
   port 3050 are gone
+- CI pins `Swatinem/rust-cache` to its v2.9.3 release commit in all 16
+  uses (TD-2026-09-05). The pin had been an untagged `master` head under a
+  `# v2` comment, so every github-actions Dependabot PR moved it to whatever
+  upstream merged last; with a tagged SHA Dependabot proposes releases
 
 ### Removed
 
@@ -135,6 +139,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on its own looked protected without being so. Set `TRUSTED_PROXIES` to
   your reverse proxy's ranges, or `ALLOW_UNVERIFIED_CLIENT_IPS=true` for
   local development, which starts with a warning
+- Bumped transitive `quinn-udp` 0.5.15 -> 0.5.16 (lockfile-only) to patch
+  GHSA-6pp4-4cxf-xf88 (high; no CVE or RustSec ID yet, so `cargo audit` does
+  not flag 0.5.15): after a truncated datagram, the Unix `recv_single`
+  fallback could keep `MSG_TRUNC` set and spin on non-blocking receives,
+  before any QUIC authentication, occupying the endpoint's runtime thread.
+  Narrowly reachable here: `quinn` comes in only through the iggy SDK's QUIC
+  transport, used only when `IGGY_CONNECTION_STRING` is `iggy+quic://`; the
+  affected path is the fallback used on Apple and BSD targets, not Linux's
+  batched receive; and it needs a datagram larger than the receive buffer.
+  The same lockfile refresh takes the patch releases of `jiff`, `log`,
+  `toml_edit`, `toml_datetime`, `sketches-ddsketch` and `spinning_top`
 
 ## [0.4.1] - 2026-09-23
 
