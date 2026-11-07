@@ -260,12 +260,14 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v7
-            # Preinstalled on GitHub's ubuntu runners; -s bash because the
-            # scripts are bash, and they must stay clean under it.
+            # Preinstalled on GitHub's ubuntu runners. scripts/ is bash;
+            # observability/ runs under the Iggy image's POSIX /bin/sh, so it
+            # is checked as sh.
             - name: Lint shell scripts
               run: |
                   shellcheck --version
                   shellcheck -s bash scripts/*.sh
+                  shellcheck -s sh observability/*.sh
 
     # ==========================================================================
     # Final status check (for branch protection)

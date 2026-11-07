@@ -103,8 +103,14 @@ docker-compose up -d
 This starts:
 - **Iggy Server** - Message streaming (ports 8090, 8080, 3000)
 - **Iggy Web UI** - Dashboard for managing streams/topics (port 3050)
+- **iggy-pat-init** - One-shot: creates the token Prometheus scrapes Iggy's `/metrics` with
 - **Prometheus** - Metrics collection (port 9090)
 - **Grafana** - Visualization dashboards (port 3001)
+
+> **Upgrading from server 0.8:** 0.9 cannot read 0.8 data, so the compose
+> file stores data in a new `iggy_data_0_9` volume. The old one can be
+> removed with `docker volume rm iggy_sample_iggy_data` (the prefix is the
+> compose project name, by default the checkout's directory name).
 
 ### 3. Run the Application
 
@@ -490,7 +496,7 @@ The project includes a complete observability stack for monitoring and managing 
 
 | Component | Port | Description |
 |-----------|------|-------------|
-| **Iggy Server** | 3000 | HTTP API + Prometheus metrics at `/metrics` |
+| **Iggy Server** | 3000 | HTTP API + Prometheus metrics at `/metrics` (bearer token required since 0.9) |
 | **Sample App metrics** | 9091 (host) | App Prometheus metrics (`METRICS_PORT` 9090 in-container) |
 | **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, users |
 | **Prometheus** | 9090 | Metrics collection with 15-day retention |
@@ -519,9 +525,15 @@ Access at http://localhost:3001 with credentials `admin/admin`.
 
 Iggy exposes Prometheus-compatible metrics:
 
+Since server 0.9, Iggy's `/metrics` requires a bearer credential (a JWT or a
+personal access token). The `iggy-pat-init` service creates a `prometheus`
+token on every `docker-compose up` and writes it to a volume Prometheus reads
+through `credentials_file`; the same token works for manual queries:
+
 ```bash
-# View raw metrics from Iggy
-curl http://localhost:3000/metrics
+# View raw metrics from Iggy, with the token iggy-pat-init wrote
+TOKEN=$(docker-compose run --rm --no-deps --entrypoint cat iggy-pat-init /secrets/iggy_pat)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/metrics
 
 # View the sample app's own metrics (message counters, reconnects,
 # circuit breaker state; host port 9091 under docker-compose)
@@ -535,6 +547,7 @@ curl 'http://localhost:9090/api/v1/query?query=up{job="iggy"}'
 
 ```
 observability/
+├── iggy-pat-init.sh             # Creates the /metrics scrape token
 ├── prometheus/
 │   └── prometheus.yml           # Scrape configuration
 └── grafana/

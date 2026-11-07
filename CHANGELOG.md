@@ -49,6 +49,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   NUMA topology is exposed, e.g. Docker Desktop)
 - SDK 0.11 no longer pulls in `paste`, so `deny.toml` drops the
   RUSTSEC-2024-0436 exception
+- docker-compose runs `apache/iggy:0.9.0` with the settings 0.9 requires
+  (explicit binds, `IGGY_NODE_ADVERTISED_ADDRESS=iggy`,
+  `IGGY_SHARDING_CPU_ALLOCATION=all`), the io_uring capability set upstream
+  uses (`SYS_NICE`, `seccomp:unconfined`, unlimited memlock) instead of
+  `privileged`, and an explicit `IGGY_PATH`. Data moves to a new
+  `iggy_data_0_9` volume: the old mount at `/iggy/data` never matched 0.9's
+  default data path, and 0.9 cannot read 0.8 data anyway
+- Prometheus scrapes Iggy's `/metrics`, which requires a bearer credential
+  since 0.9, with a personal access token. A new one-shot `iggy-pat-init`
+  service recreates it on every `up` (`observability/iggy-pat-init.sh`);
+  Prometheus starts only once it succeeds, so a failure is loud rather than
+  a blank dashboard
+- CI's shellcheck step also lints `observability/*.sh`, as POSIX sh
 
 ### Removed
 

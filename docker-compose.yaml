@@ -1,10 +1,21 @@
 services:
     # Apache Iggy message streaming server
-    # Pinned to the release paired with the Rust SDK 0.10 line (see Cargo.toml)
+    # Pinned to the release paired with the Rust SDK 0.11 line (see Cargo.toml).
+    # 0.9 speaks only the VSR wire protocol and cannot read 0.8 data, hence the
+    # versioned data volume below (ADR-0001).
     iggy:
-        image: apache/iggy:0.8.0
-        privileged: true
+        image: apache/iggy:0.9.0
         container_name: iggy-server
+        # io_uring needs these instead of full `privileged` (upstream's own
+        # compose uses the same set)
+        cap_add:
+            - SYS_NICE
+        security_opt:
+            - seccomp:unconfined
+        ulimits:
+            memlock:
+                soft: -1
+                hard: -1
         ports:
             # TCP transport (default)
             - "8090:8090"
@@ -13,19 +24,29 @@ services:
             # HTTP transport (also serves /metrics for Prometheus)
             - "3000:3000"
         volumes:
-            - iggy_data:/iggy/data
+            - iggy_data_0_9:/iggy/data
         environment:
             # Root user credentials
             - IGGY_ROOT_USERNAME=iggy
             - IGGY_ROOT_PASSWORD=iggy
-            # Server configuration
+            # Data directory, set explicitly: the default `local_data` is
+            # relative to the image's /app working directory
+            - IGGY_PATH=/iggy/data
+            # Listeners (the image defaults them to loopback)
             - IGGY_HTTP_ENABLED=true
             - IGGY_HTTP_ADDRESS=0.0.0.0:3000
             - IGGY_TCP_ENABLED=true
             - IGGY_TCP_ADDRESS=0.0.0.0:8090
             - IGGY_QUIC_ENABLED=true
             - IGGY_QUIC_ADDRESS=0.0.0.0:8080
-            # Metrics endpoint (Prometheus-compatible)
+            # 0.9 refuses a wildcard bind unless it knows the address clients
+            # dial; in-network clients reach this container as `iggy`
+            - IGGY_NODE_ADVERTISED_ADDRESS=iggy
+            # The default "numa:auto" aborts where no NUMA topology is exposed
+            # (Docker Desktop's VM among them); "all" uses every core
+            - IGGY_SHARDING_CPU_ALLOCATION=all
+            # Metrics endpoint (Prometheus-compatible). Since 0.9 it requires
+            # a bearer credential; see iggy-pat-init below
             - IGGY_HTTP_METRICS_ENABLED=true
             - IGGY_HTTP_METRICS_ENDPOINT=/metrics
         healthcheck:
@@ -35,6 +56,25 @@ services:
             retries: 5
             start_period: 10s
         restart: unless-stopped
+        networks:
+            - iggy-network
+
+    # One-shot: create the personal access token Prometheus scrapes /metrics
+    # with. The token is shown only at creation, so every run deletes and
+    # recreates it. The delete may exit non-zero (the CLI finds no keyring in
+    # the container) even when it succeeds; the create must not, so a failure
+    # stops Prometheus from starting instead of leaving its panels blank.
+    iggy-pat-init:
+        image: apache/iggy:0.9.0
+        container_name: iggy-pat-init
+        entrypoint: ["/bin/sh", "/scripts/iggy-pat-init.sh"]
+        volumes:
+            - ./observability/iggy-pat-init.sh:/scripts/iggy-pat-init.sh:ro
+            - iggy_secrets:/secrets
+        depends_on:
+            iggy:
+                condition: service_healthy
+        restart: "no"
         networks:
             - iggy-network
 
@@ -74,6 +114,8 @@ services:
         volumes:
             - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
             - prometheus_data:/prometheus
+            # Bearer token for the Iggy /metrics scrape (written by iggy-pat-init)
+            - iggy_secrets:/etc/prometheus/secrets:ro
         command:
             - "--config.file=/etc/prometheus/prometheus.yml"
             - "--storage.tsdb.path=/prometheus"
@@ -82,8 +124,8 @@ services:
             - "--web.console.libraries=/usr/share/prometheus/console_libraries"
             - "--web.console.templates=/usr/share/prometheus/consoles"
         depends_on:
-            iggy:
-                condition: service_healthy
+            iggy-pat-init:
+                condition: service_completed_successfully
         restart: unless-stopped
         networks:
             - iggy-network
@@ -131,7 +173,13 @@ services:
             - iggy-network
 
 volumes:
-    iggy_data:
+    # Versioned: 0.9 cannot read 0.8 data, and upstream promises no data
+    # migration before 1.0. A server upgrade that breaks the format gets a
+    # new volume rather than booting on the old one.
+    iggy_data_0_9:
+        driver: local
+    # Holds the Prometheus scrape token for Iggy /metrics
+    iggy_secrets:
         driver: local
     prometheus_data:
         driver: local
