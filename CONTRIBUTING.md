@@ -67,7 +67,7 @@ Keep the subject line at 72 characters or fewer (`.commitlintrc.json`).
 
 ### Prerequisites
 
-- Rust 1.93+ (edition 2024; the MSRV in `Cargo.toml`)
+- Rust 1.95+ (edition 2024; the MSRV in `Cargo.toml`)
 - Docker & Docker Compose
 - cargo-deny (for license/security checks)
 

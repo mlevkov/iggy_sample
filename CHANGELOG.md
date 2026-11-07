@@ -33,6 +33,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pages deployment (with how to restore it, and the limits of doing so) and
   the tag itself
 
+### Changed
+
+- **Breaking:** Apache Iggy server 0.8.0 -> 0.9.0 and Rust SDK 0.10.0 ->
+  0.11.0, together (ADR-0001). 0.9 speaks only the VSR wire protocol, so a
+  0.8 server cannot serve this build, and 0.9 does not read 0.8 data
+  directories: discard the old `iggy_data` volume before upgrading
+- MSRV 1.93.0 -> 1.95.0, which SDK 0.11 requires
+- Topic creation uses SDK 0.11's `TopicCreateOptions`; behaviour is
+  unchanged (no expiry, unlimited size)
+- The integration fixture runs `apache/iggy:0.9.0` with the settings 0.9
+  now requires: explicit `0.0.0.0` binds, `IGGY_NODE_ADVERTISED_ADDRESS`
+  (0.9 refuses a wildcard bind without it), and
+  `IGGY_SHARDING_CPU_ALLOCATION=all` (the default `numa:auto` aborts where no
+  NUMA topology is exposed, e.g. Docker Desktop)
+- SDK 0.11 no longer pulls in `paste`, so `deny.toml` drops the
+  RUSTSEC-2024-0436 exception
+
 ### Removed
 
 - release.yml's crates.io publish job. The crate is `publish = false`, and

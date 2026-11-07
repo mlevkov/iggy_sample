@@ -3,7 +3,7 @@
 [![CI](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml/badge.svg)](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mlevkov/iggy_sample?sort=semver)](https://github.com/mlevkov/iggy_sample/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.93%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](https://www.rust-lang.org)
 
 A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) message streaming integrated with [Axum](https://github.com/tokio-rs/axum) web framework in Rust.
 
@@ -11,8 +11,8 @@ A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) m
 
 This project showcases how to build a production-ready message streaming service using:
 
-- **Apache Iggy server 0.8.0** - High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy Rust SDK 0.10.0** - Paired with the server 0.8 release line; the 0.11 SDK is a tracked upgrade (TD-2026-07-02)
+- **Apache Iggy server 0.9.0** - High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
+- **Iggy Rust SDK 0.11.0** - Paired with the server 0.9 release line; 0.9 speaks only the VSR wire protocol, so SDK and server upgrade together ([ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md))
 - **Axum 0.8** - Ergonomic and modular Rust web framework
 - **Tokio** - Async runtime for Rust
 
@@ -80,7 +80,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ## Prerequisites
 
-- Rust 1.93+ (edition 2024, MSRV: 1.93.0)
+- Rust 1.95+ (edition 2024, MSRV: 1.95.0)
 - Docker & Docker Compose
 - curl or httpie (for testing)
 
@@ -664,7 +664,7 @@ Key dependencies (see `Cargo.toml` for full list):
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `iggy` | 0.10.0 | Iggy Rust SDK |
+| `iggy` | 0.11.0 | Iggy Rust SDK |
 | `axum` | 0.8 | Web framework |
 | `tokio` | 1.52 | Async runtime |
 | `serde` | 1.0 | Serialization |

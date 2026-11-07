@@ -38,9 +38,10 @@ struct IggyContainer {
 }
 
 impl IggyContainer {
-    // Server release paired with the Rust SDK 0.10 line (see Cargo.toml)
+    // Server release paired with the Rust SDK 0.11 line (see Cargo.toml).
+    // 0.9 speaks only the VSR wire protocol, so the two move together.
     const IMAGE: &'static str = "apache/iggy";
-    const TAG: &'static str = "0.8.0";
+    const TAG: &'static str = "0.9.0";
     const TCP_PORT: u16 = 8090;
 
     /// Start an Iggy container and return the mapped TCP port
@@ -49,14 +50,23 @@ impl IggyContainer {
         // ImageExt methods (with_env_var, with_privileged) due to type transformations
         let container = GenericImage::new(Self::IMAGE, Self::TAG)
             .with_exposed_port(Self::TCP_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Iggy server is running"))
+            // 0.9 no longer prints "Iggy server is running"; the HTTP
+            // listener is the last listener to come up.
+            .with_wait_for(WaitFor::message_on_stdout("server HTTP listener started"))
             // Root credentials (the server generates a random password by default)
             .with_env_var("IGGY_ROOT_USERNAME", "iggy")
             .with_env_var("IGGY_ROOT_PASSWORD", "iggy")
-            // Configure server to bind to 0.0.0.0 (accessible from host)
+            // The image's listeners default to loopback; bind 0.0.0.0 so the
+            // mapped ports reach them.
             .with_env_var("IGGY_TCP_ADDRESS", "0.0.0.0:8090")
             .with_env_var("IGGY_HTTP_ADDRESS", "0.0.0.0:3000")
             .with_env_var("IGGY_QUIC_ADDRESS", "0.0.0.0:8080")
+            // 0.9 refuses to boot on a wildcard bind unless it knows the
+            // address clients dial. Tests dial the mapped port on loopback.
+            .with_env_var("IGGY_NODE_ADVERTISED_ADDRESS", "127.0.0.1")
+            // The default "numa:auto" aborts where the host exposes no NUMA
+            // topology (Docker Desktop's VM among them).
+            .with_env_var("IGGY_SHARDING_CPU_ALLOCATION", "all")
             .with_startup_timeout(Duration::from_secs(120))
             .with_privileged(true)
             .start()
@@ -441,7 +451,8 @@ async fn poll_count(fixture: &TestFixture, query: &str) -> u64 {
     body.get("count").and_then(|v| v.as_u64()).expect("count")
 }
 
-/// Pins the SDK-0.10 semantics of PollingStrategy::next + auto_commit: a poll
+/// Pins the SDK semantics of PollingStrategy::next + auto_commit (0.10, and
+/// 0.11 against server 0.9): a poll
 /// without an explicit offset resumes from the consumer's committed offset,
 /// so a second poll must not re-deliver the first poll's messages.
 #[tokio::test]
@@ -511,7 +522,8 @@ async fn test_poll_without_offset_advances_committed_offset() {
     );
 }
 
-/// Pins the SDK-0.10 semantics of Partitioning::messages_key_str: all
+/// Pins the SDK semantics of Partitioning::messages_key_str (0.10, and 0.11
+/// against server 0.9): all
 /// messages sharing a partition key must land in exactly one partition
 /// (per-entity ordering guarantee).
 #[tokio::test]

@@ -426,7 +426,8 @@ impl IggyClientWrapper {
                     // Successfully reconnected - swap the client and shut down
                     // the old one. Without shutdown() the old client's detached
                     // heartbeat task keeps running and can re-establish a
-                    // zombie connection to the server (SDK 0.10 behavior).
+                    // zombie connection to the server (observed on SDK 0.10;
+                    // 0.11 clients still run a heartbeat task).
                     let mut client_guard = self.client.write().await;
                     let old_client = std::mem::replace(&mut *client_guard, new_client);
                     drop(client_guard);
@@ -582,11 +583,12 @@ impl IggyClientWrapper {
                         .create_topic(
                             &stream_id,
                             topic,
-                            partitions,
-                            Default::default(),
-                            None,
-                            IggyExpiry::NeverExpire,
-                            MaxTopicSize::Unlimited,
+                            &TopicCreateOptions {
+                                partitions_count: Some(partitions),
+                                message_expiry: Some(IggyExpiry::NeverExpire),
+                                max_topic_size: Some(MaxTopicSize::Unlimited),
+                                ..Default::default()
+                            },
                         )
                         .await
                     {
@@ -950,11 +952,12 @@ impl IggyClientWrapper {
                 .create_topic(
                     &stream_id,
                     topic,
-                    partitions,
-                    Default::default(),
-                    None,
-                    IggyExpiry::NeverExpire,
-                    MaxTopicSize::Unlimited,
+                    &TopicCreateOptions {
+                        partitions_count: Some(partitions),
+                        message_expiry: Some(IggyExpiry::NeverExpire),
+                        max_topic_size: Some(MaxTopicSize::Unlimited),
+                        ..Default::default()
+                    },
                 )
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;

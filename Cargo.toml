@@ -2,7 +2,7 @@
 name = "iggy_sample"
 version = "0.4.1"
 edition = "2024"
-rust-version = "1.93.0"
+rust-version = "1.95.0"
 description = "A comprehensive demonstration of Apache Iggy message streaming with Axum"
 license = "MIT"
 # Repo-level releases only (GitHub Releases and Pages): never published to
@@ -28,7 +28,7 @@ tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Message streaming (Apache Iggy Rust SDK; 0.10 pairs with the server-0.8 line)
-iggy = "0.10.0"
+iggy = "0.11.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
