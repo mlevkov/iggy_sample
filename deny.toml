@@ -97,6 +97,12 @@ yanked = "deny"
 # Ignore specific advisories
 # These are transitive dependencies we cannot directly update
 ignore = [
+    # astral-tokio-tar is unmaintained (2026-11-03, no patched version). It is
+    # dev-only: testcontainers -> astral-tokio-tar, used to copy files into
+    # test containers, never in the shipped binary. testcontainers 0.28.0,
+    # the latest, still depends on it. Drop this entry once testcontainers
+    # moves off it (re-check on each testcontainers bump).
+    "RUSTSEC-2026-0440",
 ]
 
 # =============================================================================
