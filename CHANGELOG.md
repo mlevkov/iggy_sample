@@ -137,9 +137,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   locked out along with it. Without `TRUSTED_PROXIES` the client IP comes
   from spoofable headers, so failures are still throttled but valid keys are
   never blocked; otherwise anyone could lock out every header-less client
-- Startup warns when `API_KEY` is set without `TRUSTED_PROXIES`: brute-force
-  protection is then advisory, since rotating `X-Forwarded-For` gives an
-  attacker a fresh failure budget
+- **Breaking**: startup refuses `API_KEY` without `TRUSTED_PROXIES`.
+  Brute-force protection would then be advisory, since rotating
+  `X-Forwarded-For` gives an attacker a fresh failure budget, so an API key
+  on its own looked protected without being so. Set `TRUSTED_PROXIES` to
+  your reverse proxy's ranges, or `ALLOW_UNVERIFIED_CLIENT_IPS=true` for
+  local development, which starts with a warning
 - Bumped transitive `quinn-udp` 0.5.15 -> 0.5.16 (lockfile-only) to patch
   GHSA-6pp4-4cxf-xf88 (high; no CVE or RustSec ID yet, so `cargo audit` does
   not flag 0.5.15): after a truncated datagram, the Unix `recv_single`

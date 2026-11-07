@@ -8,6 +8,8 @@
 //! # Security Configuration
 //!
 //! - `API_KEY`: When set, enables API key authentication for all endpoints except `/health`
+//!   and `/ready`. Requires `TRUSTED_PROXIES`, or `ALLOW_UNVERIFIED_CLIENT_IPS=true` for
+//!   local development: without verified client IPs the brute-force block cannot work
 //! - `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins (default: `*` for dev)
 //!
 //! # Performance Tuning
@@ -143,6 +145,17 @@ pub struct Config {
     /// - Localhost: "127.0.0.0/8,::1/128"
     pub trusted_proxies: Vec<String>,
 
+    /// Accept `API_KEY` without `TRUSTED_PROXIES` (default: false).
+    ///
+    /// Without trusted proxies the client IP comes from client-supplied
+    /// `X-Forwarded-For`/`X-Real-IP`, so the auth brute-force limiter can
+    /// throttle failures but never block an attacker, who rotates the header
+    /// for a fresh budget. [`Config::from_env`] therefore refuses that
+    /// combination unless this is `true` (`ALLOW_UNVERIFIED_CLIENT_IPS=true`),
+    /// which is meant for local development only. It has no effect when
+    /// `TRUSTED_PROXIES` is set or `API_KEY` is not.
+    pub allow_unverified_client_ips: bool,
+
     // =========================================================================
     // Observability Configuration
     // =========================================================================
@@ -223,6 +236,7 @@ impl Config {
             auth_bypass_paths: Self::parse_auth_bypass_paths(),
             cors_allowed_origins: Self::parse_cors_origins(),
             trusted_proxies: Self::parse_trusted_proxies(),
+            allow_unverified_client_ips: Self::parse_flag("ALLOW_UNVERIFIED_CLIENT_IPS")?,
 
             // Observability
             log_level: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -299,6 +313,25 @@ impl Config {
             ));
         }
 
+        // Fail closed: an API key without verified client IPs looks protected
+        // but is not. The brute-force block applies only to verified IPs
+        // (`ip::client_ip_is_verified`); without TRUSTED_PROXIES every client
+        // IP comes from a header the attacker controls, so guessing is
+        // limited only by per-IP throttles that reset whenever the attacker
+        // rotates that header.
+        if self.auth_enabled()
+            && !self.proxy_validation_enabled()
+            && !self.allow_unverified_client_ips
+        {
+            return Err(AppError::ConfigError(
+                "API_KEY is set but TRUSTED_PROXIES is empty: client IPs would come from \
+                 spoofable X-Forwarded-For/X-Real-IP headers, so the brute-force block \
+                 could never apply. Set TRUSTED_PROXIES to your reverse proxy's CIDR \
+                 ranges, or set ALLOW_UNVERIFIED_CLIENT_IPS=true for local development"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -357,6 +390,14 @@ impl Config {
         }
     }
 
+    /// Parse an opt-in boolean flag: unset or empty is `false`, like the
+    /// other security variables treat empty as unset; otherwise `true` or
+    /// `false` in any case. Anything else fails startup rather than being
+    /// guessed at, since these flags relax security checks.
+    fn parse_flag(name: &str) -> AppResult<bool> {
+        parse_flag_value(name, env::var(name).ok().as_deref())
+    }
+
     /// Parse CORS allowed origins from environment variable.
     fn parse_cors_origins() -> Vec<String> {
         env::var("CORS_ALLOWED_ORIGINS")
@@ -401,6 +442,21 @@ impl Config {
     }
 }
 
+/// The pure half of [`Config::parse_flag`], split out so tests need not set
+/// process environment variables.
+fn parse_flag_value(name: &str, raw: Option<&str>) -> AppResult<bool> {
+    let value = raw.map(str::trim).unwrap_or_default();
+    if value.is_empty() || value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else if value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else {
+        Err(AppError::ConfigError(format!(
+            "Invalid {name}: expected `true` or `false`, got `{value}`"
+        )))
+    }
+}
+
 /// Default configuration for testing and development.
 ///
 /// Production deployments should use `Config::from_env()` instead.
@@ -437,6 +493,7 @@ impl Default for Config {
             auth_bypass_paths: vec!["/health".to_string(), "/ready".to_string()],
             cors_allowed_origins: vec!["*".to_string()],
             trusted_proxies: vec![], // Empty = trust all (dev mode)
+            allow_unverified_client_ips: false,
             // Observability
             log_level: "info".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
@@ -592,6 +649,67 @@ mod tests {
     #[test]
     fn test_validate_valid_config() {
         let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_api_key_without_trusted_proxies() {
+        let config = Config {
+            api_key: Some("secret-key".to_string()),
+            ..Config::default()
+        };
+
+        let message = config.validate().unwrap_err().to_string();
+        // The error must name both variables that fix it.
+        assert!(message.contains("TRUSTED_PROXIES"), "{message}");
+        assert!(message.contains("ALLOW_UNVERIFIED_CLIENT_IPS"), "{message}");
+    }
+
+    #[test]
+    fn test_validate_accepts_api_key_with_trusted_proxies() {
+        let config = Config {
+            api_key: Some("secret-key".to_string()),
+            trusted_proxies: vec!["10.0.0.0/8".to_string()],
+            ..Config::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_parse_flag_value_treats_unset_and_empty_as_false() {
+        assert!(!parse_flag_value("FLAG", None).unwrap());
+        assert!(!parse_flag_value("FLAG", Some("")).unwrap());
+        assert!(!parse_flag_value("FLAG", Some("  ")).unwrap());
+    }
+
+    #[test]
+    fn test_parse_flag_value_accepts_true_and_false_in_any_case() {
+        for raw in ["true", "TRUE", "True", " true "] {
+            assert!(parse_flag_value("FLAG", Some(raw)).unwrap(), "{raw:?}");
+        }
+        for raw in ["false", "FALSE", "False"] {
+            assert!(!parse_flag_value("FLAG", Some(raw)).unwrap(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_parse_flag_value_rejects_anything_else() {
+        // A security-relaxing flag must not guess: "1" or "yes" fail startup.
+        for raw in ["1", "yes", "on", "tru"] {
+            let message = parse_flag_value("FLAG", Some(raw)).unwrap_err().to_string();
+            assert!(message.contains("FLAG"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_api_key_without_trusted_proxies_when_explicitly_allowed() {
+        let config = Config {
+            api_key: Some("secret-key".to_string()),
+            allow_unverified_client_ips: true,
+            ..Config::default()
+        };
+
         assert!(config.validate().is_ok());
     }
 }

@@ -358,6 +358,8 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 | `API_KEY` | (none) | API key for authentication (disabled if not set) |
 | `AUTH_BYPASS_PATHS` | `/health,/ready` | Comma-separated paths that bypass auth |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
+| `TRUSTED_PROXIES` | (none) | Comma-separated CIDR ranges of your reverse proxies; client IPs are taken from forwarded headers only when the peer is inside one. **Required when `API_KEY` is set** |
+| `ALLOW_UNVERIFIED_CLIENT_IPS` | `false` | Start with `API_KEY` but no `TRUSTED_PROXIES`, for local development only: brute-force protection then throttles but never blocks |
 
 ### Message Limits & Observability
 | Variable | Default | Description |

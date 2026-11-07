@@ -169,13 +169,16 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
     );
     if auth_layer.is_enabled() {
         info!("API key authentication enabled");
+        // Config::from_env refuses this combination unless
+        // ALLOW_UNVERIFIED_CLIENT_IPS=true; a Config built in code skips that
+        // validation, so the warning stays unconditional.
         if config.trusted_proxies.is_empty() {
             warn!(
-                "API_KEY is set but TRUSTED_PROXIES is empty: brute-force protection \
-                 is advisory. Client IPs come from client-supplied X-Forwarded-For/\
+                "API_KEY is set without TRUSTED_PROXIES: brute-force protection is \
+                 advisory. Client IPs come from client-supplied X-Forwarded-For/\
                  X-Real-IP, which an attacker can rotate for a fresh failure budget, \
-                 so failing IPs are throttled but never blocked. Set TRUSTED_PROXIES \
-                 in production"
+                 so failing IPs are throttled but never blocked. Local development \
+                 only; set TRUSTED_PROXIES in production"
             );
         }
         router = router.layer(auth_layer);
