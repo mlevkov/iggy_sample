@@ -199,7 +199,16 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 - `RateLimitLayer::new()` is fallible — it returns `Result<Self, RateLimitError>`
   so bad configuration surfaces at startup rather than being silently ignored.
 - Auth meters authentication **failures** only: a valid-key request never
-  consumes from the per-IP brute-force budget.
+  consumes from the per-IP brute-force budget. Once a **verified** IP
+  (`TRUSTED_PROXIES` set and the peer address available,
+  `ip::client_ip_is_verified`) exhausts the budget it is blocked, and the
+  block is checked **before** the key is compared: every request from it gets
+  the same 429, valid key or not, so the block cannot serve as a hit/miss
+  oracle (`AuthFailureGuard` in `src/middleware/auth.rs`). Unverified IPs come
+  from spoofable headers, so they are throttled on failures but never
+  blocked: blocking them would buy no protection (rotate the header) and
+  would let anyone lock out the shared `"unknown"` bucket. Startup warns when
+  `API_KEY` is set without `TRUSTED_PROXIES`.
 - Auth bypass for `/health` and `/ready` uses exact path matching.
 
 ### Request Timeout (`src/middleware/timeout.rs`)
