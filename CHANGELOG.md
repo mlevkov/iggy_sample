@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Prometheus starts only once it succeeds, so a failure is loud rather than
   a blank dashboard
 - CI's shellcheck step also lints `observability/*.sh`, as POSIX sh
+- The Iggy Web UI is served by the server itself at `http://localhost:3000/ui`
+  (`IGGY_HTTP_WEB_UI=true`); the separate `iggy-web-ui` container and its
+  port 3050 are gone
 
 ### Removed
 

@@ -49,6 +49,9 @@ services:
             # a bearer credential; see iggy-pat-init below
             - IGGY_HTTP_METRICS_ENABLED=true
             - IGGY_HTTP_METRICS_ENDPOINT=/metrics
+            # Web UI served by the server itself at http://localhost:3000/ui
+            # (0.9 embeds it; it replaces the separate iggy-web-ui container)
+            - IGGY_HTTP_WEB_UI=true
         healthcheck:
             test: ["CMD", "iggy", "ping"]
             interval: 10s
@@ -152,22 +155,6 @@ services:
             - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
         depends_on:
             - prometheus
-        restart: unless-stopped
-        networks:
-            - iggy-network
-
-    # Iggy Web UI - Dashboard for managing streams, topics, and messages
-    iggy-web-ui:
-        image: apache/iggy-web-ui:latest
-        container_name: iggy-web-ui
-        ports:
-            - "3050:3050"
-        environment:
-            # Connect to Iggy server HTTP API
-            - PUBLIC_IGGY_API_URL=http://iggy:3000
-        depends_on:
-            iggy:
-                condition: service_healthy
         restart: unless-stopped
         networks:
             - iggy-network

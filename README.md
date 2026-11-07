@@ -71,7 +71,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 │  High-level wrapper around Iggy SDK                         │
 ├─────────────────────────────────────────────────────────────┤
 │  Observability Stack                                        │
-│  Prometheus (9090) → Grafana (3001) + Iggy Web UI (3050)    │
+│  Prometheus (9090) → Grafana (3001) + Web UI (3000/ui)      │
 ├─────────────────────────────────────────────────────────────┤
 │  Apache Iggy Server                                         │
 │  TCP (8090) / QUIC (8080) / HTTP (3000) / Metrics (/metrics)│
@@ -102,7 +102,7 @@ docker-compose up -d
 
 This starts:
 - **Iggy Server** - Message streaming (ports 8090, 8080, 3000)
-- **Iggy Web UI** - Dashboard for managing streams/topics (port 3050)
+- **Iggy Web UI** - Served by the server itself at `/ui` (port 3000)
 - **iggy-pat-init** - One-shot: creates the token Prometheus scrapes Iggy's `/metrics` with
 - **Prometheus** - Metrics collection (port 9090)
 - **Grafana** - Visualization dashboards (port 3001)
@@ -142,7 +142,7 @@ Expected response:
 |---------|-----|-------------|
 | Sample App API | http://localhost:8000 | - |
 | Iggy HTTP API | http://localhost:3000 | - |
-| Iggy Web UI | http://localhost:3050 | iggy / iggy |
+| Iggy Web UI | http://localhost:3000/ui | iggy / iggy |
 | Prometheus | http://localhost:9090 | - |
 | Grafana | http://localhost:3001 | admin / admin |
 
@@ -498,7 +498,7 @@ The project includes a complete observability stack for monitoring and managing 
 |-----------|------|-------------|
 | **Iggy Server** | 3000 | HTTP API + Prometheus metrics at `/metrics` (bearer token required since 0.9) |
 | **Sample App metrics** | 9091 (host) | App Prometheus metrics (`METRICS_PORT` 9090 in-container) |
-| **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, users |
+| **Iggy Web UI** | 3000 (`/ui`) | Dashboard for streams, topics, messages, users, served by the server |
 | **Prometheus** | 9090 | Metrics collection with 15-day retention |
 | **Grafana** | 3001 | Pre-configured dashboards for visualization |
 
@@ -511,7 +511,9 @@ The Iggy Web UI provides a comprehensive dashboard:
 - **Users**: Manage users and permissions
 - **Server Health**: Monitor connections and server status
 
-Access at http://localhost:3050 with credentials `iggy/iggy`.
+Since 0.9 the server embeds the Web UI (`IGGY_HTTP_WEB_UI=true` in
+docker-compose), so there is no separate container. Access it at
+http://localhost:3000/ui with credentials `iggy/iggy`.
 
 ### Grafana Dashboards
 
