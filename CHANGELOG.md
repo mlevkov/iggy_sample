@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README no longer says coverage is uploaded to Codecov: every upload
   whose log is still retained was rejected for want of a token
   (TD-2026-09-03)
+- CI's cargo-deny check, part of the required CI Success check, failed on
+  every run from 2026-11-03, when RUSTSEC-2026-0440 marked
+  `astral-tokio-tar` unmaintained with no patched version. The crate is
+  dev-only (pulled in by `testcontainers`, whose latest release still uses
+  it), so `deny.toml` now accepts the advisory with that reasoning
 
 ### Security
 
