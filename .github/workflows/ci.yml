@@ -19,7 +19,7 @@ env:
     CARGO_TERM_COLOR: always
     RUST_BACKTRACE: 1
     # Minimum supported Rust version
-    MSRV: "1.93.0"
+    MSRV: "1.95.0"
 
 # Cancel in-progress runs for the same branch and event. The event is part
 # of the key because only the scheduled run files audit issues: a push to
@@ -77,7 +77,7 @@ jobs:
                 include:
                     # MSRV check on Ubuntu only
                     - os: ubuntu-latest
-                      rust: "1.93.0"
+                      rust: "1.95.0"
         steps:
             - uses: actions/checkout@v7
             - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -260,12 +260,14 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v7
-            # Preinstalled on GitHub's ubuntu runners; -s bash because the
-            # scripts are bash, and they must stay clean under it.
+            # Preinstalled on GitHub's ubuntu runners. scripts/ is bash;
+            # observability/ runs under the Iggy image's POSIX /bin/sh, so it
+            # is checked as sh.
             - name: Lint shell scripts
               run: |
                   shellcheck --version
                   shellcheck -s bash scripts/*.sh
+                  shellcheck -s sh observability/*.sh
 
     # ==========================================================================
     # Final status check (for branch protection)

@@ -5,8 +5,8 @@ A comprehensive demonstration of Apache Iggy message streaming with Axum.
 ## Project Overview
 
 This application showcases how to build a production-ready message streaming service using:
-- **Apache Iggy server 0.8.0**: High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy Rust SDK 0.10.0**: Paired with the server 0.8 release line (server image pinned in `docker-compose.yaml`). Builds use the latest stable Rust, but the declared MSRV (`rust-version = "1.93.0"`) keeps cargo and Dependabot below SDK 0.11.0, which needs 1.95; the upgrade raises the MSRV by hand (TD-2026-07-02)
+- **Apache Iggy server 0.9.0**: High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
+- **Iggy Rust SDK 0.11.0**: Paired with the server 0.9 release line (server image pinned in `docker-compose.yaml` and the integration fixture). 0.9 speaks only the VSR wire protocol, so SDK and server always move together, and 0.8 data directories are not readable by 0.9. The SDK needs Rust 1.95, the declared MSRV (`rust-version = "1.95.0"`); cargo's MSRV-aware resolver keeps Dependabot from proposing any SDK that needs a newer Rust, so those upgrades raise the MSRV by hand. Plan and constraints: [ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md)
 - **Axum 0.8**: Ergonomic and modular Rust web framework
 - **Tokio**: Async runtime for Rust
 
@@ -121,6 +121,14 @@ The fuzz tests verify that validation functions never panic on any input.
 - Connection errors are detected by matching explicit `AppError` enum variants
   (`ConnectionFailed`/`Disconnected`/`ConnectionReset`), never by string
   matching on error text — the reconnection logic depends on this.
+- Iggy 0.9 request outcomes (`TransientNotAccepted`, `TransientNotCommitted`,
+  `RequestAlreadyApplied`) map to `NotAccepted`/`OutcomeUnknown`/
+  `AlreadyApplied`, deliberately **not** connection errors: the SDK has
+  already replayed them, and the wrapper's reconnect-and-retry would resend a
+  write the server applied or may have applied. `AlreadyApplied` answers
+  `202`. `IncompatibleProtocolVersion` maps to `IncompatibleServer`, which
+  stops a reconnect session (otherwise infinite at `MAX_RECONNECT_ATTEMPTS=0`)
+  and exits startup with `EX_PROTOCOL`.
 
 ## Partition Indexing
 
@@ -148,6 +156,20 @@ wrapper therefore treats **timeouts** as circuit-breaker failures, classifies
 the SDK error variants that do escape (`classify_iggy_error`), and runs live
 `ping` health probes so `/health` and `/ready` reflect reality during an
 outage rather than a latched startup flag.
+
+The SDK's diagnostic events (`src/iggy_client/events.rs`, TD-2026-07-02)
+end a recorded outage as soon as the SDK reconnects (`Connected` triggers an
+immediate ping). They are **not** a loss signal with default connection
+strings: SDK 0.11's TCP client publishes `Disconnected` only when a reconnect
+sweep gives up, and with `reconnection_retries=unlimited` it never does. The
+ping stays the source of truth.
+
+**Advertised endpoint = dialled endpoint.** After sign-in SDK 0.11 records a
+node's advertised address plus its own TCP port and fails over to it, even
+against a single node. If that endpoint reaches a different server, a client
+silently signs in there. docker-compose advertises `iggy` (the in-network
+name, port 8090). The integration fixture binds the container's listener to
+the same free port it maps on the host.
 
 ## Structured Concurrency
 

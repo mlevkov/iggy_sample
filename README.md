@@ -3,7 +3,7 @@
 [![CI](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml/badge.svg)](https://github.com/mlevkov/iggy_sample/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mlevkov/iggy_sample?sort=semver)](https://github.com/mlevkov/iggy_sample/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.93%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](https://www.rust-lang.org)
 
 A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) message streaming integrated with [Axum](https://github.com/tokio-rs/axum) web framework in Rust.
 
@@ -11,8 +11,8 @@ A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) m
 
 This project showcases how to build a production-ready message streaming service using:
 
-- **Apache Iggy server 0.8.0** - High-performance message streaming with io_uring shared-nothing architecture
-- **Iggy Rust SDK 0.10.0** - Paired with the server 0.8 release line; the 0.11 SDK is a tracked upgrade (TD-2026-07-02)
+- **Apache Iggy server 0.9.0** - High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
+- **Iggy Rust SDK 0.11.0** - Paired with the server 0.9 release line; 0.9 speaks only the VSR wire protocol, so SDK and server upgrade together ([ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md))
 - **Axum 0.8** - Ergonomic and modular Rust web framework
 - **Tokio** - Async runtime for Rust
 
@@ -71,7 +71,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 │  High-level wrapper around Iggy SDK                         │
 ├─────────────────────────────────────────────────────────────┤
 │  Observability Stack                                        │
-│  Prometheus (9090) → Grafana (3001) + Iggy Web UI (3050)    │
+│  Prometheus (9090) → Grafana (3001) + Web UI (3000/ui)      │
 ├─────────────────────────────────────────────────────────────┤
 │  Apache Iggy Server                                         │
 │  TCP (8090) / QUIC (8080) / HTTP (3000) / Metrics (/metrics)│
@@ -80,7 +80,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ## Prerequisites
 
-- Rust 1.93+ (edition 2024, MSRV: 1.93.0)
+- Rust 1.95+ (edition 2024, MSRV: 1.95.0)
 - Docker & Docker Compose
 - curl or httpie (for testing)
 
@@ -102,9 +102,15 @@ docker-compose up -d
 
 This starts:
 - **Iggy Server** - Message streaming (ports 8090, 8080, 3000)
-- **Iggy Web UI** - Dashboard for managing streams/topics (port 3050)
+- **Iggy Web UI** - Served by the server itself at `/ui` (port 3000)
+- **iggy-pat-init** - One-shot: creates the token Prometheus scrapes Iggy's `/metrics` with
 - **Prometheus** - Metrics collection (port 9090)
 - **Grafana** - Visualization dashboards (port 3001)
+
+> **Upgrading from server 0.8:** 0.9 cannot read 0.8 data, so the compose
+> file stores data in a new `iggy_data_0_9` volume. The old one can be
+> removed with `docker volume rm iggy_sample_iggy_data` (the prefix is the
+> compose project name, by default the checkout's directory name).
 
 ### 3. Run the Application
 
@@ -136,7 +142,7 @@ Expected response:
 |---------|-----|-------------|
 | Sample App API | http://localhost:8000 | - |
 | Iggy HTTP API | http://localhost:3000 | - |
-| Iggy Web UI | http://localhost:3050 | iggy / iggy |
+| Iggy Web UI | http://localhost:3000/ui | iggy / iggy |
 | Prometheus | http://localhost:9090 | - |
 | Grafana | http://localhost:3001 | admin / admin |
 
@@ -490,9 +496,9 @@ The project includes a complete observability stack for monitoring and managing 
 
 | Component | Port | Description |
 |-----------|------|-------------|
-| **Iggy Server** | 3000 | HTTP API + Prometheus metrics at `/metrics` |
+| **Iggy Server** | 3000 | HTTP API + Prometheus metrics at `/metrics` (bearer token required since 0.9) |
 | **Sample App metrics** | 9091 (host) | App Prometheus metrics (`METRICS_PORT` 9090 in-container) |
-| **Iggy Web UI** | 3050 | Dashboard for streams, topics, messages, users |
+| **Iggy Web UI** | 3000 (`/ui`) | Dashboard for streams, topics, messages, users, served by the server |
 | **Prometheus** | 9090 | Metrics collection with 15-day retention |
 | **Grafana** | 3001 | Pre-configured dashboards for visualization |
 
@@ -505,7 +511,9 @@ The Iggy Web UI provides a comprehensive dashboard:
 - **Users**: Manage users and permissions
 - **Server Health**: Monitor connections and server status
 
-Access at http://localhost:3050 with credentials `iggy/iggy`.
+Since 0.9 the server embeds the Web UI (`IGGY_HTTP_WEB_UI=true` in
+docker-compose), so there is no separate container. Access it at
+http://localhost:3000/ui with credentials `iggy/iggy`.
 
 ### Grafana Dashboards
 
@@ -519,9 +527,15 @@ Access at http://localhost:3001 with credentials `admin/admin`.
 
 Iggy exposes Prometheus-compatible metrics:
 
+Since server 0.9, Iggy's `/metrics` requires a bearer credential (a JWT or a
+personal access token). The `iggy-pat-init` service creates a `prometheus`
+token on every `docker-compose up` and writes it to a volume Prometheus reads
+through `credentials_file`; the same token works for manual queries:
+
 ```bash
-# View raw metrics from Iggy
-curl http://localhost:3000/metrics
+# View raw metrics from Iggy, with the token iggy-pat-init wrote
+TOKEN=$(docker-compose run --rm --no-deps --entrypoint cat iggy-pat-init /secrets/iggy_pat)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/metrics
 
 # View the sample app's own metrics (message counters, reconnects,
 # circuit breaker state; host port 9091 under docker-compose)
@@ -535,6 +549,7 @@ curl 'http://localhost:9090/api/v1/query?query=up{job="iggy"}'
 
 ```
 observability/
+├── iggy-pat-init.sh             # Creates the /metrics scrape token
 ├── prometheus/
 │   └── prometheus.yml           # Scrape configuration
 └── grafana/
@@ -614,13 +629,22 @@ All errors return structured JSON responses:
 | `disconnected` | 503 | Lost connection during operation |
 | `connection_reset` | 503 | Connection was reset by peer |
 | `circuit_open` | 503 | Circuit breaker open, failing fast |
-| `operation_timeout` | 503 | Iggy operation exceeded the timeout |
+| `not_accepted` | 503 | Iggy did not admit the request; nothing was applied, safe to retry |
+| `outcome_unknown` | 503 | Iggy could not confirm whether the request was applied; resending may duplicate it |
+| `incompatible_broker` | 502 | Iggy speaks a protocol version this build cannot use |
+| `timeout` | 504 | Iggy operation exceeded the timeout |
 | `stream_error` | 500 | Stream operation failed |
 | `topic_error` | 500 | Topic operation failed |
 | `send_error` | 500 | Message send failed |
 | `poll_error` | 500 | Message poll failed |
 | `not_found` | 404 | Resource not found |
 | `bad_request` | 400 | Invalid request data |
+
+One Iggy outcome is not an error: when the server reports that a write was
+already applied but its reply is gone (`RequestAlreadyApplied`), the
+service answers **`202 Accepted`** with
+`{"status": "applied", "message": "..."}`, so clients treat the write as done
+and do not resend it.
 
 ## Security
 
@@ -664,7 +688,7 @@ Key dependencies (see `Cargo.toml` for full list):
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `iggy` | 0.10.0 | Iggy Rust SDK |
+| `iggy` | 0.11.0 | Iggy Rust SDK |
 | `axum` | 0.8 | Web framework |
 | `tokio` | 1.52 | Async runtime |
 | `serde` | 1.0 | Serialization |

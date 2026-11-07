@@ -4,12 +4,17 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  # Iggy server metrics
+  # Iggy server metrics. Since server 0.9, /metrics requires a bearer
+  # credential (JWT or personal access token); docker-compose's iggy-pat-init
+  # service creates one and writes it to this file.
   - job_name: 'iggy'
     static_configs:
       - targets: ['iggy:3000']
     metrics_path: '/metrics'
     scheme: 'http'
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/iggy_pat
 
   # Sample application metrics (dedicated exporter listener on METRICS_PORT)
   - job_name: 'iggy-sample-app'

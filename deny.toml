@@ -97,9 +97,6 @@ yanked = "deny"
 # Ignore specific advisories
 # These are transitive dependencies we cannot directly update
 ignore = [
-    # paste is unmaintained, but comes from iggy -> iggy_common -> compio-io
-    # Upstream (iggy/compio) needs to migrate to pastey or alternative
-    "RUSTSEC-2024-0436",
     # astral-tokio-tar is unmaintained (2026-11-03, no patched version). It is
     # dev-only: testcontainers -> astral-tokio-tar, used to copy files into
     # test containers, never in the shipped binary. testcontainers 0.28.0,

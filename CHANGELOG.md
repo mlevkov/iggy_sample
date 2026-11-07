@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- PR Checks validates `.github/dependabot.yml` against Dependabot's schema
+  (`check-jsonschema==0.38.2`, "Dependabot Config" job), and Dependabot now
+  proposes the Dockerfile's base-image updates (TD-2026-09-02)
+- The SDK's diagnostic events drive the tracked connection state
+  (`src/iggy_client/events.rs`, resolving TD-2026-07-02): `Connected` triggers
+  an immediate ping, so an outage ends as soon as the SDK reconnects, and
+  `Disconnected` marks the connection down. SDK 0.11 publishes `Disconnected`
+  only when its reconnect sweep gives up, so with default (unlimited)
+  connection-string retries the periodic ping is still what detects a loss
+- Iggy 0.9 request outcomes get their own responses instead of a generic
+  500: `TransientNotAccepted` -> `503 not_accepted` (nothing applied, safe to
+  retry), `TransientNotCommitted` -> `503 outcome_unknown` (resending may
+  duplicate), and `RequestAlreadyApplied` -> `202 Accepted` with
+  `{"status":"applied"}`. None of them triggers the wrapper's
+  reconnect-and-retry or counts as a circuit-breaker failure, since the SDK
+  has already replayed each one
+- `IncompatibleProtocolVersion` maps to `502 incompatible_broker`, ends a
+  reconnect session instead of retrying it forever, and makes startup exit
+  with `EX_PROTOCOL` (76) rather than `EX_UNAVAILABLE`
+- The startup connection-timeout message says to check the server version:
+  against a 0.8 server, SDK 0.11 hangs at sign-in instead of failing
 - `scripts/verify-release.sh` checks a release.yml run step by step instead
   of trusting its conclusion: that the tag names the commit the run built;
   what each step printed; the release notes; that every asset is
@@ -33,6 +54,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pages deployment (with how to restore it, and the limits of doing so) and
   the tag itself
 
+### Changed
+
+- **Breaking:** Apache Iggy server 0.8.0 -> 0.9.0 and Rust SDK 0.10.0 ->
+  0.11.0, together (ADR-0001). 0.9 speaks only the VSR wire protocol, so a
+  0.8 server cannot serve this build, and 0.9 does not read 0.8 data
+  directories: discard the old `iggy_data` volume before upgrading
+- MSRV 1.93.0 -> 1.95.0, which SDK 0.11 requires
+- Topic creation uses SDK 0.11's `TopicCreateOptions`; behaviour is
+  unchanged (no expiry, unlimited size)
+- The integration fixture runs `apache/iggy:0.9.0` with the settings 0.9
+  now requires: explicit `0.0.0.0` binds, `IGGY_NODE_ADVERTISED_ADDRESS`
+  (0.9 refuses a wildcard bind without it), and
+  `IGGY_SHARDING_CPU_ALLOCATION=all` (the default `numa:auto` aborts where no
+  NUMA topology is exposed, e.g. Docker Desktop)
+- SDK 0.11 no longer pulls in `paste`, so `deny.toml` drops the
+  RUSTSEC-2024-0436 exception
+- docker-compose runs `apache/iggy:0.9.0` with the settings 0.9 requires
+  (explicit binds, `IGGY_NODE_ADVERTISED_ADDRESS=iggy`,
+  `IGGY_SHARDING_CPU_ALLOCATION=all`), the io_uring capability set upstream
+  uses (`SYS_NICE`, `seccomp:unconfined`, unlimited memlock) instead of
+  `privileged`, and an explicit `IGGY_PATH`. Data moves to a new
+  `iggy_data_0_9` volume: the old mount at `/iggy/data` never matched 0.9's
+  default data path, and 0.9 cannot read 0.8 data anyway
+- Prometheus scrapes Iggy's `/metrics`, which requires a bearer credential
+  since 0.9, with a personal access token. A new one-shot `iggy-pat-init`
+  service recreates it on every `up` (`observability/iggy-pat-init.sh`);
+  Prometheus starts only once it succeeds, so a failure is loud rather than
+  a blank dashboard
+- CI's shellcheck step also lints `observability/*.sh`, as POSIX sh
+- The Iggy Web UI is served by the server itself at `http://localhost:3000/ui`
+  (`IGGY_HTTP_WEB_UI=true`); the separate `iggy-web-ui` container and its
+  port 3050 are gone
+
 ### Removed
 
 - release.yml's crates.io publish job. The crate is `publish = false`, and
@@ -41,6 +95,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The integration fixture advertised `127.0.0.1` with the in-container port
+  8090. SDK 0.11 dials a node's advertised endpoint on failover, so a test
+  whose container stopped signed in to whatever Iggy listened on the host's
+  8090 (a local docker-compose stack). The container's listener now binds the
+  same free port the host maps
+- The README's error table listed `operation_timeout` as 503; the service
+  answers `timeout` with 504
+- The provisioned Grafana "Iggy Overview" dashboard charted metric names
+  the server does not export (`iggy_messages_bytes_total`,
+  `http_request_duration_seconds_bucket`, `iggy_streams_count`), so four of
+  its six panels never showed data. They now chart what 0.9 exports: request
+  rate (`http_requests_total`), net stored-message rate (`deriv(messages)`),
+  connected `clients`, and `streams`/`topics`/`partitions`. The status panel
+  no longer renders `up` as a percentage
 - The README no longer says coverage is uploaded to Codecov: every upload
   whose log is still retained was rejected for want of a token
   (TD-2026-09-03)

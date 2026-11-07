@@ -131,6 +131,7 @@ impl AppState {
         // Spawn background tasks
         state.spawn_stats_refresh_task();
         state.spawn_health_check_task();
+        state.spawn_connection_events_task();
 
         state
     }
@@ -288,6 +289,22 @@ impl AppState {
             }
 
             debug!("Health check task shutting down");
+        });
+    }
+
+    /// Spawn the task that applies the SDK's connection events to the
+    /// tracked connection state (see `IggyClientWrapper::follow_connection_events`).
+    ///
+    /// The periodic health check remains the source of truth; this task only
+    /// marks a lost connection down as soon as the SDK reports it, instead of
+    /// up to one health-check interval later.
+    fn spawn_connection_events_task(&self) {
+        let iggy_client = self.iggy_client.clone();
+        let cancel = self.cancellation_token.clone();
+
+        self.task_tracker.spawn(async move {
+            iggy_client.follow_connection_events(cancel).await;
+            debug!("Connection event task shutting down");
         });
     }
 
