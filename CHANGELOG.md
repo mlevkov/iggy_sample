@@ -132,6 +132,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Startup warns when `API_KEY` is set without `TRUSTED_PROXIES`: brute-force
   protection is then advisory, since rotating `X-Forwarded-For` gives an
   attacker a fresh failure budget
+- Bumped transitive `quinn-udp` 0.5.15 -> 0.5.16 (lockfile-only) to patch
+  GHSA-6pp4-4cxf-xf88 (high; no CVE or RustSec ID yet, so `cargo audit` does
+  not flag 0.5.15): after a truncated datagram, the Unix `recv_single`
+  fallback could keep `MSG_TRUNC` set and spin on non-blocking receives,
+  before any QUIC authentication, occupying the endpoint's runtime thread.
+  Narrowly reachable here: `quinn` comes in only through the iggy SDK's QUIC
+  transport, used only when `IGGY_CONNECTION_STRING` is `iggy+quic://`; the
+  affected path is the fallback used on Apple and BSD targets, not Linux's
+  batched receive; and it needs a datagram larger than the receive buffer.
+  The same lockfile refresh takes the patch releases of `jiff`, `log`,
+  `toml_edit`, `toml_datetime`, `sketches-ddsketch` and `spinning_top`
 
 ## [0.4.1] - 2026-09-23
 
