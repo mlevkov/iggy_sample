@@ -14,6 +14,11 @@ This application showcases how to build a production-ready message streaming ser
 
 See the [docs/](docs/) directory for comprehensive guides covering event-driven architecture, partitioning strategies, durable storage configuration, and more.
 
+Significant design decisions are recorded as ADRs in [docs/adr/](docs/adr/).
+The Iggy 0.9 upgrade and the clustering and connector demos follow
+[ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md), which fixes their
+PR sequence and scope.
+
 ## Configuration
 
 Every environment variable and its default is defined in `src/config.rs`; see

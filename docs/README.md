@@ -10,6 +10,7 @@ This directory contains comprehensive guides for understanding and working with 
 | [Partitioning Guide](partitioning-guide.md) | Deep dive into partition keys, ordering guarantees, and partition selection strategies |
 | [Durable Storage Guide](durable-storage-guide.md) | Storage architecture, fsync configuration, retention, backup strategies (the built-in archiver was removed before server 0.8.0), recovery procedures, and production recommendations |
 | [Structured Concurrency](structured-concurrency.md) | Task lifecycle management, cancellation tokens, and graceful shutdown patterns |
+| [Architecture Decision Records](adr/README.md) | Significant design decisions and their reasoning, starting with the Iggy 0.9 upgrade plan |
 
 ## Quick Navigation
 
