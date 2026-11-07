@@ -157,6 +157,13 @@ the SDK error variants that do escape (`classify_iggy_error`), and runs live
 `ping` health probes so `/health` and `/ready` reflect reality during an
 outage rather than a latched startup flag.
 
+The SDK's diagnostic events (`src/iggy_client/events.rs`, TD-2026-07-02)
+end a recorded outage as soon as the SDK reconnects (`Connected` triggers an
+immediate ping). They are **not** a loss signal with default connection
+strings: SDK 0.11's TCP client publishes `Disconnected` only when a reconnect
+sweep gives up, and with `reconnection_retries=unlimited` it never does. The
+ping stays the source of truth.
+
 **Advertised endpoint = dialled endpoint.** After sign-in SDK 0.11 records a
 node's advertised address plus its own TCP port and fails over to it, even
 against a single node. If that endpoint reaches a different server, a client

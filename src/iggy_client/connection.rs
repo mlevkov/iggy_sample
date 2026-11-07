@@ -1,6 +1,6 @@
 //! Connection state tracking for resilience management.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::Notify;
 
 /// Connection state tracking for resilience management.
@@ -25,6 +25,12 @@ pub struct ConnectionState {
     reconnecting: AtomicBool,
     /// Notification for when reconnection completes (success or failure)
     reconnect_complete: Notify,
+    /// Incremented each time a reconnect swaps in a new SDK client, so
+    /// anything tied to the old client (its event subscription) can tell it
+    /// is stale
+    client_generation: AtomicU64,
+    /// Notification for `client_generation` changes
+    client_swapped: Notify,
 }
 
 impl ConnectionState {
@@ -34,6 +40,41 @@ impl ConnectionState {
             reconnect_attempts: AtomicU32::new(0),
             reconnecting: AtomicBool::new(false),
             reconnect_complete: Notify::new(),
+            client_generation: AtomicU64::new(0),
+            client_swapped: Notify::new(),
+        }
+    }
+
+    /// The current SDK client generation (see `mark_client_swapped`).
+    pub fn client_generation(&self) -> u64 {
+        self.client_generation.load(Ordering::SeqCst)
+    }
+
+    /// Record that a reconnect replaced the SDK client, and wake every
+    /// `wait_for_client_swap` caller.
+    ///
+    /// Call it after the new client is in place and BEFORE the old one is
+    /// shut down: shutdown publishes `Shutdown` on the old client's event
+    /// channel, and a subscriber must already see the new generation by then
+    /// so it discards that event instead of marking the connection lost.
+    pub fn mark_client_swapped(&self) {
+        self.client_generation.fetch_add(1, Ordering::SeqCst);
+        self.client_swapped.notify_waiters();
+    }
+
+    /// Wait until the client generation differs from `seen`.
+    ///
+    /// Returns at once if it already does. Same lost-wakeup rule as
+    /// `wait_for_reconnection`: register with the `Notify` before checking.
+    pub async fn wait_for_client_swap(&self, seen: u64) {
+        loop {
+            let notified = self.client_swapped.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.client_generation() != seen {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -284,5 +325,53 @@ mod tests {
             state.set_connected(true);
             assert_eq!(state.attempts(), 0);
         }
+    }
+
+    #[test]
+    fn test_mark_client_swapped_advances_generation() {
+        let state = ConnectionState::new();
+        assert_eq!(state.client_generation(), 0);
+        state.mark_client_swapped();
+        state.mark_client_swapped();
+        assert_eq!(state.client_generation(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_client_swap_returns_at_once_when_already_stale() {
+        let state = ConnectionState::new();
+        state.mark_client_swapped();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            state.wait_for_client_swap(0),
+        )
+        .await
+        .expect("a stale generation must not wait");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_client_swap_wakes_on_swap() {
+        let state = Arc::new(ConnectionState::new());
+        let waiter = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.wait_for_client_swap(0).await })
+        };
+        // Let the waiter register before the swap.
+        tokio::task::yield_now().await;
+        state.mark_client_swapped();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("the swap must wake the waiter")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_client_swap_waits_while_current() {
+        let state = ConnectionState::new();
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            state.wait_for_client_swap(0),
+        )
+        .await;
+        assert!(waited.is_err(), "must wait while the generation is current");
     }
 }

@@ -27,6 +27,7 @@
 //!
 //! - `circuit_breaker` - Fail-fast state machine with token-limited probing
 //! - `connection` - Connection state tracking for reconnection coordination
+//! - `events` - Connection state driven by the SDK's diagnostic events
 //! - `params` - Parameter types like `PollParams`
 //! - `helpers` - Utility functions for identifier conversion and jitter
 //! - `resilience` - Timeout/breaker/reconnect-retry composition (`run_resilient`)
@@ -42,6 +43,8 @@
 //! - Circuit breaking driven by classified connection errors AND timeouts
 //! - Live health probes (`health_check`) that keep the connection state, and
 //!   therefore `/health` and `/ready`, truthful
+//! - The SDK's diagnostic events (`follow_connection_events`), which mark a
+//!   lost connection down at once instead of at the next probe
 //! - App-level reconnection with exponential backoff + jitter as a second
 //!   line of defense, for error classes that escape the SDK's internal retry
 //!   (see `helpers::classify_iggy_error`)
@@ -58,6 +61,7 @@
 
 mod circuit_breaker;
 mod connection;
+mod events;
 mod helpers;
 mod params;
 mod resilience;
@@ -443,6 +447,10 @@ impl IggyClientWrapper {
                     let mut client_guard = self.client.write().await;
                     let old_client = std::mem::replace(&mut *client_guard, new_client);
                     drop(client_guard);
+                    // Before the shutdown below: it publishes Shutdown on the
+                    // old client's events, which the event follower must
+                    // already know to discard (see `events`).
+                    self.state.mark_client_swapped();
                     if let Err(e) = old_client.shutdown().await {
                         // This call exists to kill the old heartbeat task; if
                         // it fails, a zombie connection may persist - worth a

@@ -112,6 +112,61 @@ fn find_available_port() -> u16 {
         .port()
 }
 
+/// Loopback TCP proxy in front of a container port that a test can cut.
+///
+/// Docker Desktop's port forwarder never closes a stopped container's
+/// connections, so stopping the container alone leaves the client blocked on
+/// a socket that will never answer. Cutting the proxy closes every proxied
+/// connection and stops accepting new ones, which the client sees at once on
+/// any platform.
+struct CuttableProxy {
+    port: u16,
+    cut: tokio_util::sync::CancellationToken,
+}
+
+impl CuttableProxy {
+    async fn start(upstream_port: u16) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the proxy listener");
+        let port = listener.local_addr().expect("proxy address").port();
+        let cut = tokio_util::sync::CancellationToken::new();
+
+        let accept_cut = cut.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut inbound = tokio::select! {
+                    _ = accept_cut.cancelled() => return,
+                    accepted = listener.accept() => match accepted {
+                        Ok((stream, _)) => stream,
+                        Err(_) => return,
+                    },
+                };
+                let connection_cut = accept_cut.clone();
+                tokio::spawn(async move {
+                    let Ok(mut outbound) =
+                        tokio::net::TcpStream::connect(("127.0.0.1", upstream_port)).await
+                    else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = connection_cut.cancelled() => {}
+                        _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound) => {}
+                    }
+                    // Both streams drop here, closing the client's connection.
+                });
+            }
+        });
+
+        Self { port, cut }
+    }
+
+    /// Close every proxied connection and stop accepting new ones.
+    fn cut(&self) {
+        self.cut.cancel();
+    }
+}
+
 /// Test fixture that manages the Iggy container and app server
 struct TestFixture {
     _iggy_container: ContainerAsync<GenericImage>,
@@ -638,6 +693,68 @@ async fn test_wrapper_defaults_idempotent_and_health_check_live() {
     // Live health probe: ping succeeds and drives the connected flag.
     assert!(wrapper.health_check().await, "live ping should succeed");
     assert!(wrapper.is_connected());
+}
+
+/// TD-2026-07-02: the SDK's `Disconnected` event marks the wrapper down
+/// without waiting for a health-check ping. No health-check task runs here
+/// (AppState spawns that, not the wrapper), so only the event follower can
+/// clear the connected flag; without it this test times out.
+///
+/// SDK 0.11's TCP client publishes `Disconnected` only when its reconnect
+/// sweep gives up, so the connection string bounds the SDK's retries. With
+/// the default unlimited retries the SDK publishes nothing while it keeps
+/// redialling (observed: a dial a second, no event), and the periodic ping
+/// remains the only loss signal; see `iggy_client::events`.
+#[tokio::test]
+async fn test_connection_events_mark_server_loss_without_a_ping() {
+    use iggy_sample::{Config, IggyClientWrapper};
+    use tokio_util::sync::CancellationToken;
+
+    let (container, iggy) = IggyContainer::start().await;
+    let proxy = CuttableProxy::start(iggy.tcp_port).await;
+    let config = Config {
+        iggy_connection_string: format!(
+            "iggy://iggy:iggy@127.0.0.1:{}?reconnection_retries=2&reconnection_interval=200ms",
+            proxy.port
+        ),
+        operation_timeout: Duration::from_secs(5),
+        metrics_port: 0,
+        ..Config::default()
+    };
+    let wrapper = IggyClientWrapper::new(config)
+        .await
+        .expect("wrapper should connect through the proxy");
+    assert!(wrapper.is_connected());
+
+    let cancel = CancellationToken::new();
+    let follower = {
+        let wrapper = wrapper.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { wrapper.follow_connection_events(cancel).await })
+    };
+
+    // Stop the server first, then drop the client's connection. In the
+    // other order the SDK would fail over to the still-running container at
+    // its advertised endpoint and reconnect.
+    container.stop().await.expect("stop the Iggy container");
+    proxy.cut();
+
+    // The SDK finds the dropped connection on its next heartbeat (every 5 s)
+    // and gives up after two 200 ms retries.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while wrapper.is_connected() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the wrapper still reports connected 15 s after the connection dropped"
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), follower)
+        .await
+        .expect("the follower must stop on cancellation")
+        .expect("the follower task must not panic");
 }
 
 #[tokio::test]

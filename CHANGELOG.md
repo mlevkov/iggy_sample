@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The SDK's diagnostic events drive the tracked connection state
+  (`src/iggy_client/events.rs`, resolving TD-2026-07-02): `Connected` triggers
+  an immediate ping, so an outage ends as soon as the SDK reconnects, and
+  `Disconnected` marks the connection down. SDK 0.11 publishes `Disconnected`
+  only when its reconnect sweep gives up, so with default (unlimited)
+  connection-string retries the periodic ping is still what detects a loss
 - Iggy 0.9 request outcomes get their own responses instead of a generic
   500: `TransientNotAccepted` -> `503 not_accepted` (nothing applied, safe to
   retry), `TransientNotCommitted` -> `503 outcome_unknown` (resending may
