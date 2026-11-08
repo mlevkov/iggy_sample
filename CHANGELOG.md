@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-08
+
+Apache Iggy server 0.10.0 and Rust SDK 0.12.0 (ADR-0001, ADR-0002), with
+per-topic options on topic creation, a three-node cluster demo and a
+connectors demo with upstream's HTTP source and sink. The SDK's
+reconnection retries are capped at 3 by default (ADR-0003).
+
+Three breaking changes:
+
+- the server and SDK upgrade: no release reads its predecessor's data, so
+  the compose volume is now `iggy_data_0_10`, and a mismatched server fails
+  sign-in;
+- `POST /streams/{stream}/topics` refuses unknown fields with `422`;
+- startup refuses `API_KEY` without `TRUSTED_PROXIES`, unless
+  `ALLOW_UNVERIFIED_CLIENT_IPS=true`.
+
 ### Added
 
 - A connectors demo (ADR-0001 PR 4, pinned per ADR-0002), described in
@@ -259,6 +275,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - release.yml's crates.io publish job. The crate is `publish = false`, and
   its releases are repo-level only; the job could not succeed and failed on
   every stable release, hidden by `continue-on-error` (TD-2026-09-04)
+- CI's Codecov upload (TD-2026-09-03). Codecov rejected every upload for
+  want of a token, and `fail_ci_if_error: false` kept the job green. The
+  Code Coverage job still runs the suite under cargo-llvm-cov and writes
+  the line total to its job summary
 
 ### Fixed
 
@@ -297,6 +317,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `astral-tokio-tar` unmaintained with no patched version. The crate is
   dev-only (pulled in by `testcontainers`, whose latest release still uses
   it), so `deny.toml` now accepts the advisory with that reasoning
+- PR Checks' Coverage Diff job never read the coverage total. It looked for
+  a `Total coverage:` line that cargo-llvm-cov does not print, so every run
+  logged `unknown%` and its warning below 60% could not fire. It now reads
+  line coverage from the summary's `TOTAL` row (90.11% on #85) and warns
+  when it finds none
 
 ### Security
 
@@ -702,7 +727,8 @@ triggers (`docs/tech-debt/`):
 - Trusted proxy configuration for X-Forwarded-For validation
 - Input validation to prevent injection attacks
 
-[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/mlevkov/iggy_sample/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/mlevkov/iggy_sample/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mlevkov/iggy_sample/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...v0.3.0

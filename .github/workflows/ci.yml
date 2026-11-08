@@ -136,19 +136,20 @@ jobs:
               with:
                   tool: cargo-llvm-cov
 
-            - name: Generate coverage report
-              run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
-
-            # TD-2026-09-03: without a CODECOV_TOKEN secret Codecov rejects
-            # this upload, and fail_ci_if_error: false keeps the job green.
-            # Resolve the record before editing this step.
-            - name: Upload coverage to Codecov
-              uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-              with:
-                  files: lcov.info
-                  fail_ci_if_error: false
-              env:
-                  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+            # Measured, not uploaded: the Codecov step was dropped
+            # (TD-2026-09-03) after every upload was rejected for want of a
+            # token. The line total goes to the job summary, read from the
+            # TOTAL row as pr.yml's Coverage Diff reads it.
+            - name: Measure coverage
+              run: |
+                  set -o pipefail
+                  cargo llvm-cov --locked --all-features --workspace --summary-only | tee coverage-summary.txt
+                  COVERAGE=$(awk '$1 == "TOTAL" { print $10 }' coverage-summary.txt)
+                  if [[ ! "$COVERAGE" =~ ^[0-9]+(\.[0-9]+)?%$ ]]; then
+                      echo "::warning::No line coverage total in cargo llvm-cov's output: its TOTAL row changed"
+                      COVERAGE=unknown
+                  fi
+                  echo "Line coverage: $COVERAGE" >> "$GITHUB_STEP_SUMMARY"
 
     # ==========================================================================
     # Documentation build

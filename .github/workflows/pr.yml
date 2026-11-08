@@ -217,13 +217,19 @@ jobs:
         run: |
           cargo llvm-cov --locked --all-features --workspace --summary-only 2>&1 | tee coverage-summary.txt
 
-          # Extract coverage percentage
-          COVERAGE=$(grep -oP 'Total coverage: \K[\d.]+' coverage-summary.txt || echo "unknown")
-          echo "Current test coverage: $COVERAGE%"
+          # Line coverage is the TOTAL row's tenth field: regions, functions
+          # and lines take three columns each. This step used to grep for a
+          # "Total coverage:" line that cargo-llvm-cov never prints, so it
+          # read "unknown" on every run and the warning could not fire.
+          COVERAGE=$(awk '$1 == "TOTAL" { sub("%", "", $10); print $10 }' coverage-summary.txt)
+          if [[ ! "$COVERAGE" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::warning::No line coverage total in cargo llvm-cov's output: the run failed, or its TOTAL row changed"
+            exit 0
+          fi
+          echo "Current test coverage: $COVERAGE% of lines"
 
-          # Warn if coverage is below threshold
-          if [[ "$COVERAGE" != "unknown" ]] && (( $(echo "$COVERAGE < 60" | bc -l) )); then
-            echo "::warning::Test coverage is below 60% ($COVERAGE%)"
+          if (( $(echo "$COVERAGE < 60" | bc -l) )); then
+            echo "::warning::Test coverage is below 60% ($COVERAGE% of lines)"
           fi
 
   # ==========================================================================
