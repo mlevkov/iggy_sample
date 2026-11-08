@@ -346,6 +346,7 @@ curl -X POST http://localhost:8000/streams/my-stream/topics \
 | `messages_required_to_save` | 1 to 16777216 buffered messages per segment write | `1024` |
 | `size_of_messages_required_to_save` | Up to 1 GiB buffered per segment write | `1 MiB` |
 | `preallocate_segments` | `true` reserves each segment's full size on disk | `false` |
+| `replication_factor` | Nodes that store each partition: 1 to 32, at most the node count ([cluster demo](docs/cluster-demo.md#replication-factor)) | every node (`"all"`); 1 on a single node |
 
 An invalid value answers `400` naming the option (`options.segment_size`). An
 unknown key, including an option placed beside `options` instead of inside
@@ -475,6 +476,7 @@ iggy_sample/
 │   ├── models/
 │   │   ├── mod.rs          # Model exports
 │   │   ├── event.rs        # Domain events (uses rust_decimal)
+│   │   ├── topic_options.rs # Per-topic options: validation and read-back
 │   │   └── api.rs          # API request/response types
 │   ├── services/
 │   │   ├── mod.rs          # Service exports

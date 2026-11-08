@@ -184,9 +184,12 @@ ADR-0002). `src/models/topic_options.rs` holds the whole contract:
   misplaced option fails (`422`) instead of silently leaving a topic on a
   default. Server admission errors for options map to `400`
   (`classify_iggy_error`).
+- `replication_factor` (1 to 32) is checked here only for range; the server
+  refuses one above the node count (`InvalidReplicationFactor`, `400`).
+  Reads report the factor admission stored: the node count for the
+  default `"all"`, so `1` on a single node.
 - Not offered: `compression_algorithm` (stored, not applied by the server),
-  `partition_resize_policy`, `replication_factor` (the clustering demo), and
-  topic updates (ADR-0002).
+  `partition_resize_policy`, and topic updates (ADR-0002).
 
 ## Partition Indexing
 

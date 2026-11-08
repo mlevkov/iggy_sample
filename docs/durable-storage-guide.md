@@ -476,8 +476,8 @@ gateway), which means a partition's queues are full.
   topic's durability or segment size means creating a new topic.
 - **`compression_algorithm` is stored but not applied** by the server, so the
   gateway does not offer it.
-- **Replication factor** is per topic in 0.10 and belongs to the clustering
-  demo (ADR-0002).
+- **Replication factor** is a per-topic option since 0.10
+  (`replication_factor`), meaningful on a cluster.
 
 ---
 
@@ -495,6 +495,7 @@ gateway), which means a partition's queues are full.
 | `messages_required_to_save` | 1 to 16777216 | `1024` |
 | `size_of_messages_required_to_save` | 1 B to 1 GiB | `1 MiB` |
 | `preallocate_segments` | `true`, `false`; at most 64 GiB reserved per topic | `false` |
+| `replication_factor` | 1 to 32, at most the node count | server's `default_replication_factor` (`"all"`) |
 
 Sizes accept binary (`MiB`, `GiB`) and decimal (`MB`, `GB`) units. Iggy's
 spellings for "server default" (`"server_default"`, `"0"`) are refused: omit

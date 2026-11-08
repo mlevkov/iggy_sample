@@ -1294,6 +1294,12 @@ async fn test_create_topic_with_options_reports_values_and_provenance() {
         reported(&topic, "preallocate_segments"),
         (json!(false), "default".into())
     );
+    // Resolved at admission from default_replication_factor = "all": on a
+    // single node, that is one copy.
+    assert_eq!(
+        reported(&topic, "replication_factor"),
+        (json!(1), "default".into())
+    );
 
     // Listing reports the same options.
     let topics: serde_json::Value = fixture

@@ -494,6 +494,16 @@ fn default_topic_options_from(
             })
         })
         .transpose()?;
+    let replication_factor = text(keys::REPLICATION_FACTOR)
+        .map(|value| {
+            value.parse::<u32>().map_err(|e| {
+                AppError::ConfigError(format!(
+                    "Invalid {}: {e}",
+                    topic_option_env(keys::REPLICATION_FACTOR)
+                ))
+            })
+        })
+        .transpose()?;
     let preallocate_segments = text(keys::PREALLOCATE_SEGMENTS)
         .map(|value| parse_flag_value(&topic_option_env(keys::PREALLOCATE_SEGMENTS), Some(&value)))
         .transpose()?;
@@ -507,6 +517,7 @@ fn default_topic_options_from(
         messages_required_to_save,
         size_of_messages_required_to_save: text(keys::SIZE_OF_MESSAGES_REQUIRED_TO_SAVE),
         preallocate_segments,
+        replication_factor,
     };
     input
         .validate(partitions, topic_option_env)
@@ -780,6 +791,7 @@ mod tests {
             ("IGGY_TOPIC_MESSAGES_REQUIRED_TO_SAVE", "1"),
             ("IGGY_TOPIC_SIZE_OF_MESSAGES_REQUIRED_TO_SAVE", "4 KiB"),
             ("IGGY_TOPIC_PREALLOCATE_SEGMENTS", "TRUE"),
+            ("IGGY_TOPIC_REPLICATION_FACTOR", "2"),
         ]);
         let options = default_topic_options_from(env, 3).unwrap();
 
@@ -808,6 +820,7 @@ mod tests {
             Some(4096)
         );
         assert_eq!(options.preallocate_segments, Some(true));
+        assert_eq!(options.replication_factor, Some(2));
     }
 
     #[test]
@@ -817,6 +830,8 @@ mod tests {
             ("IGGY_TOPIC_SEGMENT_SIZE", "100 KiB"),
             ("IGGY_TOPIC_MESSAGES_REQUIRED_TO_SAVE", "many"),
             ("IGGY_TOPIC_PREALLOCATE_SEGMENTS", "yes"),
+            ("IGGY_TOPIC_REPLICATION_FACTOR", "0"),
+            ("IGGY_TOPIC_REPLICATION_FACTOR", "all"),
         ];
         for (name, value) in cases {
             let error = default_topic_options_from(topic_env(&[(name, value)]), 3)

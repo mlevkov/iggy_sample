@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `replication_factor` topic option (1 to 32; the server refuses more
+  than its node count) and `IGGY_TOPIC_REPLICATION_FACTOR`. Reads report the
+  stored factor, which is the node count under the default `"all"`
 - PR Checks validates `.github/dependabot.yml` against Dependabot's schema
   (`check-jsonschema==0.38.2`, "Dependabot Config" job), and Dependabot now
   proposes the Dockerfile's base-image updates (TD-2026-09-02)
