@@ -239,7 +239,9 @@ code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
 - **Plugins are built from source.** `connectors/Dockerfile` compiles them
   at the exact commit of the runtime image: they share a C ABI, so bump
   `IGGY_COMMIT` and the runtime tag together. The runtime image's revision
-  label names a later commit, but the binary is release code.
+  label names a later commit, but the binary is release code. Both base
+  images are pinned by tag and multi-arch digest; Dependabot does not
+  cover `connectors/`, so the digests move by hand, with their tags.
 - **The runtime image needs `ca-certificates`** (apache/iggy#4787).
   Without system roots, the HTTP sink's client fails to build. The
   connector SDK does not log a plugin's `open()` error (apache/iggy#4786),

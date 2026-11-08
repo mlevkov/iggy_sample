@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   responses are unchanged, except for a body over `MAX_REQUEST_BODY_SIZE`
   with the wrong content type: it answered `413` and now answers `415`. A
   wrong content type without the token still answers `401`
+- The connectors image's base images are pinned by digest as well as tag:
+  `apache/iggy-connect:0.6.0` at the digest checked on 2026-11-08, and the
+  `rust:1.99.1-slim-trixie` plugin builder. A re-pushed tag no longer
+  changes what is built
 
 ### Fixed
 
