@@ -888,6 +888,8 @@ async fn test_send_and_poll_message() {
         .expect("Failed to parse poll response");
     assert!(poll_body.get("messages").is_some());
     assert!(poll_body.get("count").is_some());
+    // Everything this gateway wrote is an Event, so nothing was left out.
+    assert_eq!(poll_body.get("skipped"), Some(&json!(0)));
 }
 
 #[tokio::test]

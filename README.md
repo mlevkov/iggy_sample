@@ -280,6 +280,10 @@ curl "http://localhost:8000/messages?partition_id=1&count=10&offset=0"
 curl "http://localhost:8000/messages?partition_id=1&count=10&auto_commit=true"
 ```
 
+A poll returns the messages that are `Event`s. Anything else in the topic
+(another producer's payload, such as a webhook body) is left out and counted
+in `skipped`; `current_offset` moves past it.
+
 ### Send Batch Messages
 
 ```bash

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Poll responses report `skipped`: messages left out because their payload
+  is not an `Event`. Before, the response only shrank, with a log line.
 - A three-node cluster demo (ADR-0001 PR 3, with ADR-0002's per-topic
   replication factor), described in `docs/cluster-demo.md`:
   - `docker-compose.cluster.yaml` runs three nodes on a fixed subnet, with

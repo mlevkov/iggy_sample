@@ -67,6 +67,10 @@ pub struct PollMessagesResponse {
     pub messages: Vec<ReceivedMessage>,
     /// Number of messages returned
     pub count: usize,
+    /// Messages polled but left out of `messages` because their payload is
+    /// not an `Event` (a topic another producer writes to, such as the
+    /// connectors demo's webhook topic). `current_offset` moves past them.
+    pub skipped: usize,
     /// Partition ID the messages came from
     pub partition_id: u32,
     /// Current offset after polling
