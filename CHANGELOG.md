@@ -195,6 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `docs/durable-storage-guide.md` said the compose stack keeps its data at
+  `/app/local_data`; it sets `IGGY_PATH=/iggy/data`
 - The quick-reference create-topic example in `docs/guide.md` sent fields
   the API never read (`topic_id`, `partitions_count`), so its topic got one
   partition instead of three; with unknown fields now refused it would fail

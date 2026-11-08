@@ -80,7 +80,8 @@ reference are one file on disk, not two.
 |---|---|
 | Server key | `path` (environment override `IGGY_PATH`) |
 | Shipped default | `local_data`, relative to the image's working directory `/app` |
-| This repository's compose stack | volume `iggy_data_0_10` mounted at `/app/local_data` |
+| This repository's compose stack | `IGGY_PATH=/iggy/data`, on the volume `iggy_data_0_10` |
+| The cluster demo (`docker-compose.cluster.yaml`) | the default path, on one volume per node (`iggy_node_<N>_0_10`) |
 
 The volume name carries the release line because 0.10 refuses a 0.9 data
 directory: "storage at /iggy/data does not match this build's storage format;
