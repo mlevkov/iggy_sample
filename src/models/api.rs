@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use iggy::prelude::{ClusterMetadata, ClusterNodeRole, ClusterNodeStatus, Partition};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -123,6 +124,95 @@ pub struct TopicInfo {
     pub messages_count: u64,
     /// Stored per-topic options, each with its value and who chose it
     pub options: TopicOptionsView,
+    /// Each partition and the nodes that hold it. Reported by the single-topic
+    /// read only; the listing leaves it out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Vec<PartitionInfo>>,
+}
+
+/// One partition of a topic and the nodes that hold it.
+#[derive(Debug, Serialize)]
+pub struct PartitionInfo {
+    /// Partition ID (0-indexed)
+    pub id: u32,
+    /// Messages in this partition
+    pub messages_count: u64,
+    /// Replica IDs of the nodes that store this partition. On a cluster
+    /// there are `replication_factor` of them; on a single node, one.
+    pub members: Vec<u8>,
+    /// The members the answering server reports as caught up with the
+    /// partition's log. On a cluster, a member that is down drops out of
+    /// this list. Even a healthy single node can report it empty for a
+    /// partition, so read placement from `members`.
+    pub in_sync_members: Vec<u8>,
+}
+
+impl From<&Partition> for PartitionInfo {
+    fn from(partition: &Partition) -> Self {
+        Self {
+            id: partition.id,
+            messages_count: partition.messages_count,
+            members: partition.members.clone(),
+            in_sync_members: partition.in_sync_members.clone(),
+        }
+    }
+}
+
+/// Cluster response: the nodes the connected server reports, with their
+/// roles and health.
+#[derive(Debug, Serialize)]
+pub struct ClusterInfo {
+    /// Cluster name; `single-node` when clustering is off
+    pub name: String,
+    /// Replica ID of the metadata leader, if the answering node marked one
+    pub leader: Option<u8>,
+    /// Every node in the roster, by replica ID
+    pub nodes: Vec<ClusterNodeInfo>,
+}
+
+/// One cluster node.
+#[derive(Debug, Serialize)]
+pub struct ClusterNodeInfo {
+    /// The node's replica ID (its `--replica-id`)
+    pub replica_id: u8,
+    /// The node's roster name
+    pub name: String,
+    /// The TCP address clients are handed for this node (`ip:port`)
+    pub address: String,
+    /// `leader` or `follower`: the node's role in metadata consensus.
+    /// Partition primaries are placed separately.
+    pub role: ClusterNodeRole,
+    /// `healthy`, `starting`, `stopping`, `unreachable`, `maintenance` or
+    /// `unknown`, as the answering node reports it. Server 0.10 reports
+    /// `healthy` even for a node that is down, so this is not a liveness
+    /// signal: a topic read's `in_sync_members` shows which replicas are up.
+    pub status: ClusterNodeStatus,
+}
+
+impl From<ClusterMetadata> for ClusterInfo {
+    fn from(metadata: ClusterMetadata) -> Self {
+        let mut nodes: Vec<ClusterNodeInfo> = metadata
+            .nodes
+            .into_iter()
+            .map(|node| ClusterNodeInfo {
+                replica_id: node.replica_id,
+                address: format!("{}:{}", node.ip, node.endpoints.tcp),
+                name: node.name,
+                role: node.role,
+                status: node.status,
+            })
+            .collect();
+        nodes.sort_by_key(|node| node.replica_id);
+        let leader = nodes
+            .iter()
+            .find(|node| node.role == ClusterNodeRole::Leader)
+            .map(|node| node.replica_id);
+        Self {
+            name: metadata.name,
+            leader,
+            nodes,
+        }
+    }
 }
 
 /// Health check response.
@@ -161,7 +251,7 @@ pub struct StatsResponse {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -216,6 +306,50 @@ mod tests {
 
         let json = serde_json::to_string(&response).expect("Serialization should succeed");
         assert!(json.contains("\"success\":true"));
+    }
+
+    fn node(replica_id: u8, role: ClusterNodeRole) -> iggy::prelude::ClusterNode {
+        iggy::prelude::ClusterNode {
+            replica_id,
+            name: format!("iggy-node-{replica_id}"),
+            ip: format!("10.29.0.{}", 10 + replica_id),
+            endpoints: iggy::prelude::TransportEndpoints::new(8090, 0, 0, 0),
+            role,
+            status: ClusterNodeStatus::Healthy,
+        }
+    }
+
+    #[test]
+    fn test_cluster_info_orders_nodes_and_names_the_leader() {
+        let metadata = ClusterMetadata {
+            name: "iggy-cluster".to_string(),
+            nodes: vec![
+                node(2, ClusterNodeRole::Follower),
+                node(0, ClusterNodeRole::Follower),
+                node(1, ClusterNodeRole::Leader),
+            ],
+        };
+        let info = ClusterInfo::from(metadata);
+
+        assert_eq!(info.leader, Some(1));
+        let ids: Vec<u8> = info.nodes.iter().map(|n| n.replica_id).collect();
+        assert_eq!(ids, [0, 1, 2]);
+        assert_eq!(info.nodes[1].address, "10.29.0.11:8090");
+
+        let json = serde_json::to_value(&info).expect("Serialization should succeed");
+        assert_eq!(json["nodes"][1]["role"], "leader");
+        assert_eq!(json["nodes"][1]["status"], "healthy");
+    }
+
+    #[test]
+    fn test_cluster_info_without_a_marked_leader_reports_null() {
+        let metadata = ClusterMetadata {
+            name: "iggy-cluster".to_string(),
+            nodes: vec![node(0, ClusterNodeRole::Follower)],
+        };
+        let json = serde_json::to_value(ClusterInfo::from(metadata))
+            .expect("Serialization should succeed");
+        assert!(json["leader"].is_null());
     }
 
     #[test]

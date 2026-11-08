@@ -30,7 +30,6 @@
 //!
 //! - `compression_algorithm`: the server stores it but does not apply it.
 //! - `partition_resize_policy`: outside ADR-0001's field list.
-//! - `replication_factor`: the clustering demo's (ADR-0002).
 //!
 //! [ADR-0001]: https://github.com/mlevkov/iggy_sample/blob/main/docs/adr/0001-iggy-0.9-upgrade-and-demos.md
 //! [ADR-0002]: https://github.com/mlevkov/iggy_sample/blob/main/docs/adr/0002-iggy-0.10-before-topic-options.md
@@ -43,7 +42,7 @@ use iggy::prelude::{
 };
 use iggy_common::{
     DEFAULT_SEGMENT_SIZE, MAX_MESSAGES_REQUIRED_TO_SAVE, MAX_PREALLOCATED_TOPIC_BYTES,
-    MAX_SIZE_OF_MESSAGES_REQUIRED_TO_SAVE, MAX_TOPIC_SEGMENT_SIZE,
+    MAX_REPLICATION_FACTOR, MAX_SIZE_OF_MESSAGES_REQUIRED_TO_SAVE, MAX_TOPIC_SEGMENT_SIZE,
     validate_preallocated_topic_bytes, validate_topic_segment_size,
 };
 use serde::{Deserialize, Serialize};
@@ -80,6 +79,11 @@ pub struct TopicOptionsInput {
     pub size_of_messages_required_to_save: Option<String>,
     /// Whether each new segment reserves its full size on disk when it opens.
     pub preallocate_segments: Option<bool>,
+    /// Nodes that store each partition: 1 to 32, and at most the cluster's
+    /// node count (the server refuses a larger one). Omitted, the server's
+    /// `default_replication_factor` applies (`"all"` unless an operator
+    /// changed it).
+    pub replication_factor: Option<u32>,
 }
 
 /// An option that failed validation: the name the caller used for it and why.
@@ -141,6 +145,11 @@ impl TopicOptionsInput {
             )
             .map_err(|reason| fail(keys::SIZE_OF_MESSAGES_REQUIRED_TO_SAVE, reason))?,
             preallocate_segments: self.preallocate_segments,
+            replication_factor: self
+                .replication_factor
+                .map(check_replication_factor)
+                .transpose()
+                .map_err(|reason| fail(keys::REPLICATION_FACTOR, reason))?,
         };
 
         let segment_bytes = options
@@ -201,6 +210,8 @@ pub struct TopicOptions {
     pub size_of_messages_required_to_save: Option<IggyByteSize>,
     /// Whether each new segment reserves its full size on disk when it opens.
     pub preallocate_segments: Option<bool>,
+    /// Nodes that store each partition.
+    pub replication_factor: Option<u32>,
 }
 
 impl TopicOptions {
@@ -220,6 +231,7 @@ impl TopicOptions {
             messages_required_to_save: self.messages_required_to_save,
             size_of_messages_required_to_save: self.size_of_messages_required_to_save,
             preallocate_segments: self.preallocate_segments,
+            replication_factor: self.replication_factor,
             ..TopicCreateOptions::default()
         }
     }
@@ -284,6 +296,11 @@ impl TopicOptions {
             self.preallocate_segments.map(|b| b.to_string()),
             stored.preallocate_segments.value.map(|b| b.to_string()),
         );
+        compare(
+            keys::REPLICATION_FACTOR,
+            self.replication_factor.map(|n| n.to_string()),
+            stored.replication_factor.value.map(|n| n.to_string()),
+        );
         differences
     }
 }
@@ -334,6 +351,9 @@ pub struct TopicOptionsView {
     pub messages_required_to_save: ReportedOption<u32>,
     pub size_of_messages_required_to_save: ReportedOption<String>,
     pub preallocate_segments: ReportedOption<bool>,
+    /// The factor admission resolved and stored: on a single node, or with
+    /// `default_replication_factor = "all"`, the node count at creation.
+    pub replication_factor: ReportedOption<u32>,
 }
 
 impl TopicOptionsView {
@@ -385,6 +405,7 @@ impl TopicOptionsView {
                 keys::PREALLOCATE_SEGMENTS,
                 typed.preallocate_segments,
             ),
+            replication_factor: report(stored, keys::REPLICATION_FACTOR, typed.replication_factor),
         }
     }
 }
@@ -472,6 +493,16 @@ fn check_messages_required_to_save(count: u32) -> Result<u32, String> {
         Ok(count)
     } else {
         Err(format!("must be 1 to {MAX_MESSAGES_REQUIRED_TO_SAVE}"))
+    }
+}
+
+fn check_replication_factor(factor: u32) -> Result<u32, String> {
+    if (1..=MAX_REPLICATION_FACTOR).contains(&factor) {
+        Ok(factor)
+    } else {
+        Err(format!(
+            "must be 1 to {MAX_REPLICATION_FACTOR}; omit it for the server's default"
+        ))
     }
 }
 
@@ -587,6 +618,7 @@ mod tests {
             messages_required_to_save: Some(1),
             size_of_messages_required_to_save: Some("4 KiB".into()),
             preallocate_segments: Some(false),
+            replication_factor: Some(3),
         };
         let create = validate(input).unwrap().create_options(2);
 
@@ -607,6 +639,7 @@ mod tests {
             Some(IggyByteSize::from(4096_u64))
         );
         assert_eq!(create.preallocate_segments, Some(false));
+        assert_eq!(create.replication_factor, Some(3));
     }
 
     #[test]
@@ -686,6 +719,23 @@ mod tests {
             };
             assert!(validate(input).is_ok(), "segment_size {raw:?}");
         }
+    }
+
+    #[test]
+    fn test_replication_factor_is_bounded() {
+        for factor in [0, MAX_REPLICATION_FACTOR + 1] {
+            let error = refused(TopicOptionsInput {
+                replication_factor: Some(factor),
+                ..Default::default()
+            });
+            assert_eq!(error.name, "options.replication_factor");
+        }
+        let options = validate(TopicOptionsInput {
+            replication_factor: Some(2),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(options.create_options(3).replication_factor, Some(2));
     }
 
     #[test]

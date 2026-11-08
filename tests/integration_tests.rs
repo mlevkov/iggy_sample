@@ -1294,6 +1294,12 @@ async fn test_create_topic_with_options_reports_values_and_provenance() {
         reported(&topic, "preallocate_segments"),
         (json!(false), "default".into())
     );
+    // Resolved at admission from default_replication_factor = "all": on a
+    // single node, that is one copy.
+    assert_eq!(
+        reported(&topic, "replication_factor"),
+        (json!(1), "default".into())
+    );
 
     // Listing reports the same options.
     let topics: serde_json::Value = fixture
@@ -1313,6 +1319,55 @@ async fn test_create_topic_with_options_reports_values_and_provenance() {
         })
         .expect("created topic is listed");
     assert_eq!(listed.get("options"), topic.get("options"));
+}
+
+#[tokio::test]
+async fn test_cluster_reports_a_single_node_and_topic_placement() {
+    let fixture = TestFixture::new().await;
+
+    let response = fixture
+        .client
+        .get(fixture.url("/cluster"))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 200);
+    let cluster: serde_json::Value = response.json().await.expect("Invalid JSON");
+    // Clustering off: the server reports itself as a one-node cluster.
+    assert_eq!(cluster.get("name"), Some(&json!("single-node")));
+    assert_eq!(cluster.get("leader"), Some(&json!(0)));
+    let nodes = cluster
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .expect("nodes array");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(
+        nodes.first().and_then(|n| n.get("role")),
+        Some(&json!("leader"))
+    );
+    assert_eq!(
+        nodes.first().and_then(|n| n.get("status")),
+        Some(&json!("healthy"))
+    );
+
+    let topic: serde_json::Value = fixture
+        .client
+        .get(fixture.url("/streams/test-stream/topics/test-events"))
+        .send()
+        .await
+        .expect("Request failed")
+        .json()
+        .await
+        .expect("Invalid JSON");
+    // The single-topic read places each partition; on one node, on node 0.
+    let partitions = topic
+        .get("partitions")
+        .and_then(serde_json::Value::as_array)
+        .expect("partitions array");
+    assert_eq!(partitions.len(), 2);
+    for partition in partitions {
+        assert_eq!(partition.get("members"), Some(&json!([0])), "{partition}");
+    }
 }
 
 #[tokio::test]

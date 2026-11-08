@@ -1,0 +1,173 @@
+# Three-node Apache Iggy cluster (VSR) with the gateway, on one Docker host.
+#
+#   echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
+#   docker compose -f docker-compose.cluster.yaml up -d --build --wait
+#   curl http://localhost:8001/cluster
+#
+# scripts/cluster-failover-demo.sh drives traffic through the gateway, kills
+# the metadata leader, and shows the cluster elect a new one while traffic
+# resumes. docs/cluster-demo.md walks through it.
+#
+# A separate compose project (`name:` below): it shares no containers or
+# volumes with docker-compose.yaml and can run beside it. Its gateway listens
+# on 8001, not 8000.
+#
+# Constraints that shape this file (ADR-0001, ADR-0002, and upstream's
+# docker-compose.cluster.yml at server-0.10.0):
+#   - The roster names each node by literal IP, so nodes get static addresses
+#     on a dedicated subnet. Set IGGY_CLUSTER_SUBNET (first three octets,
+#     default 10.29.0) if that clashes with a local network.
+#   - After sign-in the SDK dials every node at the address the roster
+#     advertises, so its clients must reach those addresses. Only the
+#     gateway, inside this network, talks to Iggy: no Iggy port is published,
+#     and each node advertises its roster IP (the default when
+#     advertised_address is unset).
+#   - The gateway's connection string lists all three nodes as seeds. A
+#     fresh client (startup, reconnect) needs any one of them up; once
+#     signed in, the SDK follows the roster itself.
+#   - The cluster name is stamped into each node's data on first boot.
+#     Changing it later stops the nodes starting against their volumes;
+#     `docker compose -f docker-compose.cluster.yaml down -v` starts over.
+#   - Three servers share one host, so each runs two unpinned shards.
+#   - HTTP, QUIC and WebSocket are off: the gateway speaks TCP only, and HTTP
+#     in cluster mode would need a cluster-wide JWT key besides.
+#   - Nodes do not restart on their own (`restart: "no"`): a node the demo
+#     kills stays down until it is started again.
+
+name: iggy-sample-cluster
+
+x-iggy-node: &iggy-node
+  # Keep in lockstep with docker-compose.yaml and tests/integration_tests.rs
+  image: apache/iggy:0.10.0
+  restart: "no"
+  # The io_uring server needs these instead of --privileged (ADR-0001)
+  cap_add:
+    - SYS_NICE
+  security_opt:
+    - seccomp:unconfined
+  ulimits:
+    memlock:
+      soft: -1
+      hard: -1
+  healthcheck:
+    test: ["CMD", "iggy", "ping"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 5s
+
+# Byte-identical on every node: the roster and the cluster settings.
+x-cluster-env: &cluster-env
+  IGGY_ROOT_USERNAME: iggy
+  IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:-iggy}
+  RUST_LOG: ${IGGY_RUST_LOG:-info}
+  IGGY_CLUSTER_ENABLED: "true"
+  IGGY_CLUSTER_NAME: iggy-sample-cluster
+  # How long followers wait for the leader before electing a new one. Raise
+  # it on an overloaded host where scheduling stalls fake a dead leader.
+  IGGY_CLUSTER_HEARTBEAT_TIMEOUT: ${IGGY_CLUSTER_HEARTBEAT_TIMEOUT:-5s}
+  # Replica links authenticate with this pre-shared key (>= 32 bytes).
+  IGGY_CLUSTER_AUTH_ENABLED: "true"
+  IGGY_CLUSTER_AUTH_SHARED_SECRET: ${IGGY_CLUSTER_SHARED_SECRET:?set IGGY_CLUSTER_SHARED_SECRET to at least 32 random bytes, e.g. openssl rand -hex 32}
+  IGGY_SHARDING_CPU_ALLOCATION: "2"
+  IGGY_SHARDING_PIN_CORES: "false"
+  IGGY_TCP_ADDRESS: 0.0.0.0:8090
+  IGGY_HTTP_ENABLED: "false"
+  IGGY_QUIC_ENABLED: "false"
+  IGGY_WEBSOCKET_ENABLED: "false"
+
+  IGGY_CLUSTER_NODES_0_NAME: iggy-node-0
+  IGGY_CLUSTER_NODES_0_IP: ${IGGY_CLUSTER_SUBNET:-10.29.0}.10
+  IGGY_CLUSTER_NODES_0_REPLICA_ID: "0"
+  IGGY_CLUSTER_NODES_0_PORTS_TCP: "8090"
+  IGGY_CLUSTER_NODES_0_PORTS_TCP_REPLICA: "9090"
+
+  IGGY_CLUSTER_NODES_1_NAME: iggy-node-1
+  IGGY_CLUSTER_NODES_1_IP: ${IGGY_CLUSTER_SUBNET:-10.29.0}.11
+  IGGY_CLUSTER_NODES_1_REPLICA_ID: "1"
+  IGGY_CLUSTER_NODES_1_PORTS_TCP: "8090"
+  IGGY_CLUSTER_NODES_1_PORTS_TCP_REPLICA: "9090"
+
+  IGGY_CLUSTER_NODES_2_NAME: iggy-node-2
+  IGGY_CLUSTER_NODES_2_IP: ${IGGY_CLUSTER_SUBNET:-10.29.0}.12
+  IGGY_CLUSTER_NODES_2_REPLICA_ID: "2"
+  IGGY_CLUSTER_NODES_2_PORTS_TCP: "8090"
+  IGGY_CLUSTER_NODES_2_PORTS_TCP_REPLICA: "9090"
+
+services:
+  iggy-node-0:
+    <<: *iggy-node
+    container_name: iggy-node-0
+    command: ["--replica-id", "0"]
+    environment: *cluster-env
+    networks:
+      iggy-cluster:
+        ipv4_address: ${IGGY_CLUSTER_SUBNET:-10.29.0}.10
+    volumes:
+      - iggy_node_0_0_10:/app/local_data
+
+  iggy-node-1:
+    <<: *iggy-node
+    container_name: iggy-node-1
+    command: ["--replica-id", "1"]
+    environment: *cluster-env
+    networks:
+      iggy-cluster:
+        ipv4_address: ${IGGY_CLUSTER_SUBNET:-10.29.0}.11
+    volumes:
+      - iggy_node_1_0_10:/app/local_data
+
+  iggy-node-2:
+    <<: *iggy-node
+    container_name: iggy-node-2
+    command: ["--replica-id", "2"]
+    environment: *cluster-env
+    networks:
+      iggy-cluster:
+        ipv4_address: ${IGGY_CLUSTER_SUBNET:-10.29.0}.12
+    volumes:
+      - iggy_node_2_0_10:/app/local_data
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: iggy-cluster-app
+    ports:
+      - "${CLUSTER_GATEWAY_PORT:-8001}:8000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      # All three nodes, tried in order whenever the gateway builds a client
+      IGGY_CONNECTION_STRING: iggy://iggy:${IGGY_ROOT_PASSWORD:-iggy}@${IGGY_CLUSTER_SUBNET:-10.29.0}.10:8090,${IGGY_CLUSTER_SUBNET:-10.29.0}.11:8090,${IGGY_CLUSTER_SUBNET:-10.29.0}.12:8090
+      IGGY_STREAM: sample-stream
+      IGGY_TOPIC: events
+      IGGY_PARTITIONS: "3"
+      RUST_LOG: info,iggy_sample=debug
+    depends_on:
+      iggy-node-0:
+        condition: service_healthy
+      iggy-node-1:
+        condition: service_healthy
+      iggy-node-2:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - iggy-cluster
+
+networks:
+  iggy-cluster:
+    name: iggy-sample-cluster
+    driver: bridge
+    ipam:
+      config:
+        # Nodes take fixed addresses in the low half; the gateway container
+        # gets one from the high half (ip_range), clear of them.
+        - subnet: ${IGGY_CLUSTER_SUBNET:-10.29.0}.0/24
+          ip_range: ${IGGY_CLUSTER_SUBNET:-10.29.0}.128/25
+          gateway: ${IGGY_CLUSTER_SUBNET:-10.29.0}.1
+
+volumes:
+  iggy_node_0_0_10:
+  iggy_node_1_0_10:
+  iggy_node_2_0_10:

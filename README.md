@@ -158,6 +158,7 @@ Expected response:
 | `/health` | GET | Health check with Iggy connection status |
 | `/ready` | GET | Kubernetes readiness probe (200 if ready) |
 | `/stats` | GET | Service statistics (streams, messages, uptime) |
+| `/cluster` | GET | Cluster nodes with their roles and health (`single-node` when clustering is off) |
 
 ### Messages (Default Stream/Topic)
 
@@ -346,6 +347,7 @@ curl -X POST http://localhost:8000/streams/my-stream/topics \
 | `messages_required_to_save` | 1 to 16777216 buffered messages per segment write | `1024` |
 | `size_of_messages_required_to_save` | Up to 1 GiB buffered per segment write | `1 MiB` |
 | `preallocate_segments` | `true` reserves each segment's full size on disk | `false` |
+| `replication_factor` | Nodes that store each partition: 1 to 32, at most the node count ([cluster demo](docs/cluster-demo.md#replication-factor)) | every node (`"all"`); 1 on a single node |
 
 An invalid value answers `400` naming the option (`options.segment_size`). An
 unknown key, including an option placed beside `options` instead of inside
@@ -390,7 +392,7 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server port |
-| `IGGY_CONNECTION_STRING` | `iggy://iggy:iggy@localhost:8090` | Iggy connection string |
+| `IGGY_CONNECTION_STRING` | `iggy://iggy:iggy@localhost:8090` | Iggy connection string; several comma-separated addresses are seeds, tried in order ([format](#connection-string-format)) |
 | `IGGY_STREAM` | `sample-stream` | Default stream name |
 | `IGGY_TOPIC` | `events` | Default topic name |
 | `IGGY_PARTITIONS` | `3` | Partitions for default topic |
@@ -434,6 +436,13 @@ Example:
 iggy://iggy:iggy@localhost:8090
 ```
 
+For a cluster, list several addresses. They are seeds: the gateway tries
+them in order whenever it builds a client (at startup and on reconnect), and
+once signed in the SDK follows the cluster's roster itself.
+```
+iggy://iggy:iggy@10.29.0.10:8090,10.29.0.11:8090,10.29.0.12:8090
+```
+
 ## Project Structure
 
 ```
@@ -444,12 +453,13 @@ iggy_sample/
 │   │   ├── pr.yml              # PR checks (size, commits, docs)
 │   │   ├── release.yml         # Release builds, GitHub release, docs deploy
 │   │   ├── verify-release.yml  # Checks each green release run
-│   │   └── extended-tests.yml  # Weekly stress/benchmark tests
+│   │   └── extended-tests.yml  # Weekly cluster, benchmark and memory tests
 │   ├── dependabot.yml          # Automated dependency updates
 │   └── pull_request_template.md
 ├── Cargo.toml              # Dependencies and metadata
 ├── Dockerfile              # Multi-stage build for production
 ├── docker-compose.yaml     # Local development setup
+├── docker-compose.cluster.yaml # Three-node cluster demo (docs/cluster-demo.md)
 ├── deny.toml               # License/security policy (cargo-deny)
 ├── .env.example            # Environment variable template
 ├── CLAUDE.md               # Project documentation for AI assistants
@@ -475,6 +485,7 @@ iggy_sample/
 │   ├── models/
 │   │   ├── mod.rs          # Model exports
 │   │   ├── event.rs        # Domain events (uses rust_decimal)
+│   │   ├── topic_options.rs # Per-topic options: validation and read-back
 │   │   └── api.rs          # API request/response types
 │   ├── services/
 │   │   ├── mod.rs          # Service exports
@@ -482,14 +493,17 @@ iggy_sample/
 │   │   └── consumer.rs     # Message consumer service
 │   └── handlers/
 │       ├── mod.rs          # Handler exports
+│       ├── cluster.rs      # GET /cluster
 │       ├── health.rs       # Health endpoints
 │       ├── messages.rs     # Message endpoints
 │       ├── streams.rs      # Stream management
 │       ├── topics.rs       # Topic management
 │       └── util.rs         # Shared handler utilities
 ├── scripts/
+│   ├── cluster-failover-demo.sh # Kills the cluster leader under traffic
 │   └── verify-release.sh    # Checks a release run step by step
 ├── tests/
+│   ├── cluster_tests.rs     # Three-node cluster tests (ignored; weekly)
 │   ├── integration_tests.rs # End-to-end API tests
 │   ├── metrics_smoke_test.rs # Prometheus exporter smoke test
 │   └── model_tests.rs       # Unit tests for models
@@ -536,6 +550,19 @@ docker-compose logs -f app
 
 # Stop
 docker-compose down
+```
+
+### Three-Node Cluster
+
+`docker-compose.cluster.yaml` runs a three-node Iggy cluster with the gateway
+on port 8001, and `scripts/cluster-failover-demo.sh` kills the leader under
+traffic to show failover. See the [cluster demo guide](docs/cluster-demo.md).
+
+```bash
+echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
+docker compose -f docker-compose.cluster.yaml up -d --build --wait
+curl http://localhost:8001/cluster
+scripts/cluster-failover-demo.sh
 ```
 
 ### Build Docker Image Manually
@@ -769,7 +796,7 @@ This project uses GitHub Actions for continuous integration and deployment:
 | `pr.yml` | PR | Size checks, conventional commits, semver |
 | `release.yml` | Tag `vX.Y.Z` or `vX.Y.Z-<suffix>` | Multi-platform builds, GitHub release, docs deploy |
 | `verify-release.yml` | Green Release run, or by hand | Checks the run with `scripts/verify-release.sh` |
-| `extended-tests.yml` | Weekly | Benchmarks, stress tests, memory checks |
+| `extended-tests.yml` | Weekly | Benchmarks, three-node cluster tests and failover demo, memory checks |
 
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`

@@ -46,7 +46,8 @@
 //!
 //! # Route Groups
 //!
-//! - `/health`, `/ready`, `/stats` - Health & monitoring (auth bypassed)
+//! - `/health`, `/ready` - Health probes (auth bypassed)
+//! - `/stats`, `/cluster` - Monitoring: service statistics, cluster roles
 //! - `/messages` - Message operations on default stream/topic
 //! - `/streams` - Stream management
 //! - `/streams/{stream}/topics` - Topic management
@@ -105,6 +106,7 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
         .route("/health", get(handlers::health_check))
         .route("/ready", get(handlers::readiness_check))
         .route("/stats", get(handlers::stats))
+        .route("/cluster", get(handlers::cluster))
         // Message endpoints (default stream/topic)
         .route("/messages", post(handlers::send_message))
         .route("/messages", get(handlers::poll_messages))

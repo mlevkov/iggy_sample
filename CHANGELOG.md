@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A three-node cluster demo (ADR-0001 PR 3, with ADR-0002's per-topic
+  replication factor), described in `docs/cluster-demo.md`:
+  - `docker-compose.cluster.yaml` runs three nodes on a fixed subnet, with
+    the roster shared through a YAML anchor, a volume per node, the replica
+    links' pre-shared key from `.env`, and the gateway inside the network on
+    port 8001. No Iggy port is published.
+  - `scripts/cluster-failover-demo.sh` SIGKILLs the metadata leader under
+    live traffic, then reports the election time, failed sends, the slowest
+    send and the restarted node's return to sync. It exits non-zero on a
+    missed budget. In local runs the election took 5-6 s and no send failed;
+    the SDK held sends for up to about 5 s until a new primary answered.
+  - `tests/cluster_tests.rs` (ignored by default) checks the roster, that
+    each partition sits on as many nodes as its replication factor, that a
+    factor above the node count answers `400`, and that the gateway starts
+    with its first seed down.
+- `GET /cluster` reports the roster with each node's role and status, from
+  cluster metadata. Server 0.10 reports every node `healthy`, even one that
+  is down, and the docs say so; the live signal is `in_sync_members`
+- The single-topic read reports each partition with the nodes that hold it
+  (`members`) and those currently in sync (`in_sync_members`)
+- The `replication_factor` topic option (1 to 32; the server refuses more
+  than its node count) and `IGGY_TOPIC_REPLICATION_FACTOR`. Reads report the
+  stored factor, which is the node count under the default `"all"`
+- `IGGY_CONNECTION_STRING` accepts several comma-separated server addresses
+  as seeds. Startup tries each in order with an equal share of
+  `OPERATION_TIMEOUT_SECS`, and reconnects start from the seed that worked
+  last. An SDK 0.12 connection string names one server; once signed in, the
+  SDK follows the cluster roster itself. Logs name seed addresses only,
+  never the connection string, which holds the credentials
 - PR Checks validates `.github/dependabot.yml` against Dependabot's schema
   (`check-jsonschema==0.38.2`, "Dependabot Config" job), and Dependabot now
   proposes the Dockerfile's base-image updates (TD-2026-09-02)
@@ -85,6 +114,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Extended Tests' stress job is replaced by Cluster Tests, which runs the
+  cluster tests and the failover script against `docker-compose.cluster.yaml`
+  (workflow input `run_cluster_tests`). The stress job never ran a test: its
+  `cargo test -- --ignored` matched none, its fallback ran only on failure,
+  and its Iggy service container went unused, since the integration tests
+  start their own
+- A malformed `IGGY_CONNECTION_STRING` (no scheme or credentials, more than
+  one `@`, an empty, repeated or non-`host:port` address) now fails
+  configuration validation, without repeating the string. A failed startup
+  connection lists each seed's error
 - **Breaking:** `POST /streams/{stream}/topics` refuses unknown fields with
   `422`, at the top level and inside `options`. Unknown fields were ignored,
   so a misspelt or misplaced option would have left the topic on a server
@@ -157,6 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `docs/durable-storage-guide.md` said the compose stack keeps its data at
+  `/app/local_data`; it sets `IGGY_PATH=/iggy/data`
 - The quick-reference create-topic example in `docs/guide.md` sent fields
   the API never read (`topic_id`, `partitions_count`), so its topic got one
   partition instead of three; with unknown fields now refused it would fail
@@ -193,6 +234,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The Iggy client's tracing span recorded the whole connection string,
+  password included, at `info` level on every startup. It no longer
+  records it
 - The auth brute-force block is now checked before the API key is compared.
   The key used to be compared first, so a blocked IP still got an answer to
   every guess (200 for the right key, 429 for a wrong one), and the block

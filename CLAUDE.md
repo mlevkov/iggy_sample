@@ -184,9 +184,42 @@ ADR-0002). `src/models/topic_options.rs` holds the whole contract:
   misplaced option fails (`422`) instead of silently leaving a topic on a
   default. Server admission errors for options map to `400`
   (`classify_iggy_error`).
+- `replication_factor` (1 to 32) is checked here only for range; the server
+  refuses one above the node count (`InvalidReplicationFactor`, `400`).
+  Reads report the factor admission stored: the node count for the
+  default `"all"`, so `1` on a single node.
 - Not offered: `compression_algorithm` (stored, not applied by the server),
-  `partition_resize_policy`, `replication_factor` (the clustering demo), and
-  topic updates (ADR-0002).
+  `partition_resize_policy`, and topic updates (ADR-0002).
+
+## Clustering
+
+`docker-compose.cluster.yaml` runs three nodes and the gateway (port 8001);
+[docs/cluster-demo.md](docs/cluster-demo.md) explains it. Facts the code
+depends on (SDK 0.12, server 0.10):
+
+- **One address per SDK connection string.** After sign-in the SDK reads
+  the roster and keeps a link to every node, routing each send and poll to
+  its partition's primary and retrying through an election within a 30 s
+  per-call deadline. The gateway only has to reach *one* node when it
+  builds a client, so `IGGY_CONNECTION_STRING` takes comma-separated seeds
+  (`src/iggy_client/seeds.rs`): startup tries each in order with an equal
+  share of `OPERATION_TIMEOUT_SECS`, and reconnects start from the last seed
+  that worked. Only seed addresses are logged; the connection string holds
+  credentials.
+- **Roster addresses must be reachable from the gateway.** The SDK dials
+  each node at its advertised address (the roster IP when none is set). The
+  demo keeps the gateway inside the cluster network and publishes no Iggy
+  port.
+- **Node `status` in cluster metadata is not liveness:** 0.10 reports
+  `healthy` for a node that is down. `GET /cluster` passes it through with
+  that caveat; the live signal is each partition's `in_sync_members` on a
+  topic read, which the failover script and `tests/cluster_tests.rs` wait on.
+- Losing one node of three does not disconnect the SDK, so `/health` stays
+  up; the switch shows as send latency of about `heartbeat_timeout` (5 s).
+- `tests/cluster_tests.rs` is `#[ignore]`d (it needs the stack and the
+  docker CLI) and runs weekly in Extended Tests, followed by
+  `scripts/cluster-failover-demo.sh`, which exits non-zero on a missed
+  budget.
 
 ## Partition Indexing
 

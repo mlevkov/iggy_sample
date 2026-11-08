@@ -80,7 +80,8 @@ reference are one file on disk, not two.
 |---|---|
 | Server key | `path` (environment override `IGGY_PATH`) |
 | Shipped default | `local_data`, relative to the image's working directory `/app` |
-| This repository's compose stack | volume `iggy_data_0_10` mounted at `/app/local_data` |
+| This repository's compose stack | `IGGY_PATH=/iggy/data`, on the volume `iggy_data_0_10` |
+| The cluster demo (`docker-compose.cluster.yaml`) | the default path, on one volume per node (`iggy_node_<N>_0_10`) |
 
 The volume name carries the release line because 0.10 refuses a 0.9 data
 directory: "storage at /iggy/data does not match this build's storage format;
@@ -468,16 +469,18 @@ gateway), which means a partition's queues are full.
 
 ## Current Limitations
 
-- **Single node in this repository.** The compose stack runs one node, so
+- **Single node in the main stack.** `docker-compose.yaml` runs one node, so
   there is no replica to repair from and `persisted` means local persistence
-  only. ADR-0001's clustering demo adds a three-node stack.
+  only. The [three-node cluster demo](cluster-demo.md) shows replicas, repair
+  and failover.
 - **Options are fixed at creation here.** SDK 0.12 can update some topic
   options, but this gateway does not offer updates (ADR-0002). Changing a
   topic's durability or segment size means creating a new topic.
 - **`compression_algorithm` is stored but not applied** by the server, so the
   gateway does not offer it.
-- **Replication factor** is per topic in 0.10 and belongs to the clustering
-  demo (ADR-0002).
+- **Replication factor** is a per-topic option since 0.10
+  (`replication_factor`), meaningful on a cluster; see the
+  [cluster demo](cluster-demo.md#replication-factor).
 
 ---
 
@@ -495,6 +498,7 @@ gateway), which means a partition's queues are full.
 | `messages_required_to_save` | 1 to 16777216 | `1024` |
 | `size_of_messages_required_to_save` | 1 B to 1 GiB | `1 MiB` |
 | `preallocate_segments` | `true`, `false`; at most 64 GiB reserved per topic | `false` |
+| `replication_factor` | 1 to 32, at most the node count | server's `default_replication_factor` (`"all"`) |
 
 Sizes accept binary (`MiB`, `GiB`) and decimal (`MB`, `GB`) units. Iggy's
 spellings for "server default" (`"server_default"`, `"0"`) are refused: omit
