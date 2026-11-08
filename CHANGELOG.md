@@ -90,6 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uses (TD-2026-09-05). The pin had been an untagged `master` head under a
   `# v2` comment, so every github-actions Dependabot PR moved it to whatever
   upstream merged last; with a tagged SHA Dependabot proposes releases
+- The `main` ruleset requires a pull request to be up to date with main
+  before it merges, and requires the Dependabot Config check
+  (TD-2026-09-06). A pull request whose checks passed against an older
+  main could previously merge untested against the main it landed on
 
 ### Removed
 
