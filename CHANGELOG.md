@@ -114,6 +114,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Extended Tests' stress job is replaced by Cluster Tests, which runs the
+  cluster tests and the failover script against `docker-compose.cluster.yaml`
+  (workflow input `run_cluster_tests`). The stress job never ran a test: its
+  `cargo test -- --ignored` matched none, its fallback ran only on failure,
+  and its Iggy service container went unused, since the integration tests
+  start their own
 - A malformed `IGGY_CONNECTION_STRING` (no scheme or credentials, an empty
   or repeated address) now fails configuration validation, without
   repeating the string. A failed startup connection lists each seed's error

@@ -16,8 +16,8 @@ on:
         required: false
         default: true
         type: boolean
-      run_stress_tests:
-        description: "Run stress tests"
+      run_cluster_tests:
+        description: "Run the three-node cluster tests and failover demo"
         required: false
         default: true
         type: boolean
@@ -71,46 +71,19 @@ jobs:
           retention-days: 30
 
   # ==========================================================================
-  # Stress tests with real Iggy server
+  # Three-node cluster (ADR-0001 PR 3)
   # ==========================================================================
-  stress-tests:
-    name: Stress Tests
+  # Replaces the former stress job, which never ran a test: its
+  # `cargo test -- --ignored` matched none, its fallback only ran on failure,
+  # and its Iggy service container went unused (the integration tests start
+  # their own). Here the cluster tests are the ignored ones, named
+  # explicitly, against the docker-compose.cluster.yaml stack.
+  cluster-tests:
+    name: Cluster Tests
     runs-on: ubuntu-latest
-    # A hang fails here, not at the 6-hour default
-    timeout-minutes: 30
-    if: ${{ github.event_name == 'schedule' || github.event.inputs.run_stress_tests == 'true' }}
-    services:
-      iggy:
-        # Keep in lockstep with docker-compose.yaml and tests/integration_tests.rs
-        image: apache/iggy:0.10.0
-        ports:
-          - 8090:8090
-        env:
-          # The server binds 127.0.0.1 by default - unreachable from the
-          # runner; credentials match the stress step's connection string
-          IGGY_ROOT_USERNAME: iggy
-          IGGY_ROOT_PASSWORD: iggy
-          IGGY_TCP_ADDRESS: 0.0.0.0:8090
-          IGGY_HTTP_ADDRESS: 0.0.0.0:3000
-          # The server refuses a wildcard bind unless it knows the address
-          # clients dial: the runner reaches it at localhost, port mapped 1:1
-          IGGY_NODE_ADVERTISED_ADDRESS: 127.0.0.1
-          # On by default, bound to loopback, and unused
-          IGGY_QUIC_ENABLED: "false"
-          IGGY_WEBSOCKET_ENABLED: "false"
-        # --privileged: the io_uring-based server (0.6+) cannot create its
-        # runtime under the default seccomp profile ("Operation not
-        # permitted"). Healthcheck uses the bundled iggy CLI - the image
-        # ships no curl (mirrors docker-compose's healthcheck).
-        # The runner holds the steps until this check passes, so no step
-        # needs to wait: curl against the binary TCP port is no readiness
-        # probe, and 0.10 holds such a connection open without answering.
-        options: >-
-          --privileged
-          --health-cmd "iggy ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
+    # The gateway image is a release (LTO) build
+    timeout-minutes: 45
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.run_cluster_tests == 'true' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -118,17 +91,31 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: Run stress tests
+      # A fresh pre-shared key per run: the nodes need one, and it guards
+      # nothing beyond this runner. In GITHUB_ENV so the later compose calls
+      # (which require it) see it too.
+      - name: Generate the cluster secret
         run: |
-          # Run integration tests with increased load
-          cargo test --locked --test '*' --all-features -- --ignored 2>/dev/null || {
-            echo "No ignored (stress) tests found, running regular integration tests with increased iterations..."
-            cargo test --locked --test '*' --all-features
-          }
-        env:
-          IGGY_CONNECTION_STRING: "iggy://iggy:iggy@localhost:8090"
-          STRESS_TEST_ITERATIONS: 1000
-          STRESS_TEST_CONCURRENCY: 50
+          secret="$(openssl rand -hex 32)"
+          echo "::add-mask::$secret"
+          echo "IGGY_CLUSTER_SHARED_SECRET=$secret" >> "$GITHUB_ENV"
+
+      - name: Start the cluster
+        run: docker compose -f docker-compose.cluster.yaml up -d --build --wait --wait-timeout 900
+
+      - name: Cluster tests
+        run: cargo test --locked --test cluster_tests -- --ignored --test-threads=1
+
+      - name: Failover demo
+        run: scripts/cluster-failover-demo.sh
+
+      - name: Cluster logs
+        if: failure()
+        run: docker compose -f docker-compose.cluster.yaml logs --no-color --tail 300
+
+      - name: Stop the cluster
+        if: always()
+        run: docker compose -f docker-compose.cluster.yaml down -v
 
   # ==========================================================================
   # Memory leak detection (Valgrind)
@@ -265,7 +252,7 @@ jobs:
   summary:
     name: Extended Tests Summary
     runs-on: ubuntu-latest
-    needs: [benchmarks, stress-tests, memory-check, miri, feature-matrix, doc-coverage]
+    needs: [benchmarks, cluster-tests, memory-check, miri, feature-matrix, doc-coverage]
     if: always()
     steps:
       - name: Generate summary
@@ -275,7 +262,7 @@ jobs:
           echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Benchmarks | ${{ needs.benchmarks.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Stress Tests | ${{ needs.stress-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster Tests | ${{ needs.cluster-tests.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Memory Check | ${{ needs.memory-check.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Miri | ${{ needs.miri.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Feature Matrix | ${{ needs.feature-matrix.result }} |" >> $GITHUB_STEP_SUMMARY

@@ -453,7 +453,7 @@ iggy_sample/
 │   │   ├── pr.yml              # PR checks (size, commits, docs)
 │   │   ├── release.yml         # Release builds, GitHub release, docs deploy
 │   │   ├── verify-release.yml  # Checks each green release run
-│   │   └── extended-tests.yml  # Weekly stress/benchmark tests
+│   │   └── extended-tests.yml  # Weekly cluster, benchmark and memory tests
 │   ├── dependabot.yml          # Automated dependency updates
 │   └── pull_request_template.md
 ├── Cargo.toml              # Dependencies and metadata
@@ -796,7 +796,7 @@ This project uses GitHub Actions for continuous integration and deployment:
 | `pr.yml` | PR | Size checks, conventional commits, semver |
 | `release.yml` | Tag `vX.Y.Z` or `vX.Y.Z-<suffix>` | Multi-platform builds, GitHub release, docs deploy |
 | `verify-release.yml` | Green Release run, or by hand | Checks the run with `scripts/verify-release.sh` |
-| `extended-tests.yml` | Weekly | Benchmarks, stress tests, memory checks |
+| `extended-tests.yml` | Weekly | Benchmarks, three-node cluster tests and failover demo, memory checks |
 
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`
