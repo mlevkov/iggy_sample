@@ -10,6 +10,7 @@ This directory contains comprehensive guides for understanding and working with 
 | [Partitioning Guide](partitioning-guide.md) | Deep dive into partition keys, ordering guarantees, and partition selection strategies |
 | [Durable Storage Guide](durable-storage-guide.md) | Storage architecture, per-topic durability (`replicated`/`persisted`) and retention options on server 0.10, setting them through the gateway, backup, recovery, and production recommendations |
 | [Three-Node Cluster Demo](cluster-demo.md) | Running a three-node Iggy cluster behind the gateway: leader failover under traffic, per-topic replication factors, seed addresses, and what `GET /cluster` does and does not tell you |
+| [Connectors Demo](connectors-demo.md) | Iggy's connector runtime with the HTTP source and sink: signed webhooks into a `persisted` topic, events back to the gateway's `/sink/inbound`, what each direction guarantees, the secrets and what is exposed, and issues found in the pinned releases |
 | [Structured Concurrency](structured-concurrency.md) | Task lifecycle management, cancellation tokens, and graceful shutdown patterns |
 | [Architecture Decision Records](adr/README.md) | Significant design decisions and their reasoning, starting with the Iggy upgrade plan (0.9, then 0.10) |
 

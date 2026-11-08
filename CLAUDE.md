@@ -45,6 +45,7 @@ changes nothing.
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
 | `TRUSTED_PROXIES` | (none) | Comma-separated CIDR ranges for trusted reverse proxies |
 | `ALLOW_UNVERIFIED_CLIENT_IPS` | `false` | Accept `API_KEY` without `TRUSTED_PROXIES` (local development only) |
+| `SINK_INBOUND_TOKEN` / `SINK_INBOUND_TOKEN_FILE` | (none) | Bearer token of the HTTP sink receiver; unset leaves `/sink/inbound` unrouted |
 
 #### Trusted Proxy Configuration
 
@@ -220,6 +221,44 @@ depends on (SDK 0.12, server 0.10):
   docker CLI) and runs weekly in Extended Tests, followed by
   `scripts/cluster-failover-demo.sh`, which exits non-zero on a missed
   budget.
+
+## Connectors
+
+`docker-compose.connectors.yaml` is an overlay on `docker-compose.yaml` that
+adds the connector runtime with upstream's HTTP source and sink;
+[docs/connectors-demo.md](docs/connectors-demo.md) explains it. Facts the
+code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
+
+- **Plugins are built from source.** `connectors/Dockerfile` compiles them
+  at the exact commit of the runtime image: they share a C ABI, so bump
+  `IGGY_COMMIT` and the runtime tag together. The runtime image's revision
+  label names a later commit, but the binary is release code.
+- **The runtime image needs `ca-certificates`.** Without system roots, the
+  HTTP sink's client fails to build. The connector SDK does not log a
+  plugin's `open()` error, so the runtime logs only "Plugin initialization
+  failed".
+- **Plugin secrets come from rendered TOML, not the environment.** Runtime
+  env overrides reach top-level plugin fields only. `connectors/init.sh`
+  generates the secrets into the `connectors_secrets` and `iggy_secrets`
+  volumes, and `connectors/entrypoint.sh` substitutes them after checking
+  each is hex of the expected length.
+- **The runtime API (8081) serves plugin secrets.** It stays unpublished and
+  requires an `api-key` header, which Prometheus sends from a file.
+- **`POST /sink/inbound`** (`src/services/sink_inbox.rs`) exists only with
+  `SINK_INBOUND_TOKEN[_FILE]`. Its bearer token is checked in constant time
+  by a route layer, before the body is read. A batch is kept whole or not
+  at all. It keeps at most 100 deliveries and 1 MiB in memory.
+- **Delivery.** The sink is at most once per batch (offsets are stored when
+  polled), and its HTTP retries can duplicate a batch. A source `200` means
+  buffered in memory.
+- **The poll API counts non-`Event` payloads in `skipped`** rather than
+  dropping them silently. The webhook topic takes any body.
+- **Known SDK 0.12.0 stall.** A consumer group that starts on a
+  multi-partition topic whose partitions are all empty holds the first
+  message until a second partition receives one. The demo and tests send
+  three events.
+- `tests/connectors_tests.rs` is `#[ignore]`d and runs weekly in Extended
+  Tests with `scripts/connectors-demo.sh`.
 
 ## Partition Indexing
 

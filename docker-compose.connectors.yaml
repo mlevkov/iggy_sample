@@ -1,0 +1,97 @@
+# Connectors demo: an overlay on docker-compose.yaml (ADR-0001 PR 4).
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.connectors.yaml up -d --build --wait
+#   scripts/connectors-demo.sh
+#
+# It adds the Iggy connector runtime with upstream's HTTP source and HTTP
+# sink plugins, built from source (connectors/Dockerfile), and wires both to
+# the gateway. docs/connectors-demo.md walks through it.
+#
+#   inbound   signed webhook -> HTTP source (host port 8085)
+#             -> sample-stream/webhooks (durability persisted)
+#             -> GET /streams/sample-stream/topics/webhooks/messages
+#   outbound  POST /messages -> sample-stream/events -> HTTP sink
+#             -> POST /sink/inbound on the gateway -> GET /sink/inbound
+#
+# Nothing needs configuring: connectors-init generates every secret into
+# two volumes on first start, and keeps them across restarts. Each service
+# mounts only the volumes it reads, read-only.
+#
+# The first build compiles the two plugins (a few minutes). Without this
+# file, docker-compose.yaml runs as before: no connectors, and the
+# gateway's /sink/inbound routes do not exist.
+
+services:
+    # One-shot: generate the demo's secrets and the runtime's personal
+    # access token (connectors/init.sh). Existing ones are kept.
+    connectors-init:
+        image: apache/iggy:0.10.0
+        container_name: iggy-connectors-init
+        entrypoint: ["/bin/sh", "/scripts/connectors-init.sh"]
+        volumes:
+            - ./connectors/init.sh:/scripts/connectors-init.sh:ro
+            - connectors_secrets:/secrets/connectors
+            - iggy_secrets:/secrets/iggy
+        depends_on:
+            iggy:
+                condition: service_healthy
+        restart: "no"
+        networks:
+            - iggy-network
+
+    # Connector runtime 0.6.0 with the two plugins
+    connectors:
+        build:
+            context: ./connectors
+            dockerfile: Dockerfile
+        image: iggy-sample-connectors:0.6.0
+        container_name: iggy-connectors
+        ports:
+            # The HTTP source's public listener. It answers only the
+            # secret-path webhook endpoint (/e/<id>) and /health. The
+            # runtime API (8081, it serves plugin secrets) and the source's
+            # admin listener (8086) stay on the compose network.
+            - "${WEBHOOK_PORT:-8085}:8085"
+        environment:
+            - RUST_LOG=${CONNECTORS_RUST_LOG:-info}
+        volumes:
+            - connectors_secrets:/run/secrets/connectors:ro
+            - iggy_secrets:/run/secrets/iggy:ro
+            # Runtime state; the source keeps endpoint state here once
+            # anything changes its registry (connectors/Dockerfile: 0700)
+            - connectors_state:/var/lib/iggy-connectors/state
+        depends_on:
+            connectors-init:
+                condition: service_completed_successfully
+            # The gateway creates sample-stream/events, which the sink's
+            # consumer group joins
+            app:
+                condition: service_healthy
+        restart: unless-stopped
+        networks:
+            - iggy-network
+
+    # The gateway, with its HTTP sink receiver switched on
+    app:
+        environment:
+            - SINK_INBOUND_TOKEN_FILE=/run/secrets/connectors/sink_inbound_token
+        volumes:
+            - connectors_secrets:/run/secrets/connectors:ro
+        depends_on:
+            connectors-init:
+                condition: service_completed_successfully
+
+    # Also scrape the runtime and the webhook listener
+    prometheus:
+        volumes:
+            - ./observability/prometheus/connectors.yml:/etc/prometheus/scrape.d/connectors.yml:ro
+        depends_on:
+            connectors-init:
+                condition: service_completed_successfully
+
+volumes:
+    # Webhook endpoint id and HMAC secret, the gateway receiver's token
+    connectors_secrets:
+        driver: local
+    connectors_state:
+        driver: local

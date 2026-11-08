@@ -3,6 +3,11 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Extra scrape jobs that compose overlays mount here, such as
+# docker-compose.connectors.yaml's connectors.yml. Matching nothing is fine.
+scrape_config_files:
+  - /etc/prometheus/scrape.d/*.yml
+
 scrape_configs:
   # Iggy server metrics. Since server 0.9, /metrics requires a bearer
   # credential (JWT or personal access token); docker-compose's iggy-pat-init

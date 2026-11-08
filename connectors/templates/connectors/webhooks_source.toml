@@ -1,0 +1,48 @@
+# Inbound: signed webhooks -> sample-stream/webhooks (HTTP source 0.6.0).
+#
+# An external system POSTs to /e/<endpoint id> on port 8085 with an
+# HMAC-SHA256 signature of the raw body in X-Signature-256 ("sha256=<hex>").
+# The runtime creates the topic if it is missing, with one partition and
+# durability = persisted, the only durability this source writes to.
+#
+# A 200 means the body is buffered in memory, not stored in Iggy: delivery
+# is best-effort, and a sender's retry can store a body twice
+# (docs/connectors-demo.md).
+
+type = "source"
+key = "webhooks"
+enabled = true
+version = 0
+name = "Webhook receiver (HTTP source)"
+path = "/usr/local/lib/iggy-connectors/libiggy_connector_http_source"
+
+[[streams]]
+stream = "sample-stream"
+topic = "webhooks"
+# The source produces raw bodies; any other schema refuses every message.
+schema = "raw"
+batch_length = 100
+linger_time = "5ms"
+
+[plugin_config]
+# Public listener, published to the host. No named /topics/... path: the
+# only routes are the secret-path endpoints below.
+listen_addr = "0.0.0.0:8085"
+# Admin listener: health and Prometheus metrics, reachable on the compose
+# network only. No management_token, so the endpoint management API is not
+# mounted.
+admin_listen_addr = "0.0.0.0:8086"
+instance_name = "webhooks"
+max_body_size_bytes = 1048576
+buffer_capacity = 1000
+max_batch_size = 100
+include_http_metadata = true
+# The sender's delivery id, the key a consumer deduplicates on.
+forward_headers = ["X-Webhook-Delivery"]
+
+[[plugin_config.endpoints]]
+endpoint_id = "@WEBHOOK_ENDPOINT_ID@"
+auth_type = "hmac-sha256"
+auth_secret = "@WEBHOOK_HMAC_SECRET@"
+hmac_header = "X-Signature-256"
+hmac_prefix = "sha256="

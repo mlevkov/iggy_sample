@@ -1,0 +1,37 @@
+# Outbound: sample-stream/events -> the gateway's POST /sink/inbound
+# (HTTP sink 0.6.0).
+#
+# Every event sent through the gateway reaches the sink's consumer group and
+# comes back to the gateway as one line of an ndjson batch, which
+# GET /sink/inbound reports.
+#
+# The runtime stores the group's offsets when it polls, before the plugin
+# delivers, so a batch that fails delivery is not retried later: at most
+# once. The plugin's own HTTP retries (429, 5xx, network errors) can deliver
+# a batch twice (docs/connectors-demo.md).
+
+type = "sink"
+key = "gateway_inbound"
+enabled = true
+version = 0
+name = "Gateway receiver (HTTP sink)"
+path = "/usr/local/lib/iggy-connectors/libiggy_connector_http_sink"
+
+[[streams]]
+stream = "sample-stream"
+topics = ["events"]
+# The gateway writes each event as a JSON document.
+schema = "json"
+batch_length = 100
+consumer_group = "gateway_inbound_sink"
+
+[plugin_config]
+url = "http://app:8000/sink/inbound"
+batch_mode = "ndjson"
+include_metadata = true
+timeout = "10s"
+max_payload_size_bytes = 1048576
+max_retries = 3
+
+[plugin_config.headers]
+Authorization = "Bearer @SINK_INBOUND_TOKEN@"

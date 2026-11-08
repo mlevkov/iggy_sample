@@ -1,0 +1,41 @@
+# Connector runtime configuration (iggy-connectors 0.6.0).
+#
+# A template: connectors/entrypoint.sh replaces each placeholder (a name in
+# capitals between at signs) with a secret from connectors-init and writes
+# the result where only the connectors user can read it. Anything left out
+# takes the runtime's built-in default.
+
+[http]
+# The runtime's API serves /metrics, /stats and every connector's
+# configuration, plugin secrets included. It listens on the compose network
+# only (no published port) and requires the api-key header everywhere but
+# / and /health. Prometheus sends that header.
+enabled = true
+address = "0.0.0.0:8081"
+api_key = "@RUNTIME_API_KEY@"
+
+[http.cors]
+enabled = false
+
+[http.metrics]
+enabled = true
+endpoint = "/metrics"
+
+[iggy]
+address = "iggy:8090"
+# A personal access token (iggy_secrets volume), so no password is stored
+# here. The runtime reads the file at startup.
+username = ""
+password = ""
+token = "file:/run/secrets/iggy/connectors_pat"
+
+[state]
+path = "/var/lib/iggy-connectors/state"
+storage = "file"
+
+[connectors]
+config_type = "local"
+config_dir = "@CONFIG_DIR@/connectors"
+
+[logging]
+format = "text"

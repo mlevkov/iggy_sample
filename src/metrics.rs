@@ -12,6 +12,8 @@
 //! - `iggy_circuit_breaker_opens_total` - Times the circuit breaker opened
 //! - `iggy_circuit_breaker_rejections_total` - Requests rejected by circuit breaker (label: state = open | half_open)
 //! - `iggy_circuit_breaker_probe_dispositions_total` - How half-open probe tokens ended (label: disposition = consumed | released | stale | abandoned | inconsistent)
+//! - `iggy_sink_inbound_requests_total` - Requests to `POST /sink/inbound` (label: outcome = accepted | rejected | unauthorized)
+//! - `iggy_sink_inbound_messages_total` - Messages accepted from the HTTP sink connector
 //!
 //! ## Histograms
 //! - `iggy_send_duration_seconds` - Message send duration
@@ -48,6 +50,8 @@ pub mod names {
     pub const CIRCUIT_BREAKER_REJECTIONS_TOTAL: &str = "iggy_circuit_breaker_rejections_total";
     pub const CIRCUIT_BREAKER_PROBE_DISPOSITIONS_TOTAL: &str =
         "iggy_circuit_breaker_probe_dispositions_total";
+    pub const SINK_INBOUND_REQUESTS_TOTAL: &str = "iggy_sink_inbound_requests_total";
+    pub const SINK_INBOUND_MESSAGES_TOTAL: &str = "iggy_sink_inbound_messages_total";
     pub const SEND_DURATION_SECONDS: &str = "iggy_send_duration_seconds";
     pub const POLL_DURATION_SECONDS: &str = "iggy_poll_duration_seconds";
     pub const CONNECTION_STATUS: &str = "iggy_connection_status";
@@ -102,6 +106,17 @@ pub fn init_metrics(metrics_addr: SocketAddr) -> Result<(), String> {
          inconsistent (returned to a window that was already whole - a bug). \
          The labels partition every admitted token, so consumed is usable as a \
          denominator."
+    );
+
+    describe_counter!(
+        names::SINK_INBOUND_REQUESTS_TOTAL,
+        "Requests to POST /sink/inbound by outcome: accepted, rejected (an \
+         authenticated batch that was malformed or not ndjson), or \
+         unauthorized (missing or wrong bearer token)"
+    );
+    describe_counter!(
+        names::SINK_INBOUND_MESSAGES_TOTAL,
+        "Messages accepted from the HTTP sink connector"
     );
 
     describe_histogram!(
@@ -177,6 +192,18 @@ pub fn record_circuit_breaker_rejection(state: &'static str) {
 pub fn record_circuit_breaker_probe_disposition(disposition: &'static str) {
     counter!(names::CIRCUIT_BREAKER_PROBE_DISPOSITIONS_TOTAL, "disposition" => disposition)
         .increment(1);
+}
+
+/// Record a request to `POST /sink/inbound`: `"accepted"`, `"rejected"` (an
+/// authenticated batch that was malformed or not ndjson) or
+/// `"unauthorized"`.
+pub fn record_sink_inbound_request(outcome: &'static str) {
+    counter!(names::SINK_INBOUND_REQUESTS_TOTAL, "outcome" => outcome).increment(1);
+}
+
+/// Record messages accepted from the HTTP sink connector.
+pub fn record_sink_inbound_messages(count: u64) {
+    counter!(names::SINK_INBOUND_MESSAGES_TOTAL).increment(count);
 }
 
 // =============================================================================

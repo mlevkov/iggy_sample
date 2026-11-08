@@ -261,13 +261,14 @@ jobs:
         steps:
             - uses: actions/checkout@v7
             # Preinstalled on GitHub's ubuntu runners. scripts/ is bash;
-            # observability/ runs under the Iggy image's POSIX /bin/sh, so it
-            # is checked as sh.
+            # observability/ and connectors/ run under Debian's POSIX
+            # /bin/sh (the Iggy and connector images), so they are checked
+            # as sh.
             - name: Lint shell scripts
               run: |
                   shellcheck --version
                   shellcheck -s bash scripts/*.sh
-                  shellcheck -s sh observability/*.sh
+                  shellcheck -s sh observability/*.sh connectors/*.sh
 
     # ==========================================================================
     # Final status check (for branch protection)

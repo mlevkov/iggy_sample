@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A connectors demo (ADR-0001 PR 4, pinned per ADR-0002), described in
+  `docs/connectors-demo.md`:
+  - `docker-compose.connectors.yaml`, an overlay on the main stack, adds
+    Iggy's connector runtime with upstream's HTTP source and HTTP sink.
+    Signed webhooks (HMAC-SHA256 over the body, on a secret path, host port
+    8085) land in a `persisted` `sample-stream/webhooks` topic that the
+    gateway's poll API reads. Events sent through the gateway come back
+    through the sink to its new receiver, `POST /sink/inbound`.
+  - `connectors/Dockerfile` compiles both plugins from apache/iggy at the
+    release commit `91e02063`, fetched by full hash, and puts them on
+    `apache/iggy-connect:0.6.0`. It adds `ca-certificates`, without which
+    the sink's HTTP client fails to build. It runs as a non-root user, and
+    its healthcheck passes once both connectors run.
+  - `connectors-init` generates every secret, plus the runtime's personal
+    access token, into two volumes on first start and keeps them across
+    restarts; nothing needs configuring. Each service mounts only the
+    volumes it reads, and files read by one service are `0400` and owned by
+    it. The entrypoint checks each secret's form before rendering it into
+    the runtime's TOML, since plugin secrets cannot come from the
+    environment.
+  - Prometheus scrapes the runtime (with a generated `api-key` header from
+    a file) and the source's admin metrics. A Grafana "Iggy Connectors"
+    dashboard shows them alongside the gateway's receiver.
+  - `scripts/connectors-demo.sh` runs both flows and exits non-zero on a
+    failed step. `tests/connectors_tests.rs` (ignored by default) covers
+    signed and forged webhooks, the sink round trip, the receiver's token
+    and both scrape jobs. A weekly Extended Tests job, Connectors Tests
+    (input `run_connectors_tests`), runs both.
+  - The guide states each direction's delivery semantics: the sink delivers
+    each batch at most once (offsets are stored when polled), and its HTTP
+    retries can duplicate a batch. A source `200` means buffered in memory.
+    It also records an SDK 0.12.0 consumer stall on topics whose partitions
+    all start empty.
+- `POST /sink/inbound` and `GET /sink/inbound`, the HTTP sink connector's
+  receiver, routed only when `SINK_INBOUND_TOKEN` (or
+  `SINK_INBOUND_TOKEN_FILE`) is set:
+  - The `POST` needs that token as a bearer credential, checked in constant
+    time before the body is read; refusals answer `401` and are counted.
+  - It accepts an `ndjson` batch whole or not at all (`400` names the bad
+    line, `415` for another content type).
+  - The `GET` reports lifetime counters and the newest deliveries, at most
+    100 and 1 MiB.
+  - Two new metrics: `iggy_sink_inbound_requests_total{outcome}` and
+    `iggy_sink_inbound_messages_total`.
+  - The token must be 32 to 1024 printable characters, and the `Config`
+    debug output redacts it.
+- Poll responses report `skipped`: messages left out because their payload
+  is not an `Event`. Before, the response only shrank, with a log line.
 - A three-node cluster demo (ADR-0001 PR 3, with ADR-0002's per-topic
   replication factor), described in `docs/cluster-demo.md`:
   - `docker-compose.cluster.yaml` runs three nodes on a fixed subnet, with
@@ -114,6 +162,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `prometheus.yml` includes `/etc/prometheus/scrape.d/*.yml`, where compose
+  overlays mount extra scrape jobs; without one the include matches nothing
+- CI's Shellcheck job also checks `connectors/*.sh`, as POSIX sh
 - Extended Tests' stress job is replaced by Cluster Tests, which runs the
   cluster tests and the failover script against `docker-compose.cluster.yaml`
   (workflow input `run_cluster_tests`). The stress job never ran a test: its

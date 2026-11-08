@@ -86,8 +86,9 @@ impl ConsumerService {
         crate::metrics::record_poll_duration(stream, topic, start.elapsed().as_secs_f64());
         let polled = result?;
 
-        let messages = self.parse_messages(&polled.messages);
+        let messages = Self::parse_messages(&polled.messages);
         let message_count = messages.len();
+        let skipped = polled.messages.len().saturating_sub(message_count);
 
         self.messages_consumed
             .fetch_add(message_count as u64, Ordering::Relaxed);
@@ -96,6 +97,7 @@ impl ConsumerService {
         Ok(PollMessagesResponse {
             messages,
             count: message_count,
+            skipped,
             partition_id,
             current_offset: polled.current_offset,
         })
@@ -106,9 +108,10 @@ impl ConsumerService {
     /// # Message Parsing
     ///
     /// - Successfully parsed messages are returned in the result
-    /// - Failed parsing is logged and the message is skipped
+    /// - Failed parsing is logged and the message is skipped; the response
+    ///   counts it in `skipped`
     /// - Invalid timestamps are logged and fall back to current time
-    fn parse_messages(&self, messages: &[IggyMessage]) -> Vec<ReceivedMessage> {
+    fn parse_messages(messages: &[IggyMessage]) -> Vec<ReceivedMessage> {
         let mut parsed = Vec::with_capacity(messages.len());
 
         for msg in messages {
@@ -116,7 +119,7 @@ impl ConsumerService {
                 Ok(event) => {
                     // Convert timestamp with proper error handling
                     let timestamp =
-                        self.parse_timestamp(msg.header.timestamp as i64, msg.header.offset);
+                        Self::parse_timestamp(msg.header.timestamp as i64, msg.header.offset);
 
                     parsed.push(ReceivedMessage {
                         offset: msg.header.offset,
@@ -127,11 +130,16 @@ impl ConsumerService {
                     });
                 }
                 Err(e) => {
+                    // The kind and position only: serde's message can quote
+                    // part of the payload, which may come from outside (the
+                    // connectors demo's webhook topic takes any body).
                     warn!(
                         offset = msg.header.offset,
                         message_id = msg.header.id,
                         payload_size = msg.payload.len(),
-                        error = %e,
+                        error_kind = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
                         "Failed to parse message as Event, skipping"
                     );
                 }
@@ -153,7 +161,7 @@ impl ConsumerService {
     /// If the timestamp cannot be converted (e.g., overflow, invalid value),
     /// a warning is logged with the message offset for debugging, and the
     /// current time is returned as a fallback.
-    fn parse_timestamp(&self, timestamp_micros: i64, message_offset: u64) -> DateTime<Utc> {
+    fn parse_timestamp(timestamp_micros: i64, message_offset: u64) -> DateTime<Utc> {
         match DateTime::from_timestamp_micros(timestamp_micros) {
             Some(dt) => dt,
             None => {
@@ -174,8 +182,33 @@ impl ConsumerService {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_messages_leaves_out_payloads_that_are_not_events() {
+        use std::str::FromStr;
+
+        let event = serde_json::json!({
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "event_type": "test.event",
+            "timestamp": "2026-11-08T00:00:00Z",
+            "payload": {"type": "Generic", "data": {}}
+        });
+        let messages = [
+            IggyMessage::from_str(&event.to_string()).unwrap(),
+            IggyMessage::from_str(r#"{"zen": "not an event"}"#).unwrap(),
+        ];
+
+        let parsed = ConsumerService::parse_messages(&messages);
+
+        assert_eq!(parsed.len(), 1, "the webhook-style body is skipped");
+        assert_eq!(
+            parsed.first().map(|m| m.event.event_type.as_str()),
+            Some("test.event")
+        );
+    }
 
     #[test]
     fn test_consumer_messages_counter() {

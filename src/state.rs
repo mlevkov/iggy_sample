@@ -31,7 +31,7 @@ use tracing::{debug, info, trace, warn};
 use crate::config::Config;
 use crate::iggy_client::IggyClientWrapper;
 use crate::middleware::RequestTimeout;
-use crate::services::{ConsumerService, ProducerService};
+use crate::services::{ConsumerService, ProducerService, SinkInbox};
 
 /// Cached statistics for efficient `/stats` endpoint.
 ///
@@ -88,6 +88,9 @@ pub struct AppState {
     pub started_at: Instant,
     /// Application configuration
     pub config: Arc<Config>,
+    /// What the connectors demo's HTTP sink delivered; `None` unless
+    /// `SINK_INBOUND_TOKEN` is set, which leaves `/sink/inbound` unrouted
+    pub sink_inbox: Option<Arc<SinkInbox>>,
     /// Cached statistics (refreshed in background)
     stats_cache: Arc<RwLock<CachedStats>>,
     /// Tracks spawned background tasks for graceful shutdown
@@ -112,6 +115,10 @@ impl AppState {
     pub fn new(iggy_client: IggyClientWrapper, config: Config) -> Self {
         let producer = ProducerService::new(iggy_client.clone());
         let consumer = ConsumerService::new(iggy_client.clone());
+        let sink_inbox = config
+            .sink_inbound_token
+            .clone()
+            .map(|token| Arc::new(SinkInbox::new(token)));
         let config = Arc::new(config);
         let stats_cache = Arc::new(RwLock::new(CachedStats::default()));
         let task_tracker = TaskTracker::new();
@@ -123,6 +130,7 @@ impl AppState {
             consumer,
             started_at: Instant::now(),
             config,
+            sink_inbox,
             stats_cache,
             task_tracker,
             cancellation_token,
