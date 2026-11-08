@@ -18,7 +18,11 @@
 //! changes.
 //!
 //! The SDK's own parser allows exactly one `@` and at most one `:` in the
-//! credentials, so splitting the server part on `,` is unambiguous.
+//! credentials, so splitting the server part on `,` is unambiguous. A string
+//! with more than one `@` (a password containing one) is refused here, and
+//! every address must look like `host:port` before it is logged or repeated:
+//! otherwise part of a password could land in the server list, and from
+//! there in the logs.
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -65,13 +69,21 @@ impl fmt::Debug for Seed {
 /// # Errors
 ///
 /// A reason the string cannot be expanded. The reason never repeats the
-/// string itself, which holds credentials. Everything past the split (the
-/// scheme, the credentials, each address, the options) is left to the SDK's
-/// own parser when a client is built.
+/// string, which holds credentials, and names an address only once it has
+/// passed the `host:port` check. Everything past the split (the scheme, the
+/// credentials, the port number, the options) is left to the SDK's own
+/// parser when a client is built.
 pub(crate) fn expand(connection_string: &str) -> Result<Vec<Seed>, String> {
     let (scheme, rest) = connection_string
         .split_once("://")
         .ok_or("the connection string needs a scheme, e.g. iggy://user:pass@host:8090")?;
+    if rest.matches('@').count() > 1 {
+        return Err(
+            "the connection string has more than one '@'; the SDK allows exactly one, \
+                    so credentials cannot contain '@'"
+                .into(),
+        );
+    }
     let (credentials, servers_and_options) = rest
         .split_once('@')
         .ok_or("the connection string needs credentials, e.g. iggy://user:pass@host:8090")?;
@@ -84,6 +96,9 @@ pub(crate) fn expand(connection_string: &str) -> Result<Vec<Seed>, String> {
     for address in servers.split(',').map(str::trim) {
         if address.is_empty() {
             return Err("the connection string lists an empty server address".into());
+        }
+        if !looks_like_host_port(address) {
+            return Err("a server address in the connection string is not host:port".into());
         }
         if seeds.iter().any(|seed| seed.address == address) {
             return Err(format!(
@@ -99,6 +114,16 @@ pub(crate) fn expand(connection_string: &str) -> Result<Vec<Seed>, String> {
         });
     }
     Ok(seeds)
+}
+
+/// Whether `address` holds only characters a `host:port` can (letters,
+/// digits, `.`, `-`, `_`, and `:`/`[`/`]` for the port and IPv6), with a
+/// `:`. Safe to log once true.
+fn looks_like_host_port(address: &str) -> bool {
+    address.contains(':')
+        && address
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
 }
 
 /// The seeds, with a cursor on the one to try next.
@@ -273,6 +298,27 @@ mod tests {
             let error = expand(raw).expect_err(raw);
             assert!(!error.contains("secret"), "{raw}: {error}");
         }
+    }
+
+    #[test]
+    fn test_expand_refuses_an_at_sign_in_the_password_without_leaking_it() {
+        // Split at the first '@', "ss@a:1" would become a "server address"
+        // and reach the logs.
+        let error = expand("iggy://iggy:p@ss@a:1").expect_err("two '@'");
+        assert!(!error.contains("ss"), "{error}");
+    }
+
+    #[test]
+    fn test_expand_refuses_addresses_that_are_not_host_port() {
+        for raw in [
+            "iggy://u:p@a:1/path",
+            "iggy://u:p@a:1,not an address",
+            "iggy://u:p@hostonly",
+        ] {
+            let error = expand(raw).expect_err(raw);
+            assert!(error.contains("not host:port"), "{raw}: {error}");
+        }
+        assert!(expand("iggy://u:p@[::1]:8090,my-host_1.local:8090").is_ok());
     }
 
     #[test]

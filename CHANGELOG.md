@@ -120,9 +120,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo test -- --ignored` matched none, its fallback ran only on failure,
   and its Iggy service container went unused, since the integration tests
   start their own
-- A malformed `IGGY_CONNECTION_STRING` (no scheme or credentials, an empty
-  or repeated address) now fails configuration validation, without
-  repeating the string. A failed startup connection lists each seed's error
+- A malformed `IGGY_CONNECTION_STRING` (no scheme or credentials, more than
+  one `@`, an empty, repeated or non-`host:port` address) now fails
+  configuration validation, without repeating the string. A failed startup
+  connection lists each seed's error
 - **Breaking:** `POST /streams/{stream}/topics` refuses unknown fields with
   `422`, at the top level and inside `options`. Unknown fields were ignored,
   so a misspelt or misplaced option would have left the topic on a server
