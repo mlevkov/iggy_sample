@@ -23,6 +23,10 @@ before the per-topic options PR).
 [ADR-0003](docs/adr/0003-cap-sdk-reconnection-retries.md) caps the SDK's
 reconnection retries by default.
 
+What was in flight at the end of the last session, and the findings not to
+re-derive, are in [docs/SESSION-STATE.md](docs/SESSION-STATE.md) (newest
+block first).
+
 ## Configuration
 
 Every environment variable and its default is defined in `src/config.rs`; see
@@ -249,7 +253,8 @@ code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
   requires an `api-key` header, which Prometheus sends from a file.
 - **`POST /sink/inbound`** (`src/services/sink_inbox.rs`) exists only with
   `SINK_INBOUND_TOKEN[_FILE]`. Its bearer token is checked in constant time
-  by a route layer, before the body is read. A batch is kept whole or not
+  by a layer on the POST route (`post(..).layer(..)` in `routes.rs`), before
+  the body is read. A batch is kept whole or not
   at all. It keeps at most 100 deliveries and 1 MiB in memory.
 - **Delivery.** The sink is at most once per batch (offsets are stored when
   polled), and its HTTP retries can duplicate a batch. A source `200` means
@@ -295,9 +300,11 @@ flag.
 `seeds::DEFAULT_RECONNECTION_RETRIES`). `seeds::expand` adds the transport's
 option (`reconnection_retries`, or `reconnection_max_retries` for QUIC) to
 each seed unless `IGGY_CONNECTION_STRING` sets it.
-- **Why:** with the SDK default, `unlimited`, a full outage makes every call
-  wait out the SDK deadline and fail as `TransientNotAccepted`, which the
-  breaker deliberately ignores, so requests hang for 30 s indefinitely.
+- **Why:** with the SDK default, `unlimited`, during a full outage every call
+  waits until the server returns or the SDK's 30 s deadline passes, then
+  fails as `TransientNotAccepted`. The breaker deliberately ignores that
+  error, so requests keep waiting up to 30 s for as long as the outage
+  lasts.
 - **With the cap:** the SDK answers `NotConnected` once its retries run out.
   The breaker opens and requests get an immediate 503. The SDK's keepalive
   (every 5 s) restarts a client that ran out, with a fresh budget, so it

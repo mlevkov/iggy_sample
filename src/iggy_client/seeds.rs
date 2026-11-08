@@ -29,8 +29,9 @@
 //! Each seed's connection string also caps the SDK's reconnection retries at
 //! [`DEFAULT_RECONNECTION_RETRIES`] unless the string sets the option itself
 //! (ADR-0003). With the SDK's default, `unlimited`, a full outage never ends
-//! a client's reconnecting, so every call waits out the SDK's 30 s deadline
-//! and fails with `TransientNotAccepted`, which the circuit breaker
+//! a client's reconnecting, so every call waits until the server returns or
+//! the SDK's 30 s deadline passes, and then fails with
+//! `TransientNotAccepted`, which the circuit breaker
 //! deliberately does not count. With a cap, the SDK reports `NotConnected`
 //! once its retries run out, the breaker opens, and callers get an immediate
 //! 503 until the server is back. The SDK's keepalive restarts a client that
