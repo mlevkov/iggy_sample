@@ -46,10 +46,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
           target/release/libiggy_connector_http_sink.so /out/
 
 FROM ${RUNTIME_IMAGE}
-# The runtime image has no CA certificates. The HTTP sink's client verifies
-# TLS against the system roots and refuses to build without any, even for
-# a plain http:// URL, so the plugin's open() fails, and the runtime logs
-# only "Plugin initialization failed". curl serves the healthcheck.
+# The runtime image has no CA certificates (apache/iggy#4787). The HTTP
+# sink's client verifies TLS against the system roots and refuses to build
+# without any, even for a plain http:// URL, so the plugin's open() fails,
+# and the runtime logs only "Plugin initialization failed"
+# (apache/iggy#4786). curl serves the healthcheck.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*

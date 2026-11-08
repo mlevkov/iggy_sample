@@ -14,10 +14,11 @@
 #   outbound  sends three events through the gateway's POST /messages,
 #             which spreads them over the topic's three partitions, then
 #             watches GET /sink/inbound until the HTTP sink has delivered all
-#             three back. Three, not one: with SDK 0.12.0, a consumer group
-#             that starts on a topic whose partitions are all empty holds
-#             the first message until a second partition receives one
-#             (docs/connectors-demo.md, Known issues).
+#             three back. Three, not one: with SDK 0.12.0, an OnRead
+#             consumer group does not fetch a partition while another in
+#             its readiness group has never held a message, and on a fresh
+#             stack every partition is empty (apache/iggy#4784;
+#             docs/connectors-demo.md, Known Issues).
 #
 # The webhook's endpoint id and HMAC secret are read from the connectors
 # container (connectors-init generated them) and never printed. The secret

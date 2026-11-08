@@ -156,9 +156,10 @@ impl TopicOptionsInput {
             .segment_size
             .map_or(DEFAULT_SEGMENT_SIZE, |size| size.as_bytes_u64());
 
-        // The server refuses this too (`InvalidTopicSize`), but its message
-        // in 0.10 prints neither value. The whole topic's cap is compared,
-        // not the per-partition share it is enforced as.
+        // The server refuses this too (`InvalidTopicSize`), but the client
+        // gets only the error code, and the SDK prints placeholder values
+        // for both sizes (apache/iggy#4785). The whole topic's cap is
+        // compared, not the per-partition share it is enforced as.
         if let Some(MaxTopicSize::Custom(cap)) = options.max_topic_size
             && cap.as_bytes_u64() < segment_bytes
         {
