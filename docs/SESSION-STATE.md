@@ -10,7 +10,232 @@ re-derive.
 
 ---
 
-## CURRENT: State 1, 2026-11-08: the Iggy 0.10 sequence is complete
+## CURRENT: State 2, 2026-11-08: v0.5.0 is released
+
+State 1 below still holds, except where this block supersedes it. Its open
+item 4, the release, is done, and `main` has moved. Its "Deliberate calls",
+"CARRIED" and "DO NOT RE-DERIVE" sections carry forward unchanged. Read
+them too.
+
+### What shipped
+
+| PR | Merge | Head | What |
+|---|---|---|---|
+| #85 | `7adfd66` | `4ed97d0` | This file with State 1; corrected statements in ADR-0002 and ADR-0003 |
+| #86 | `d24a269` | `03d5eaa` | v0.5.0: Coverage Diff fix, Codecov upload dropped (TD-2026-09-03), version 0.5.0 |
+
+**v0.5.0 is released.**
+- **Tag:** annotated `v0.5.0` on `d24a269`, with the message "v0.5.0: Iggy
+  server 0.10 and SDK 0.12, per-topic options, cluster and connectors
+  demos". v0.2.0 to v0.4.1 use the same annotated form; v0.1.0 is
+  lightweight. I pushed it
+  after the user merged #86. The classifier did not block the tag push.
+- **Release run 42514350003:** success, all eight jobs (Validate Release,
+  five builds, Create Release, Deploy Documentation).
+- **GitHub release "Release v0.5.0":** Latest, not a draft or prerelease,
+  published 2026-11-08T19:25:37Z, five assets.
+- **Pages:** the `github-pages` deployment of `d24a269` (ref `v0.5.0`)
+  succeeded at 19:26:53Z.
+- **Verify Release run 42515088161** (`workflow_run`, on `d24a269`):
+  success, 41 passed, 0 failed, 0 skipped. It is the first stable release
+  to pass outright. The verifier's only earlier run on a stable tag,
+  36068815000 on v0.4.1, failed one check, as CONTRIBUTING says it must for
+  the masked publish step. This run reported "PASS no publish job, as Cargo.toml's
+  publish = false wants" and "PASS crates.io does not have iggy_sample
+  0.5.0 (publish = false; HTTP 404)".
+- **CHANGELOG:** `[Unreleased]` is empty. `[0.5.0] - 2026-11-08` opens
+  with a summary of the release.
+
+**Three breaking changes, not two.** State 1 item 4 counted #77 and #79.
+The third came from #68: startup refuses `API_KEY` without
+`TRUSTED_PROXIES`. The 0.5.0 summary lists all three.
+
+**TD-2026-09-03 is resolved** with option 2, which the user chose.
+- ci.yml's Codecov step is gone. No workflow references `codecov-action`
+  or `CODECOV_TOKEN` any more; only tech-debt records name them, as
+  history.
+- Code Coverage runs `cargo llvm-cov --summary-only` and writes the line
+  total from the `TOTAL` row to its job summary.
+
+**Coverage Diff had never worked before #86.** Checking the record's
+mitigation found it.
+- pr.yml grepped for a `Total coverage:` line that cargo-llvm-cov does not
+  print, so every PR logged `unknown%` and the warning below 60% could not
+  fire.
+- It now reads the `TOTAL` row and warns when that row yields no number.
+- Commit `a026dd9`'s message says "cargo-llvm-cov 0.6". CI installs the
+  latest cargo-llvm-cov on every run (its log says `installing
+  cargo-llvm-cov@latest`), which on 2026-11-08 was 0.9.1. 0.6.9 is the
+  local version.
+
+**Upstream:** apache/iggy #4784 to #4787 are open, with no comments and no
+labels (`gh issue view <n> -R apache/iggy`, checked after the release). The
+user says the Iggy maintainer will comment on them later. Post nothing.
+
+### Gate
+
+- #86 passed 24 of 24 checks at `03d5eaa`. CI on `main` at `d24a269`
+  passed (run 42514315331).
+- **The code has not changed since State 1's figures,** which come from
+  the #84 tree.
+  `git diff --stat 5b211e6 d24a269 -- src tests connectors scripts docker-compose.yaml docker-compose.cluster.yaml docker-compose.connectors.yaml Cargo.toml Cargo.lock`
+  shows the version line in `Cargo.toml` and `Cargo.lock`, plus #85's
+  doc-comment edit in `src/iggy_client/seeds.rs`, and no code. So State
+  1's local figures still stand. None was re-run.
+- **The release binary:** Verify Release ran it on Linux (exit 78 under
+  `OPERATION_TIMEOUT_SECS=0`, version logged). A local debug build of the
+  `03d5eaa` tree did the same before the tag was pushed.
+
+### THE OPEN WORK
+
+Nothing is due before 2026-11-09 (the blog post's expected date) or
+2026-11-15 (the scheduled run). No tech-debt record is bound to the next
+release: TD-2026-09-03 and TD-2026-09-04 are resolved. If the user asks for
+nothing, ask; do not invent work.
+
+1. **Re-check ADR-0002 against the 0.10.0 release blog post,** as State 1
+   item 1 describes. It still answered 404 after the release, with
+   apache/iggy-website `main` still at `331d0614`.
+2. **Read the 2026-11-15 scheduled Extended Tests run,** as State 1 item 2
+   describes. `d24a269` is after `5b211e6`, so a run on it counts.
+3. **Upstream #4784 to #4787,** as State 1 item 3 describes. In addition,
+   the Iggy maintainer said they will comment. Read their comments before
+   anything else, and post, label or reply nothing without the user's OK.
+   State 1's command for finding the references, `grep -rln 478[4-7]`,
+   fails in zsh ("no matches found"). Use
+   `grep -rln '478[4-7]' . --exclude-dir=target --exclude-dir=.git --exclude=Cargo.lock --exclude=SESSION-STATE.md`,
+   which lists the eight files State 1 names. Without the exclusions it
+   would also match a checksum in `Cargo.lock` and this file's history.
+4. **Optional, only on the user's request:** the #81 review notes in State
+   1's CARRIED.
+
+### Deliberate calls (in addition to State 1's)
+
+- **The Codecov upload is dropped, not waiting for a token.** Nothing read
+  it, and it added a third-party action and a secret to manage. Re-adding
+  it is TD-2026-09-03's option 1, and the user's call.
+- **Coverage Diff warns and never fails.** It does not set `pipefail`, so
+  a failed suite there shows as the "No line coverage total" warning.
+  **Code Coverage sets `pipefail`** and fails with the suite, as it did
+  before. Neither job is a required check.
+- **The release order.** Merge the release PR (the user runs the admin
+  merge), then I create the annotated tag on the merge commit and push it,
+  then watch Release and Verify Release.
+
+### CARRIED (tracked nowhere else)
+
+- State 1's list, unchanged.
+- State 1's kickoff is superseded by the one below.
+- **CI's cargo-llvm-cov is not pinned.** `tool: cargo-llvm-cov` in ci.yml
+  and pr.yml installs the latest release; only the install action is
+  pinned (v2.90.1). Both coverage steps read the `TOTAL` row's tenth field,
+  so a release that changes that row's layout trips the "No line coverage
+  total" warning. Pinning it (`tool: cargo-llvm-cov@0.9.1`) is a possible
+  follow-up, not done and not asked for.
+- **A second integration-fixture flake: "Cannot bind to socket".**
+  - **What fails:** the Iggy container exits at startup, and the test
+    panics with "Failed to start Iggy container"
+    (`tests/integration_tests.rs`, `IggyContainer::start`). The server logs
+    "failed to start server listeners via replica_io
+    replica_addr=0.0.0.0:0 client_addr=0.0.0.0:<port> error=Cannot bind to
+    socket with addr: 0.0.0.0:<port>". `<port>` is the client port that
+    `find_available_port` picked on the host.
+  - **Seen twice:**
+    - CI run 42419060930 on `main`, 2026-11-07: port 37485, in the required
+      Integration Tests job;
+    - #87's CI run 42515908933, attempt 1: port 37621, in Code Coverage.
+      Attempt 2 passed.
+  - **A candidate cause, not verified:** the bind fails inside the
+    container, in the same call that binds the replica listener on port 0.
+    Both ports lie in Linux's ephemeral range (32768-60999), so an
+    in-container ephemeral bind may take the client port first. A possible
+    fix is to pick the port below 32768.
+  - **Status:** not tracked anywhere, not fixed, and not asked for. It is
+    distinct from the Docker Hub pull flake in State 1's CARRIED ("bytes
+    remaining on stream"), which also struck Code Coverage on run
+    42428510742.
+
+### DO NOT RE-DERIVE (in addition to State 1's; each probe names its input)
+
+| Finding | Input | Result |
+|---|---|---|
+| Coverage Diff never read a total before #86 | #85's PR Checks run 42475621793, Coverage Diff job 128716215642, its log | The `TOTAL` row reads 90.11% of lines. The step printed `Current test coverage: unknown%`. It grepped for `Total coverage:`, which the summary does not contain |
+| The cargo-llvm-cov CI ran on 2026-11-08 | the same job's log, and #86's jobs 128832500251 and 128833120127 | Each log says `installing cargo-llvm-cov@latest`, then downloads v0.9.1. The action is pinned (v2.90.1); the tool is not. The local one is 0.6.9. The "No line coverage total" warning is the tripwire for a changed `TOTAL` row |
+| The fix works | #86's PR Checks run 42513865804 (Coverage Diff job 128832500251), and CI run 42513865807 (Code Coverage job 128833120127) | Coverage Diff printed `Current test coverage: 90.11% of lines`. The Code Coverage log has the `TOTAL` row and no warning. The check-runs API does not return the job summary (`output.summary` is empty), so its "Line coverage: 90.11%" line was inferred from the missing warning |
+| The 0.5.0 binary passes the verifier's host check | a local debug build of the `03d5eaa` tree, run from an empty directory with `env -i OPERATION_TIMEOUT_SECS=0 RUST_LOG=info` | Exit 78, and "Starting Iggy Sample Application v0.5.0". Verify Release 42515088161 then passed on the release asset, with 0 skipped |
+
+### Kickoff
+
+```text
+Continue iggy_sample (/Users/maxim/rust_projects/iggy_sample).
+Start with: git switch main && git pull. Then read docs/SESSION-STATE.md:
+block "CURRENT: State 2" first, then State 1's "THE OPEN WORK" items
+1-3, "Deliberate calls", "CARRIED" and "DO NOT RE-DERIVE", which still
+hold. Treat both probe tables as settled; do not re-derive those findings.
+
+State: v0.5.0 is released. The annotated tag is on d24a269, and Release
+(42514350003) and Verify Release (42515088161) are green. main is at
+d24a269, or at the later docs-only merge that added State 2. Iggy server
+0.10.0, SDK 0.12.0, connectors 0.6.0. There is no feature work in flight,
+and no tech-debt record is bound to the next release. Nothing is due
+before 2026-11-09 or 2026-11-15. If the user asked for nothing, ask; do
+not invent work.
+
+Open work, in order:
+1. Is the 0.10.0 release blog post published?
+     gh api repos/apache/iggy-website/contents/content/blog/release-0.10.0.mdx --jq .name
+   It answered 404 on 2026-11-08, also after the release. Its front-matter
+   date sets the URL, so do not poll a guessed date. Once it is out,
+   compare it with ADR-0002 and its Corrections section. Add anything new
+   as a dated Corrections entry; a changed decision needs a new ADR.
+2. After 2026-11-15, read the first scheduled Extended Tests run of the
+   Cluster Tests and Connectors Tests jobs:
+     gh run list --workflow extended-tests.yml --event schedule --limit 1
+     gh run view <id> --json headSha,jobs
+   Done when both are success on a headSha at or after 5b211e6.
+3. apache/iggy #4784-#4787: the Iggy maintainer said they will comment.
+   Read their comments first. Do not label them, post on them or reply
+   without the user's OK: they were filed as the user. #4784 is fixed
+   for us only by a connectors release that carries the fix, or the sinks'
+   at_least_once (#4734). Then bump IGGY_COMMIT and RUNTIME_IMAGE together
+   in connectors/Dockerfile, go back to one event in the demo script and the
+   round-trip test, then run the connectors suite and an Extended Tests
+   dispatch. Update the files that this lists (quoted, or zsh refuses it):
+     grep -rln '478[4-7]' . --exclude-dir=target --exclude-dir=.git --exclude=Cargo.lock --exclude=SESSION-STATE.md
+   Keep #4785's max_topic_size check and #4787's ca-certificates layer
+   even once fixed. #4786 has no workaround: update the docs only.
+4. Only on request: the #81 review notes in State 1's CARRIED.
+
+Do not re-litigate:
+- reconnection retries capped at 3 (ADR-0003). The override is
+  ?reconnection_retries=unlimited, or reconnection_max_retries for
+  iggy+quic;
+- three events in the connectors round trip (the #4784 workaround);
+- plugins built from source at 91e02063 onto apache/iggy-connect:0.6.0,
+  with ca-certificates added;
+- secrets generated by connectors/init.sh, never set in .env;
+- dated factual corrections are allowed in ADRs;
+- the Codecov upload is dropped (TD-2026-09-03, option 2). Coverage Diff
+  warns and never fails; Code Coverage fails with the suite.
+
+What will bite:
+- The classifier blocks your `gh pr merge --admin`. Give the user the
+  exact command: ! gh pr merge <N> --merge --admin --match-head-commit <sha>
+  Pushing a release tag after the user merges was not blocked.
+- There is no .env. Before a cluster run:
+    echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
+- If the integration suite fails pulling apache/iggy:0.10.0 ("bytes
+  remaining on stream"), rerun it: that is a known Docker Hub flake.
+- If an integration test fails with "Failed to start Iggy container" and
+  the container log says "Cannot bind to socket", rerun it too. It is a
+  second known flake, in State 2's CARRIED.
+- docs/connectors-demo.md describes connectors 0.6.0, which delivers at
+  most once. On upstream master, sinks can be at_least_once (#4734).
+```
+
+---
+
+## State 1, 2026-11-08: the Iggy 0.10 sequence is complete
 
 ### What shipped
 
