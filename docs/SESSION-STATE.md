@@ -145,12 +145,12 @@ nothing, ask; do not invent work.
       Integration Tests job;
     - #87's CI run 42515908933, attempt 1: port 37621, in Code Coverage.
       Attempt 2 passed.
-  - **A candidate cause, not verified:** the bind fails inside the
-    container, in the same call that binds the replica listener on port 0.
-    Both ports lie in Linux's ephemeral range (32768-60999), so an
-    in-container ephemeral bind may take the client port first. A possible
-    fix is to pick the port below 32768.
-  - **Status:** not tracked anywhere, not fixed, and not asked for. It is
+  - **Cause, confirmed later the same day:** inside the container, the
+    server binds its replica listener on port 0 just before the client
+    listener on the fixed port. When the kernel gives the replica listener
+    the client port, the second bind fails. The probe below reproduces it.
+  - **Status: fixed,** at the user's request, by the PR that changed this
+    entry: `find_container_port` picks the port from 20000-31999. It is
     distinct from the Docker Hub pull flake in State 1's CARRIED ("bytes
     remaining on stream"), which also struck Code Coverage on run
     42428510742.
@@ -162,6 +162,7 @@ nothing, ask; do not invent work.
 | Coverage Diff never read a total before #86 | #85's PR Checks run 42475621793, Coverage Diff job 128716215642, its log | The `TOTAL` row reads 90.11% of lines. The step printed `Current test coverage: unknown%`. It grepped for `Total coverage:`, which the summary does not contain |
 | The cargo-llvm-cov CI ran on 2026-11-08 | the same job's log, and #86's jobs 128832500251 and 128833120127 | Each log says `installing cargo-llvm-cov@latest`, then downloads v0.9.1. The action is pinned (v2.90.1); the tool is not. The local one is 0.6.9. The "No line coverage total" warning is the tripwire for a changed `TOTAL` row |
 | The fix works | #86's PR Checks run 42513865804 (Coverage Diff job 128832500251), and CI run 42513865807 (Code Coverage job 128833120127) | Coverage Diff printed `Current test coverage: 90.11% of lines`. The Code Coverage log has the `TOTAL` row and no warning. The check-runs API does not return the job summary (`output.summary` is empty), so its "Line coverage: 90.11%" line was inferred from the missing warning |
+| The "Cannot bind to socket" flake is a replica/client port collision inside the container | `start_on_shard_zero` in `core/message_bus/src/replica/io.rs` at `91e02063`, which binds the replica listener (line 208) before the client listener (line 209). Then `apache/iggy:0.10.0` (local image ID `sha256:176125a0…`), run locally with the fixture's environment, `--privileged` and `--sysctl net.ipv4.ip_local_port_range="37621 37621"` | With `IGGY_TCP_ADDRESS=0.0.0.0:37621` the container exits with CI's exact line: "failed to start server listeners via replica_io replica_addr=0.0.0.0:0 client_addr=0.0.0.0:37621 error=Cannot bind to socket". With port 20000 and the same range it boots. The container's default range is 32768-60999 |
 | The 0.5.0 binary passes the verifier's host check | a local debug build of the `03d5eaa` tree, run from an empty directory with `env -i OPERATION_TIMEOUT_SECS=0 RUST_LOG=info` | Exit 78, and "Starting Iggy Sample Application v0.5.0". Verify Release 42515088161 then passed on the release asset, with 0 skipped |
 
 ### Kickoff
@@ -226,9 +227,9 @@ What will bite:
     echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
 - If the integration suite fails pulling apache/iggy:0.10.0 ("bytes
   remaining on stream"), rerun it: that is a known Docker Hub flake.
-- If an integration test fails with "Failed to start Iggy container" and
-  the container log says "Cannot bind to socket", rerun it too. It is a
-  second known flake, in State 2's CARRIED.
+- The integration fixture's "Cannot bind to socket" flake is fixed (State
+  2's CARRIED). If it happens again, the fix is incomplete: investigate it
+  rather than rerunning.
 - docs/connectors-demo.md describes connectors 0.6.0, which delivers at
   most once. On upstream master, sinks can be at_least_once (#4734).
 ```

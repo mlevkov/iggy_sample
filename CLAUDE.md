@@ -325,7 +325,11 @@ node's advertised address plus its own TCP port and fails over to it, even
 against a single node. If that endpoint reaches a different server, a client
 silently signs in there. docker-compose advertises `iggy` (the in-network
 name, port 8090). The integration fixture binds the container's listener to
-the same free port it maps on the host.
+the same free port it maps on the host. It picks that port below the
+kernel's ephemeral range (`find_container_port` in
+`tests/integration_tests.rs`). Inside the container the server binds a
+replica listener on port 0 just before the client port, and the replica
+listener could otherwise take that port first.
 
 ## Structured Concurrency
 
