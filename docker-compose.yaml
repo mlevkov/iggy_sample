@@ -1,10 +1,10 @@
 services:
     # Apache Iggy message streaming server
-    # Pinned to the release paired with the Rust SDK 0.11 line (see Cargo.toml).
-    # 0.9 speaks only the VSR wire protocol and cannot read 0.8 data, hence the
-    # versioned data volume below (ADR-0001).
+    # Pinned to the release paired with the Rust SDK 0.12 line (see Cargo.toml).
+    # Server and SDK upgrade together, and 0.10 refuses to boot on 0.9 data,
+    # hence the versioned data volume below (ADR-0001, ADR-0002).
     iggy:
-        image: apache/iggy:0.9.0
+        image: apache/iggy:0.10.0
         container_name: iggy-server
         # io_uring needs these instead of full `privileged` (upstream's own
         # compose uses the same set)
@@ -24,7 +24,7 @@ services:
             # HTTP transport (also serves /metrics for Prometheus)
             - "3000:3000"
         volumes:
-            - iggy_data_0_9:/iggy/data
+            - iggy_data_0_10:/iggy/data
         environment:
             # Root user credentials
             - IGGY_ROOT_USERNAME=iggy
@@ -39,18 +39,18 @@ services:
             - IGGY_TCP_ADDRESS=0.0.0.0:8090
             - IGGY_QUIC_ENABLED=true
             - IGGY_QUIC_ADDRESS=0.0.0.0:8080
-            # 0.9 refuses a wildcard bind unless it knows the address clients
-            # dial; in-network clients reach this container as `iggy`
+            # Unused here, and on by default bound to loopback, where nothing
+            # outside the container reaches it
+            - IGGY_WEBSOCKET_ENABLED=false
+            # The server refuses a wildcard bind unless it knows the address
+            # clients dial; in-network clients reach this container as `iggy`
             - IGGY_NODE_ADVERTISED_ADDRESS=iggy
-            # The default "numa:auto" aborts where no NUMA topology is exposed
-            # (Docker Desktop's VM among them); "all" uses every core
-            - IGGY_SHARDING_CPU_ALLOCATION=all
             # Metrics endpoint (Prometheus-compatible). Since 0.9 it requires
             # a bearer credential; see iggy-pat-init below
             - IGGY_HTTP_METRICS_ENABLED=true
             - IGGY_HTTP_METRICS_ENDPOINT=/metrics
             # Web UI served by the server itself at http://localhost:3000/ui
-            # (0.9 embeds it; it replaces the separate iggy-web-ui container)
+            # (embedded since 0.9; it replaced the separate iggy-web-ui container)
             - IGGY_HTTP_WEB_UI=true
         healthcheck:
             test: ["CMD", "iggy", "ping"]
@@ -68,7 +68,7 @@ services:
     # the container) even when it succeeds; the create must not, so a failure
     # stops Prometheus from starting instead of leaving its panels blank.
     iggy-pat-init:
-        image: apache/iggy:0.9.0
+        image: apache/iggy:0.10.0
         container_name: iggy-pat-init
         entrypoint: ["/bin/sh", "/scripts/iggy-pat-init.sh"]
         volumes:
@@ -160,10 +160,11 @@ services:
             - iggy-network
 
 volumes:
-    # Versioned: 0.9 cannot read 0.8 data, and upstream promises no data
-    # migration before 1.0. A server upgrade that breaks the format gets a
-    # new volume rather than booting on the old one.
-    iggy_data_0_9:
+    # Versioned: no release so far reads the previous one's data (0.10
+    # refuses 0.9 data at startup), and upstream promises no migration before
+    # 1.0. A server upgrade that breaks the format gets a new volume rather
+    # than booting on the old one.
+    iggy_data_0_10:
         driver: local
     # Holds the Prometheus scrape token for Iggy /metrics
     iggy_secrets:

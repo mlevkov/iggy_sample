@@ -5,8 +5,8 @@ A comprehensive demonstration of Apache Iggy message streaming with Axum.
 ## Project Overview
 
 This application showcases how to build a production-ready message streaming service using:
-- **Apache Iggy server 0.9.0**: High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
-- **Iggy Rust SDK 0.11.0**: Paired with the server 0.9 release line (server image pinned in `docker-compose.yaml` and the integration fixture). 0.9 speaks only the VSR wire protocol, so SDK and server always move together, and 0.8 data directories are not readable by 0.9. The SDK needs Rust 1.95, the declared MSRV (`rust-version = "1.95.0"`); cargo's MSRV-aware resolver keeps Dependabot from proposing any SDK that needs a newer Rust, so those upgrades raise the MSRV by hand. Plan and constraints: [ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md)
+- **Apache Iggy server 0.10.0**: High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
+- **Iggy Rust SDK 0.12.0**: Paired with the server 0.10 release line (server image pinned in `docker-compose.yaml` and the integration fixture). SDK and server always move together, and 0.10 refuses to boot on 0.9 data directories, so the compose data volume is versioned. The SDK needs Rust 1.95, the declared MSRV (`rust-version = "1.95.0"`); cargo's MSRV-aware resolver keeps Dependabot from proposing any SDK that needs a newer Rust, so those upgrades raise the MSRV by hand. Plan and constraints: [ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md), amended by [ADR-0002](docs/adr/0002-iggy-0.10-before-topic-options.md)
 - **Axum 0.8**: Ergonomic and modular Rust web framework
 - **Tokio**: Async runtime for Rust
 
@@ -15,9 +15,11 @@ This application showcases how to build a production-ready message streaming ser
 See the [docs/](docs/) directory for comprehensive guides covering event-driven architecture, partitioning strategies, durable storage configuration, and more.
 
 Significant design decisions are recorded as ADRs in [docs/adr/](docs/adr/).
-The Iggy 0.9 upgrade and the clustering and connector demos follow
+The Iggy upgrades and the clustering and connector demos follow
 [ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md), which fixes their
-PR sequence and scope.
+PR sequence and scope, as amended by
+[ADR-0002](docs/adr/0002-iggy-0.10-before-topic-options.md) (move to 0.10
+before the per-topic options PR).
 
 ## Configuration
 
@@ -127,12 +129,25 @@ The fuzz tests verify that validation functions never panic on any input.
 - Connection errors are detected by matching explicit `AppError` enum variants
   (`ConnectionFailed`/`Disconnected`/`ConnectionReset`), never by string
   matching on error text — the reconnection logic depends on this.
-- Iggy 0.9 request outcomes (`TransientNotAccepted`, `TransientNotCommitted`,
-  `RequestAlreadyApplied`) map to `NotAccepted`/`OutcomeUnknown`/
-  `AlreadyApplied`, deliberately **not** connection errors: the SDK has
-  already replayed them, and the wrapper's reconnect-and-retry would resend a
-  write the server applied or may have applied. `AlreadyApplied` answers
-  `202`. `IncompatibleProtocolVersion` maps to `IncompatibleServer`, which
+- Request outcomes map to `NotAccepted` (`TransientNotAccepted`, lane
+  refusals, `LifecycleBusy`), `OutcomeUnknown` (`TransientNotCommitted`,
+  `OperationUncertain`, `FetchProgressUncertain`, `RequestTooOld`) and
+  `AlreadyApplied` (`RequestAlreadyApplied`), deliberately **not**
+  connection errors: the SDK has already replayed them, and the wrapper's
+  reconnect-and-retry would resend a write the server applied or may have
+  applied. `AlreadyApplied` answers `202`.
+- **SDK 0.12 lanes.** The SDK admits one mutation at a time per lane (one
+  for metadata, one per partition, plus a progress lane per partition for
+  auto-commit and `Next` polls) and keeps a mutation whose outcome it cannot
+  prove *retained* there. Every later call on that lane then fails with
+  `LaneBlocked` until the application abandons or resolves it. A call
+  cancelled after its request left the client is retained too, and the
+  wrapper's per-request timeout cancels calls exactly that way. So every
+  lane-taking SDK call goes through `lanes::settled` / `send_settled`
+  (`src/iggy_client/lanes.rs`), which abandons any retained operation it
+  sees and runs a lane-refused call once more (a refusal takes no request
+  id, so nothing was sent). The gateway never resends an unknown outcome
+  itself. `IncompatibleProtocolVersion` maps to `IncompatibleServer`, which
   stops a reconnect session (otherwise infinite at `MAX_RECONNECT_ATTEMPTS=0`)
   and exits startup with `EX_PROTOCOL`.
 
@@ -165,12 +180,13 @@ outage rather than a latched startup flag.
 
 The SDK's diagnostic events (`src/iggy_client/events.rs`, TD-2026-07-02)
 end a recorded outage as soon as the SDK reconnects (`Connected` triggers an
-immediate ping). They are **not** a loss signal with default connection
-strings: SDK 0.11's TCP client publishes `Disconnected` only when a reconnect
-sweep gives up, and with `reconnection_retries=unlimited` it never does. The
-ping stays the source of truth.
+immediate ping) and start one as soon as the last link closes: SDK 0.12
+publishes `Disconnected` then, even with the default
+`reconnection_retries=unlimited` (0.11 did not). The ping stays the source of
+truth and the backstop for a server that stops answering without closing the
+connection.
 
-**Advertised endpoint = dialled endpoint.** After sign-in SDK 0.11 records a
+**Advertised endpoint = dialled endpoint.** After sign-in the SDK records a
 node's advertised address plus its own TCP port and fails over to it, even
 against a single node. If that endpoint reaches a different server, a client
 silently signs in there. docker-compose advertises `iggy` (the in-network

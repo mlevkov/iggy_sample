@@ -11,8 +11,8 @@ A comprehensive demonstration of [Apache Iggy](https://github.com/apache/iggy) m
 
 This project showcases how to build a production-ready message streaming service using:
 
-- **Apache Iggy server 0.9.0** - High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
-- **Iggy Rust SDK 0.11.0** - Paired with the server 0.9 release line; 0.9 speaks only the VSR wire protocol, so SDK and server upgrade together ([ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md))
+- **Apache Iggy server 0.10.0** - High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
+- **Iggy Rust SDK 0.12.0** - Paired with the server 0.10 release line; each SDK speaks only its own release's wire protocol, so SDK and server upgrade together ([ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md), [ADR-0002](docs/adr/0002-iggy-0.10-before-topic-options.md))
 - **Axum 0.8** - Ergonomic and modular Rust web framework
 - **Tokio** - Async runtime for Rust
 
@@ -107,10 +107,13 @@ This starts:
 - **Prometheus** - Metrics collection (port 9090)
 - **Grafana** - Visualization dashboards (port 3001)
 
-> **Upgrading from server 0.8:** 0.9 cannot read 0.8 data, so the compose
-> file stores data in a new `iggy_data_0_9` volume. The old one can be
-> removed with `docker volume rm iggy_sample_iggy_data` (the prefix is the
-> compose project name, by default the checkout's directory name).
+> **Upgrading from an earlier server:** no release reads the previous
+> one's data (0.10 refuses to start on 0.9 data), so the compose file stores
+> data in a volume named for the release, now `iggy_data_0_10`. Older ones
+> can be removed with
+> `docker volume rm iggy_sample_iggy_data_0_9 iggy_sample_iggy_data` (the
+> prefix is the compose project name, by default the checkout's directory
+> name).
 
 ### 3. Run the Application
 
@@ -690,7 +693,7 @@ Key dependencies (see `Cargo.toml` for full list):
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `iggy` | 0.11.0 | Iggy Rust SDK |
+| `iggy` | 0.12.0 | Iggy Rust SDK |
 | `axum` | 0.8 | Web framework |
 | `tokio` | 1.52 | Async runtime |
 | `serde` | 1.0 | Serialization |

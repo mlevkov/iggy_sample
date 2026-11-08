@@ -13,37 +13,41 @@
 //!   marking the connection up. The TCP client publishes `Connected` before it
 //!   signs in, so the event alone does not prove the broker is usable.
 //!
-//! # What SDK 0.11 actually publishes (TCP)
+//! # What SDK 0.12 actually publishes (TCP)
 //!
-//! Observed against server 0.9.0 and confirmed in the SDK source
-//! (`tcp_client.rs`):
+//! Observed against server 0.10.0 and confirmed in the SDK source
+//! (`links/replicas.rs`):
 //!
-//! - **Recovery always publishes `Connected`**, including when the SDK's own
+//! - **Recovery publishes `Connected`**, including when the SDK's own
 //!   transport reconnection succeeds. So an outage the ping recorded ends as
 //!   soon as the SDK is back, not up to one health-check interval later.
-//! - **Loss publishes `Disconnected` only when a reconnect sweep gives up**
-//!   (`fail_connect`), or on an explicit disconnect or shutdown. When the
-//!   connection drops, the SDK goes straight into its sweep and publishes
-//!   nothing while it redials. With connection strings' default
-//!   `reconnection_retries=unlimited` the sweep never gives up, so no loss
-//!   event arrives and the ping stays the only loss signal. With bounded
-//!   retries the event arrives once they are spent.
+//! - **Loss publishes `Disconnected` as soon as the last link closes**, while
+//!   the SDK goes on redialling, and again when a bounded reconnect sweep
+//!   gives up. So with connection strings' default
+//!   `reconnection_retries=unlimited` the event is a real loss signal, and
+//!   the integration suite asserts it with that default.
+//!
+//! SDK 0.11 published `Disconnected` only when a bounded sweep gave up, so
+//! with unlimited retries the ping was the only loss signal. The ping stays
+//! as the backstop for a server that stops answering without closing the
+//! connection, which no event reports.
 //!
 //! # Why the wrapper keeps its own resilience layer
 //!
-//! TD-2026-07-02 also asked whether SDK 0.11 lets resilience move into the
-//! SDK. It does not: connection-string clients still hard-wire transport
-//! reconnection on (`TcpConnectionStringOptions::parse_options` sets
-//! `enabled: true`), and the SDK has no circuit breaker or request deadline.
-//! So the wrapper's bounded reconnect, breaker and per-request timeouts stay,
-//! and events only make the connection state fresher.
+//! TD-2026-07-02 also asked whether the SDK lets resilience move into it. As
+//! of SDK 0.12 it does not: connection-string clients still hard-wire
+//! transport reconnection on (`TcpConnectionStringOptions::parse_options`
+//! sets `enabled: true`), and the SDK has no circuit breaker or per-request
+//! deadline on the trait API this gateway uses. So the wrapper's bounded
+//! reconnect, breaker and per-request timeouts stay, and events only make the
+//! connection state fresher.
 //!
 //! Bounding the SDK's retries (`reconnection_retries=N` in the connection
 //! string) would hand outage detection to the SDK: callers would get
-//! `CannotEstablishConnection` instead of blocking until a timeout, the
-//! breaker would open on classified connection errors, and the loss event
-//! would fire. That changes request behaviour during every outage, so it is
-//! left as a separate decision rather than a default set here.
+//! `CannotEstablishConnection` instead of blocking until a timeout, and the
+//! breaker would open on classified connection errors. That changes request
+//! behaviour during every outage, so it is left as a separate decision rather
+//! than a default set here.
 //!
 //! # Client swaps
 //!
