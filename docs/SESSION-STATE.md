@@ -154,6 +154,22 @@ nothing, ask; do not invent work.
     distinct from the Docker Hub pull flake in State 1's CARRIED ("bytes
     remaining on stream"), which also struck Code Coverage on run
     42428510742.
+- **The Docker Hub pull flake in State 1's CARRIED is fixed too,** at the
+  user's request, by the PR that added this entry.
+  - **Seen three times,** always on a fresh runner: runs 42463964399
+    (Integration Tests, #82), 42428510742 (Code Coverage, `main`) and
+    42518178286 (Code Coverage, #88, attempt 1). Each failed one test with
+    `PullImage { descriptor: "apache/iggy:0.10.0", ... "bytes remaining on
+    stream" }`.
+  - **Cause:** testcontainers 0.28 pulls only after a 404 on container
+    create, with no retry (probe below). The suite's tests start together,
+    so on a runner without the image they all pulled it at once.
+  - **Fix:** `ensure_iggy_image` in `tests/integration_tests.rs`. One pull
+    per test process, up to three attempts with a 5 s and then 10 s
+    backoff, and a shared outcome for the waiting tests. A cached image is
+    found with `inspect_image` and not pulled.
+  - **Not reproduced locally.** The compose stack was using the local
+    image, so it was not removed. Only CI starts without the image.
 
 ### DO NOT RE-DERIVE (in addition to State 1's; each probe names its input)
 
@@ -163,6 +179,7 @@ nothing, ask; do not invent work.
 | The cargo-llvm-cov CI ran on 2026-11-08 | the same job's log, and #86's jobs 128832500251 and 128833120127 | Each log says `installing cargo-llvm-cov@latest`, then downloads v0.9.1. The action is pinned (v2.90.1); the tool is not. The local one is 0.6.9. The "No line coverage total" warning is the tripwire for a changed `TOTAL` row |
 | The fix works | #86's PR Checks run 42513865804 (Coverage Diff job 128832500251), and CI run 42513865807 (Code Coverage job 128833120127) | Coverage Diff printed `Current test coverage: 90.11% of lines`. The Code Coverage log has the `TOTAL` row and no warning. The check-runs API does not return the job summary (`output.summary` is empty), so its "Line coverage: 90.11%" line was inferred from the missing warning |
 | The "Cannot bind to socket" flake is a replica/client port collision inside the container | `start_on_shard_zero` in `core/message_bus/src/replica/io.rs` at `91e02063`, which binds the replica listener (line 208) before the client listener (line 209). Then `apache/iggy:0.10.0` (local image ID `sha256:176125a0…`), run locally with the fixture's environment, `--privileged` and `--sysctl net.ipv4.ip_local_port_range="37621 37621"` | With `IGGY_TCP_ADDRESS=0.0.0.0:37621` the container exits with CI's exact line: "failed to start server listeners via replica_io replica_addr=0.0.0.0:0 client_addr=0.0.0.0:37621 error=Cannot bind to socket". With port 20000 and the same range it boots. The container's default range is 32768-60999 |
+| Concurrent pulls caused the pull flake, and the fix pulls once | testcontainers 0.28.0 `src/runners/async_runner.rs:343-361` (`start` pulls on a 404 from create, no retry). Then the suite with `ensure_iggy_image`, three ways, each a temporary edit restored afterwards: as written; with the `inspect_image` check skipped and an `eprintln` before the pull; with the pull's tag set to `0.10.0-does-not-exist`, filtered to `test_auth` | As written: 44 of 44, the cached image used. Check skipped: 44 of 44, and the pull ran **once** for the whole suite. Missing tag: 3 attempts in total (two "retrying" lines), and all 4 tests failed with the same "Failed to pull apache/iggy:0.10.0-does-not-exist after 3 attempts", in 18.8 s |
 | The 0.5.0 binary passes the verifier's host check | a local debug build of the `03d5eaa` tree, run from an empty directory with `env -i OPERATION_TIMEOUT_SECS=0 RUST_LOG=info` | Exit 78, and "Starting Iggy Sample Application v0.5.0". Verify Release 42515088161 then passed on the release asset, with 0 skipped |
 
 ### Kickoff
@@ -225,11 +242,11 @@ What will bite:
   Pushing a release tag after the user merges was not blocked.
 - There is no .env. Before a cluster run:
     echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
-- If the integration suite fails pulling apache/iggy:0.10.0 ("bytes
-  remaining on stream"), rerun it: that is a known Docker Hub flake.
-- The integration fixture's "Cannot bind to socket" flake is fixed (State
-  2's CARRIED). If it happens again, the fix is incomplete: investigate it
-  rather than rerunning.
+- Both integration-fixture flakes are fixed (State 2's CARRIED): "bytes
+  remaining on stream" while pulling apache/iggy:0.10.0, and "Cannot bind
+  to socket". If either happens again, the fix is incomplete: investigate
+  it rather than rerunning. A pull that fails after three attempts is
+  Docker Hub, not this repo.
 - docs/connectors-demo.md describes connectors 0.6.0, which delivers at
   most once. On upstream master, sinks can be at_least_once (#4734).
 ```

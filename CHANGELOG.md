@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ip_local_port_range` reproduces the error every time. The fixture now
   picks the port from 20000-31999, below the ephemeral range, with no port
   shared between the tests of a run, and checks it is free on the host
+- An integration test could fail on a fresh CI runner while pulling
+  `apache/iggy:0.10.0`, with `bytes remaining on stream` (CI runs
+  42463964399, 42428510742 and 42518178286). testcontainers pulls an image
+  only when creating the container answers 404, and does not retry. So every
+  test that started at once pulled the image concurrently, and one cut
+  stream failed its test. Now the first test pulls the image, retrying up to
+  three times with a backoff, and the others wait for the outcome. A cached
+  image is not pulled at all
 
 ## [0.5.0] - 2026-11-08
 

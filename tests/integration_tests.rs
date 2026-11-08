@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::json;
+use testcontainers::core::client::docker_client_instance;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
@@ -49,6 +50,8 @@ impl IggyContainer {
 
     /// Start an Iggy container and return the mapped TCP port
     async fn start() -> (ContainerAsync<GenericImage>, Self) {
+        ensure_iggy_image().await;
+
         // The server advertises its address plus its OWN TCP port, and the
         // SDK dials that endpoint on failover even against a single node.
         // So the container listens on the same port the host maps, chosen
@@ -104,6 +107,61 @@ impl IggyContainer {
     /// Get the connection string for this container
     fn connection_string(&self) -> String {
         format!("iggy://iggy:iggy@127.0.0.1:{}", self.tcp_port)
+    }
+}
+
+/// How often the Iggy image pull is tried before the tests give up.
+const IMAGE_PULL_ATTEMPTS: u32 = 3;
+
+/// Make sure the Iggy image is present, pulling it once per test process.
+///
+/// testcontainers pulls an image only when creating the container answers
+/// 404 (`AsyncRunner::start` in testcontainers 0.28), and it does not retry.
+/// On a runner without the image, every test that starts at once pulls it
+/// concurrently, and one cut stream fails that test with "bytes remaining on
+/// stream". That failed CI runs 42463964399, 42428510742 and 42518178286.
+///
+/// Here the first caller pulls, retrying with a backoff, and every other test
+/// waits for its outcome. A failed pull fails each waiting test with the
+/// same error. An image already present is not pulled, so offline runs
+/// against a cached image still work.
+async fn ensure_iggy_image() {
+    static OUTCOME: tokio::sync::OnceCell<Result<(), String>> = tokio::sync::OnceCell::const_new();
+    let outcome: &Result<(), String> = OUTCOME.get_or_init(pull_iggy_image_if_missing).await;
+    if let Err(message) = outcome {
+        panic!("{message}");
+    }
+}
+
+async fn pull_iggy_image_if_missing() -> Result<(), String> {
+    let descriptor = format!("{}:{}", IggyContainer::IMAGE, IggyContainer::TAG);
+    let docker = docker_client_instance()
+        .await
+        .map_err(|error| format!("Failed to reach Docker to check {descriptor}: {error}"))?;
+    if docker.inspect_image(&descriptor).await.is_ok() {
+        return Ok(());
+    }
+    let mut attempt: u32 = 1;
+    loop {
+        match GenericImage::new(IggyContainer::IMAGE, IggyContainer::TAG)
+            .pull_image()
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt < IMAGE_PULL_ATTEMPTS => {
+                eprintln!(
+                    "Pulling {descriptor} failed (attempt {attempt} of {IMAGE_PULL_ATTEMPTS}), \
+                     retrying: {error}"
+                );
+                sleep(Duration::from_secs(5 * u64::from(attempt))).await;
+                attempt += 1;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to pull {descriptor} after {IMAGE_PULL_ATTEMPTS} attempts: {error}"
+                ));
+            }
+        }
     }
 }
 
