@@ -468,8 +468,6 @@ impl Config {
     }
 }
 
-/// The pure half of [`Config::parse_flag`], split out so tests need not set
-/// process environment variables.
 /// The environment variable for one default-topic option:
 /// `segment_size` reads `IGGY_TOPIC_SEGMENT_SIZE`.
 fn topic_option_env(key: &str) -> String {
@@ -530,6 +528,8 @@ fn default_topic_options_from(
         .map_err(|error| AppError::ConfigError(format!("Invalid {error}")))
 }
 
+/// The pure half of [`Config::parse_flag`], split out so tests need not set
+/// process environment variables.
 fn parse_flag_value(name: &str, raw: Option<&str>) -> AppResult<bool> {
     let value = raw.map(str::trim).unwrap_or_default();
     if value.is_empty() || value.eq_ignore_ascii_case("false") {
