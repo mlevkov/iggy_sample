@@ -23,6 +23,10 @@ before the per-topic options PR).
 [ADR-0003](docs/adr/0003-cap-sdk-reconnection-retries.md) caps the SDK's
 reconnection retries by default.
 
+What was in flight at the end of the last session, and the findings not to
+re-derive, are in [docs/SESSION-STATE.md](docs/SESSION-STATE.md) (newest
+block first).
+
 ## Configuration
 
 Every environment variable and its default is defined in `src/config.rs`; see
