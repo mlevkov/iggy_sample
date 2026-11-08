@@ -960,6 +960,21 @@ impl IggyClientWrapper {
         .await
     }
 
+    /// Cluster metadata: the roster with each node's role and health, as the
+    /// connected server reports it. A server with clustering off reports
+    /// itself as a one-node cluster named `single-node`.
+    #[instrument(skip(self))]
+    pub async fn cluster_metadata(&self) -> AppResult<ClusterMetadata> {
+        self.with_reconnect(|| async {
+            let client = self.client.read().await;
+            client
+                .get_cluster_metadata()
+                .await
+                .map_err(|e| classify_iggy_error(e, AppError::Internal))
+        })
+        .await
+    }
+
     /// List all streams.
     #[instrument(skip(self))]
     pub async fn list_streams(&self) -> AppResult<Vec<Stream>> {

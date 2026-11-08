@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GET /cluster` reports the roster with each node's role and status, from
+  cluster metadata. Server 0.10 reports every node `healthy`, even one that
+  is down, and the docs say so; the live signal is `in_sync_members`
+- The single-topic read reports each partition with the nodes that hold it
+  (`members`) and those currently in sync (`in_sync_members`)
 - The `replication_factor` topic option (1 to 32; the server refuses more
   than its node count) and `IGGY_TOPIC_REPLICATION_FACTOR`. Reads report the
   stored factor, which is the node count under the default `"all"`

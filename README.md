@@ -158,6 +158,7 @@ Expected response:
 | `/health` | GET | Health check with Iggy connection status |
 | `/ready` | GET | Kubernetes readiness probe (200 if ready) |
 | `/stats` | GET | Service statistics (streams, messages, uptime) |
+| `/cluster` | GET | Cluster nodes with their roles and health (`single-node` when clustering is off) |
 
 ### Messages (Default Stream/Topic)
 
@@ -491,6 +492,7 @@ iggy_sample/
 │   │   └── consumer.rs     # Message consumer service
 │   └── handlers/
 │       ├── mod.rs          # Handler exports
+│       ├── cluster.rs      # GET /cluster
 │       ├── health.rs       # Health endpoints
 │       ├── messages.rs     # Message endpoints
 │       ├── streams.rs      # Stream management

@@ -112,6 +112,7 @@ async fn run() -> Result<(), exitcode::ExitCode> {
     info!("  GET  /health           - Health check");
     info!("  GET  /ready            - Readiness check");
     info!("  GET  /stats            - Service statistics");
+    info!("  GET  /cluster          - Cluster nodes, roles and health");
     info!("  POST /messages         - Send a message");
     info!("  GET  /messages         - Poll messages");
     info!("  POST /messages/batch   - Send batch of messages");

@@ -7,7 +7,7 @@ use tracing::instrument;
 use super::util::parse_timestamp_with_context;
 use crate::error::{AppError, AppResult};
 use crate::middleware::RequestTimeout;
-use crate::models::{CreateTopicRequest, TopicInfo, TopicOptionsView};
+use crate::models::{CreateTopicRequest, PartitionInfo, TopicInfo, TopicOptionsView};
 use crate::state::AppState;
 use crate::validation::{validate_partition_count, validate_resource_name};
 
@@ -52,6 +52,7 @@ pub async fn list_topics(
                 size_bytes: t.size.as_bytes_u64(),
                 messages_count: t.messages_count,
                 options: TopicOptionsView::from_stored(&t.options),
+                partitions: None,
             }
         })
         .collect();
@@ -59,7 +60,7 @@ pub async fn list_topics(
     Ok(Json(topic_infos))
 }
 
-/// Get a specific topic by name.
+/// Get a specific topic by name, with each partition and the nodes that hold it.
 #[instrument(skip(state, timeout))]
 pub async fn get_topic(
     State(state): State<AppState>,
@@ -86,6 +87,7 @@ pub async fn get_topic(
         size_bytes: topic.size.as_bytes_u64(),
         messages_count: topic.messages_count,
         options: TopicOptionsView::from_stored(&topic.options),
+        partitions: Some(topic.partitions.iter().map(PartitionInfo::from).collect()),
     }))
 }
 
