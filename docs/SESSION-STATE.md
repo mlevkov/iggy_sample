@@ -132,6 +132,28 @@ nothing, ask; do not invent work.
   so a release that changes that row's layout trips the "No line coverage
   total" warning. Pinning it (`tool: cargo-llvm-cov@0.9.1`) is a possible
   follow-up, not done and not asked for.
+- **A second integration-fixture flake: "Cannot bind to socket".**
+  - **What fails:** the Iggy container exits at startup, and the test
+    panics with "Failed to start Iggy container"
+    (`tests/integration_tests.rs`, `IggyContainer::start`). The server logs
+    "failed to start server listeners via replica_io
+    replica_addr=0.0.0.0:0 client_addr=0.0.0.0:<port> error=Cannot bind to
+    socket with addr: 0.0.0.0:<port>". `<port>` is the client port that
+    `find_available_port` picked on the host.
+  - **Seen twice:**
+    - CI run 42419060930 on `main`, 2026-11-07: port 37485, in the required
+      Integration Tests job;
+    - #87's CI run 42515908933, attempt 1: port 37621, in Code Coverage.
+      Attempt 2 passed.
+  - **A candidate cause, not verified:** the bind fails inside the
+    container, in the same call that binds the replica listener on port 0.
+    Both ports lie in Linux's ephemeral range (32768-60999), so an
+    in-container ephemeral bind may take the client port first. A possible
+    fix is to pick the port below 32768.
+  - **Status:** not tracked anywhere, not fixed, and not asked for. It is
+    distinct from the Docker Hub pull flake in State 1's CARRIED ("bytes
+    remaining on stream"), which also struck Code Coverage on run
+    42428510742.
 
 ### DO NOT RE-DERIVE (in addition to State 1's; each probe names its input)
 
@@ -204,6 +226,9 @@ What will bite:
     echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
 - If the integration suite fails pulling apache/iggy:0.10.0 ("bytes
   remaining on stream"), rerun it: that is a known Docker Hub flake.
+- If an integration test fails with "Failed to start Iggy container" and
+  the container log says "Cannot bind to socket", rerun it too. It is a
+  second known flake, in State 2's CARRIED.
 - docs/connectors-demo.md describes connectors 0.6.0, which delivers at
   most once. On upstream master, sinks can be at_least_once (#4734).
 ```
