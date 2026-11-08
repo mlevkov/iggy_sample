@@ -28,6 +28,7 @@
 //! - `circuit_breaker` - Fail-fast state machine with token-limited probing
 //! - `connection` - Connection state tracking for reconnection coordination
 //! - `events` - Connection state driven by the SDK's diagnostic events
+//! - `lanes` - Frees SDK lanes that an unknown outcome blocks (`settled`)
 //! - `params` - Parameter types like `PollParams`
 //! - `helpers` - Utility functions for identifier conversion and jitter
 //! - `resilience` - Timeout/breaker/reconnect-retry composition (`run_resilient`)
@@ -48,6 +49,9 @@
 //! - App-level reconnection with exponential backoff + jitter as a second
 //!   line of defense, for error classes that escape the SDK's internal retry
 //!   (see `helpers::classify_iggy_error`)
+//! - Lane settling (`lanes::settled`) around every SDK call that takes a
+//!   lane, so an unknown outcome or a cancelled send cannot block later
+//!   sends to the same partition for the life of the client
 //!
 //! # Example
 //!
@@ -63,6 +67,7 @@ mod circuit_breaker;
 mod connection;
 mod events;
 mod helpers;
+mod lanes;
 mod params;
 mod resilience;
 mod scopeguard;
@@ -93,6 +98,7 @@ pub use params::PollParams;
 // Internal-only: the error classifier's fallback contract (must be a
 // NON-connection variant) is too easy to violate to expose publicly.
 use helpers::{classify_connect_error, classify_iggy_error};
+use lanes::{send_settled, settled};
 
 // =============================================================================
 // Constants
@@ -573,7 +579,7 @@ impl IggyClientWrapper {
                 Ok(None) => {
                     info!(stream = name, "Creating stream");
                     let options = StreamCreateOptions::default();
-                    match client.create_stream(name, &options).await {
+                    match settled(&client, || client.create_stream(name, &options)).await {
                         Ok(_) => Ok(()),
                         // Lost a creation race (e.g. two replicas starting
                         // simultaneously) - the stream exists, which is all
@@ -613,7 +619,9 @@ impl IggyClientWrapper {
                 Ok(None) => {
                     info!(stream, topic, partitions, "Creating topic");
                     let options = topic_create_options(partitions);
-                    match client.create_topic(&stream_id, topic, &options).await {
+                    match settled(&client, || client.create_topic(&stream_id, topic, &options))
+                        .await
+                    {
                         Ok(_) => Ok(()),
                         // Lost a creation race - the topic exists, which is
                         // all this method guarantees.
@@ -690,8 +698,7 @@ impl IggyClientWrapper {
             };
 
             let mut messages = vec![message];
-            client
-                .send_messages(&stream_id, &topic_id, &partitioning, &mut messages)
+            send_settled(&client, &stream_id, &topic_id, &partitioning, &mut messages)
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::SendError))?;
 
@@ -769,8 +776,7 @@ impl IggyClientWrapper {
                 .collect::<AppResult<Vec<_>>>()?;
 
             // Send all messages in a single network call
-            client
-                .send_messages(&stream_id, &topic_id, &partitioning, &mut messages)
+            send_settled(&client, &stream_id, &topic_id, &partitioning, &mut messages)
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::SendError))?;
 
@@ -856,8 +862,8 @@ impl IggyClientWrapper {
                 ..PollOptions::default()
             };
 
-            let messages = client
-                .poll_messages(
+            let messages = settled(&client, || {
+                client.poll_messages(
                     &stream_id,
                     &topic_id,
                     params.partition_id,
@@ -865,8 +871,9 @@ impl IggyClientWrapper {
                     &strategy,
                     options,
                 )
-                .await
-                .map_err(|e| classify_iggy_error(e, AppError::PollError))?;
+            })
+            .await
+            .map_err(|e| classify_iggy_error(e, AppError::PollError))?;
 
             debug!(
                 count = messages.messages.len(),
@@ -966,8 +973,7 @@ impl IggyClientWrapper {
             let client = self.client.read().await;
 
             let options = StreamCreateOptions::default();
-            client
-                .create_stream(name, &options)
+            settled(&client, || client.create_stream(name, &options))
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::StreamError))?;
 
@@ -985,8 +991,7 @@ impl IggyClientWrapper {
             let stream_id = to_identifier(stream, "stream")?;
 
             let options = topic_create_options(partitions);
-            client
-                .create_topic(&stream_id, topic, &options)
+            settled(&client, || client.create_topic(&stream_id, topic, &options))
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;
 
@@ -1005,8 +1010,7 @@ impl IggyClientWrapper {
             let client = self.client.read().await;
             let stream_id = to_identifier(name, "stream")?;
 
-            client
-                .delete_stream(&stream_id)
+            settled(&client, || client.delete_stream(&stream_id))
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::StreamError))?;
 
@@ -1026,8 +1030,7 @@ impl IggyClientWrapper {
             let stream_id = to_identifier(stream, "stream")?;
             let topic_id = to_identifier(topic, "topic")?;
 
-            client
-                .delete_topic(&stream_id, &topic_id)
+            settled(&client, || client.delete_topic(&stream_id, &topic_id))
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;
 

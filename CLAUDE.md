@@ -129,12 +129,25 @@ The fuzz tests verify that validation functions never panic on any input.
 - Connection errors are detected by matching explicit `AppError` enum variants
   (`ConnectionFailed`/`Disconnected`/`ConnectionReset`), never by string
   matching on error text — the reconnection logic depends on this.
-- Iggy 0.9 request outcomes (`TransientNotAccepted`, `TransientNotCommitted`,
-  `RequestAlreadyApplied`) map to `NotAccepted`/`OutcomeUnknown`/
-  `AlreadyApplied`, deliberately **not** connection errors: the SDK has
-  already replayed them, and the wrapper's reconnect-and-retry would resend a
-  write the server applied or may have applied. `AlreadyApplied` answers
-  `202`. `IncompatibleProtocolVersion` maps to `IncompatibleServer`, which
+- Request outcomes map to `NotAccepted` (`TransientNotAccepted`, lane
+  refusals, `LifecycleBusy`), `OutcomeUnknown` (`TransientNotCommitted`,
+  `OperationUncertain`, `FetchProgressUncertain`, `RequestTooOld`) and
+  `AlreadyApplied` (`RequestAlreadyApplied`), deliberately **not**
+  connection errors: the SDK has already replayed them, and the wrapper's
+  reconnect-and-retry would resend a write the server applied or may have
+  applied. `AlreadyApplied` answers `202`.
+- **SDK 0.12 lanes.** The SDK admits one mutation at a time per lane (one
+  for metadata, one per partition, plus a progress lane per partition for
+  auto-commit and `Next` polls) and keeps a mutation whose outcome it cannot
+  prove *retained* there. Every later call on that lane then fails with
+  `LaneBlocked` until the application abandons or resolves it. A call
+  cancelled after its request left the client is retained too, and the
+  wrapper's per-request timeout cancels calls exactly that way. So every
+  lane-taking SDK call goes through `lanes::settled` / `send_settled`
+  (`src/iggy_client/lanes.rs`), which abandons any retained operation it
+  sees and runs a lane-refused call once more (a refusal takes no request
+  id, so nothing was sent). The gateway never resends an unknown outcome
+  itself. `IncompatibleProtocolVersion` maps to `IncompatibleServer`, which
   stops a reconnect session (otherwise infinite at `MAX_RECONNECT_ATTEMPTS=0`)
   and exits startup with `EX_PROTOCOL`.
 

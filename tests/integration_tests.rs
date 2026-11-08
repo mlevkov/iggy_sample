@@ -754,6 +754,64 @@ async fn test_connection_events_mark_server_loss_without_a_ping() {
         .expect("the follower task must not panic");
 }
 
+/// A send whose call is dropped after its request left the client must not
+/// block later sends to the same partition.
+///
+/// SDK 0.12 keeps such a send retained in its partition's lane and refuses
+/// every later send there with `LaneBlocked` until the operation is resolved
+/// or abandoned. The wrapper's per-request timeout drops calls exactly this
+/// way. Freezing the container makes it deterministic: the request reaches
+/// the socket, the frozen server never answers, and the 200 ms deadline
+/// cancels the call. `lanes::send_settled` must then abandon the retained
+/// send and deliver the next one. One partition keeps both sends in one lane.
+#[tokio::test]
+async fn test_send_after_a_timed_out_send_is_not_lane_blocked() {
+    use iggy_sample::models::{Event, EventPayload};
+    use iggy_sample::{AppError, Config, IggyClientWrapper};
+
+    let (container, iggy) = IggyContainer::start().await;
+    let config = Config {
+        iggy_connection_string: iggy.connection_string(),
+        default_stream: "lanes-stream".to_string(),
+        default_topic: "lanes-events".to_string(),
+        topic_partitions: 1,
+        operation_timeout: Duration::from_secs(10),
+        metrics_port: 0,
+        ..Config::default()
+    };
+    let wrapper = IggyClientWrapper::new(config)
+        .await
+        .expect("wrapper should connect");
+    wrapper
+        .initialize_defaults()
+        .await
+        .expect("create the stream and topic");
+    let event = || Event::new("lanes.test", EventPayload::Generic(json!({ "n": 1 })));
+    // The first send to a partition looks up its route, a read that takes no
+    // lane. Sending once caches the route, so the timed-out send below is
+    // written to the socket instead of cancelled during the lookup.
+    wrapper
+        .send_event_default(&event(), None)
+        .await
+        .expect("warm-up send");
+
+    container.pause().await.expect("freeze the Iggy container");
+    let timed_out = wrapper
+        .with_timeout(Duration::from_millis(200))
+        .send_event_default(&event(), None)
+        .await;
+    container.unpause().await.expect("thaw the Iggy container");
+    assert!(
+        matches!(timed_out, Err(AppError::OperationTimeout(_))),
+        "the send to the frozen server should time out, got {timed_out:?}"
+    );
+
+    wrapper
+        .send_event_default(&event(), None)
+        .await
+        .expect("the next send to the partition must not be lane-blocked");
+}
+
 #[tokio::test]
 async fn test_send_and_poll_message() {
     let fixture = TestFixture::new().await;

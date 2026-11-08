@@ -19,13 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as soon as its last link closes, even with default (unlimited)
   connection-string retries, so `/health` and `/ready` drop at once instead
   of at the next ping
-- Iggy 0.9 request outcomes get their own responses instead of a generic
-  500: `TransientNotAccepted` -> `503 not_accepted` (nothing applied, safe to
-  retry), `TransientNotCommitted` -> `503 outcome_unknown` (resending may
-  duplicate), and `RequestAlreadyApplied` -> `202 Accepted` with
-  `{"status":"applied"}`. None of them triggers the wrapper's
-  reconnect-and-retry or counts as a circuit-breaker failure, since the SDK
-  has already replayed each one
+- Iggy request outcomes get their own responses instead of a generic 500:
+  `TransientNotAccepted`, lane refusals and `LifecycleBusy` ->
+  `503 not_accepted` (nothing applied, safe to retry);
+  `TransientNotCommitted`, `OperationUncertain`, `FetchProgressUncertain` and
+  `RequestTooOld` -> `503 outcome_unknown` (resending may duplicate); and
+  `RequestAlreadyApplied` -> `202 Accepted` with `{"status":"applied"}`. None
+  of them triggers the wrapper's reconnect-and-retry or counts as a
+  circuit-breaker failure, since the SDK has already replayed each one
+- SDK 0.12 lane settling (`src/iggy_client/lanes.rs`, ADR-0002). The SDK
+  keeps a mutation whose outcome it cannot prove, including one cancelled
+  after its request left the client, retained in its lane, and refuses every
+  later call on that lane until the application abandons it. Without this,
+  one send cut off by the per-request timeout made every later send to that
+  partition fail with `Lane blocked by operation N` for the life of the
+  client (reproduced against server 0.10.0). Every lane-taking SDK call now
+  abandons a retained operation it meets and runs a lane-refused call once
+  more, which is safe because a refused call was never sent
 - `IncompatibleProtocolVersion` maps to `502 incompatible_broker`, ends a
   reconnect session instead of retrying it forever, and makes startup exit
   with `EX_PROTOCOL` (76) rather than `EX_UNAVAILABLE`

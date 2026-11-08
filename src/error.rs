@@ -14,9 +14,9 @@ use thiserror::Error;
 /// - `Disconnected` - Lost connection during operation (triggers reconnection)
 /// - `ConnectionReset` - Connection was reset by peer (triggers reconnection)
 ///
-/// # Request-outcome errors (Iggy 0.9)
+/// # Request-outcome errors (Iggy 0.9 and later)
 ///
-/// A 0.9 server reports three request outcomes that are not connection
+/// The server and SDK report three request outcomes that are not connection
 /// failures, and the SDK has already retried each one before it surfaces.
 /// None of them triggers reconnection, a retry, or a circuit-breaker failure:
 ///
@@ -69,13 +69,15 @@ pub enum AppError {
     CircuitOpen(String),
 
     /// The broker refused the request before admitting it (Iggy
-    /// `TransientNotAccepted`): nothing was applied, so retrying is safe.
+    /// `TransientNotAccepted`, a lane refusal, or `LifecycleBusy`): nothing
+    /// was applied, so retrying is safe.
     #[error("Request not accepted by the broker: {0}")]
     NotAccepted(String),
 
     /// The broker could not confirm whether the request was applied (Iggy
-    /// `TransientNotCommitted`, surfaced after the SDK's own replays on the
-    /// same session). Resending could duplicate it.
+    /// `TransientNotCommitted`, `OperationUncertain`, `FetchProgressUncertain`
+    /// or `RequestTooOld`, surfaced after the SDK's own replays). Resending
+    /// could duplicate it.
     #[error("Request outcome unknown: {0}")]
     OutcomeUnknown(String),
 

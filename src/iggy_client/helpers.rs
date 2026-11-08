@@ -36,13 +36,29 @@ pub fn classify_iggy_error(error: IggyError, fallback: fn(String) -> AppError) -
         | IggyError::WebSocketReceiveError
         | IggyError::WebSocketSendError => AppError::ConnectionReset(error.to_string()),
         IggyError::CannotEstablishConnection => AppError::ConnectionFailed(error.to_string()),
-        // Request outcomes a 0.9 server reports. The SDK has already replayed
-        // each one before it surfaces, so none is a connection error: a
-        // reconnect-and-retry here would resend a request whose outcome the
-        // server could not confirm (TransientNotCommitted) or that it already
-        // applied (RequestAlreadyApplied).
-        IggyError::TransientNotAccepted => AppError::NotAccepted(error.to_string()),
-        IggyError::TransientNotCommitted => AppError::OutcomeUnknown(error.to_string()),
+        // Request outcomes the server and SDK report. The SDK has already
+        // replayed each one before it surfaces, so none is a connection
+        // error: a reconnect-and-retry here would resend a request whose
+        // outcome is unknown or that the server already applied.
+        //
+        // Never admitted, so retrying is safe. A lane refusal reaches here
+        // only after `lanes::settled` freed the lane and the second attempt
+        // was refused too (a concurrent request's unknown outcome); it took
+        // no request id, so nothing was sent. LifecycleBusy means a committed
+        // delete or recreate refused this mutation.
+        IggyError::TransientNotAccepted
+        | IggyError::LaneBlocked(_)
+        | IggyError::PartitionLaneBlocked(..)
+        | IggyError::LifecycleBusy => AppError::NotAccepted(error.to_string()),
+        // May have applied. OperationUncertain is SDK 0.12's form of
+        // TransientNotCommitted for a mutation, FetchProgressUncertain the
+        // same for an auto-commit poll whose offset the server may have
+        // stored, and RequestTooOld a replay that fell below the server's
+        // deduplication window.
+        IggyError::TransientNotCommitted
+        | IggyError::OperationUncertain(_)
+        | IggyError::FetchProgressUncertain(_)
+        | IggyError::RequestTooOld => AppError::OutcomeUnknown(error.to_string()),
         IggyError::RequestAlreadyApplied => AppError::AlreadyApplied(error.to_string()),
         IggyError::IncompatibleProtocolVersion(..) => {
             AppError::IncompatibleServer(error.to_string())
@@ -210,13 +226,17 @@ mod tests {
         // A connection classification would send these down the
         // reconnect-and-retry path and resend the request.
         type IsExpected = fn(&AppError) -> bool;
-        let cases: [(IggyError, IsExpected); 4] = [
-            (IggyError::TransientNotAccepted, |e| {
-                matches!(e, AppError::NotAccepted(_))
-            }),
-            (IggyError::TransientNotCommitted, |e| {
-                matches!(e, AppError::OutcomeUnknown(_))
-            }),
+        let not_accepted: IsExpected = |e| matches!(e, AppError::NotAccepted(_));
+        let outcome_unknown: IsExpected = |e| matches!(e, AppError::OutcomeUnknown(_));
+        let cases: [(IggyError, IsExpected); 10] = [
+            (IggyError::TransientNotAccepted, not_accepted),
+            (IggyError::LaneBlocked(3), not_accepted),
+            (IggyError::PartitionLaneBlocked(0, 3), not_accepted),
+            (IggyError::LifecycleBusy, not_accepted),
+            (IggyError::TransientNotCommitted, outcome_unknown),
+            (IggyError::OperationUncertain(9), outcome_unknown),
+            (IggyError::FetchProgressUncertain(9), outcome_unknown),
+            (IggyError::RequestTooOld, outcome_unknown),
             (IggyError::RequestAlreadyApplied, |e| {
                 matches!(e, AppError::AlreadyApplied(_))
             }),
