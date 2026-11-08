@@ -205,14 +205,14 @@ step failed silently, and release.yml has had no publish job since
 (TD-2026-09-04). To check a run by hand:
 
 ```bash
-scripts/verify-release.sh v0.4.2
+scripts/verify-release.sh v0.5.0
 ```
 
 It checks the tag's newest run at its latest attempt; `VERIFY_RUN_ID` and
 `VERIFY_RUN_ATTEMPT` pick another run of the tag or an earlier attempt.
 
 To exercise a `release.yml` change before a real release, push a pre-release
-tag of the current `Cargo.toml` version, such as `v0.4.1-ci.1` (the validate
+tag of the current `Cargo.toml` version, such as `v0.5.0-ci.1` (the validate
 job compares only the part before the hyphen), and verify its run the same
 way. Two things outlive the exercise:
 
@@ -223,7 +223,7 @@ way. Two things outlive the exercise:
   limits:
   - GitHub re-runs jobs only within 30 days of a run. Past that, tag the
     stable release's commit as a pre-release instead
-    (`git tag v0.4.1-docs.1 'v0.4.1^{}'`) and push it: its run deploys that
+    (`git tag v0.5.0-docs.1 'v0.5.0^{}'`) and push it: its run deploys that
     commit's docs. Delete the tag afterwards like any exercise tag.
   - deploy-pages refuses a run that holds more than one unexpired
     `github-pages` artifact, and the first attempt's expires after a day:
@@ -234,7 +234,7 @@ way. Two things outlive the exercise:
     lists them, and
     `gh api -X DELETE repos/mlevkov/iggy_sample/actions/artifacts/<id>`
     deletes one.
-- The tag. Delete it with `gh release delete v0.4.1-ci.1 --cleanup-tag --yes`
+- The tag. Delete it with `gh release delete v0.5.0-ci.1 --cleanup-tag --yes`
   from your clone (this also deletes the local tag). Left behind, it becomes
   where `release.yml` starts the changelog it writes for the next release
   (`git describe --tags`), which drops every commit before it.

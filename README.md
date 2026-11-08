@@ -134,7 +134,7 @@ Expected response:
 {
   "status": "healthy",
   "iggy_connected": true,
-  "version": "0.4.1",
+  "version": "0.5.0",
   "timestamp": "2024-01-15T10:30:00Z"
 }
 ```

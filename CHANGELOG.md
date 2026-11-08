@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-08
+
+Apache Iggy server 0.10.0 and Rust SDK 0.12.0 (ADR-0001, ADR-0002), with
+per-topic options on topic creation, a three-node cluster demo and a
+connectors demo with upstream's HTTP source and sink. The SDK's
+reconnection retries are capped at 3 by default (ADR-0003).
+
+Three breaking changes:
+
+- the server and SDK upgrade: no release reads its predecessor's data, so
+  the compose volume is now `iggy_data_0_10`, and a mismatched server fails
+  sign-in;
+- `POST /streams/{stream}/topics` refuses unknown fields with `422`;
+- startup refuses `API_KEY` without `TRUSTED_PROXIES`, unless
+  `ALLOW_UNVERIFIED_CLIENT_IPS=true`.
+
 ### Added
 
 - A connectors demo (ADR-0001 PR 4, pinned per ADR-0002), described in
@@ -711,7 +727,8 @@ triggers (`docs/tech-debt/`):
 - Trusted proxy configuration for X-Forwarded-For validation
 - Input validation to prevent injection attacks
 
-[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/mlevkov/iggy_sample/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/mlevkov/iggy_sample/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/mlevkov/iggy_sample/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mlevkov/iggy_sample/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mlevkov/iggy_sample/compare/v0.2.0...v0.3.0
