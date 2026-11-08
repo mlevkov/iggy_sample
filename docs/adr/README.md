@@ -1,8 +1,10 @@
 # Architecture Decision Records
 
 Significant design decisions, one file per decision, numbered in order. An ADR
-is not edited after acceptance except to change its status; a later decision
-that changes course gets a new ADR that supersedes the old one.
+is not edited after acceptance except to change its status, or to record a
+dated correction of a factual error in a Corrections section, which changes
+no decision. A later decision that changes course gets a new ADR that
+supersedes the old one.
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
