@@ -178,6 +178,21 @@ What happens, and why:
   `/ready` stay up throughout.
 - **The killed node catches up on its own.** It repairs its log from its
   peers, and rejoins `in_sync_members` a few seconds after it starts.
+- **Then partition primaries move back to it, also on their own.** Server
+  0.10 keeps primaries spread over the nodes, with no command or setting
+  for it (apache/iggy#4619). The metadata primary probes the nodes every
+  second. Once they have been ready for 5 s, it moves a partition whose
+  primary leads at least two more partitions than another member. With
+  the default topic's three partitions led one per node, the node that
+  took over the killed node's partition leads two and the rejoined node
+  none, so that partition moves back. Moves go one at a time: the old
+  primary drains for up to 1 s, then a view change hands the partition
+  over. Sends to that partition can wait during the move, like a short
+  failover. The script stops sending once the node is back in sync, so
+  its figures do not include this. This is upstream's design, read from
+  the source at `91e02063` (`core/shard/src/primary_rebalance.rs` and the
+  scan in `core/metadata/src/impls/placement.rs`); the demo does not
+  measure it.
 
 ## Seeds
 
@@ -228,8 +243,11 @@ scripts/cluster-failover-demo.sh
 
 ## Limitations
 
-- **Failover, not elasticity.** The roster is static. Adding or removing
-  nodes, and moving partitions between them, is not part of this demo.
+- **Failover, not elasticity.** The roster is static, and a partition's
+  members are fixed when it is created. Adding or removing nodes, and
+  moving a partition's replicas between them, is not part of this demo.
+  Only primaries move, by themselves, among a partition's members (see
+  [Failover](#failover)).
 - **One host.** All three nodes share a machine, so the demo shows the
   protocol, not independence from hardware faults.
 - **Node `status` is not liveness** (see [Reading the Cluster](#reading-the-cluster)).
