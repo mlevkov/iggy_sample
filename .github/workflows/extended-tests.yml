@@ -76,6 +76,8 @@ jobs:
   stress-tests:
     name: Stress Tests
     runs-on: ubuntu-latest
+    # A hang fails here, not at the 6-hour default
+    timeout-minutes: 30
     if: ${{ github.event_name == 'schedule' || github.event.inputs.run_stress_tests == 'true' }}
     services:
       iggy:
@@ -100,6 +102,9 @@ jobs:
         # runtime under the default seccomp profile ("Operation not
         # permitted"). Healthcheck uses the bundled iggy CLI - the image
         # ships no curl (mirrors docker-compose's healthcheck).
+        # The runner holds the steps until this check passes, so no step
+        # needs to wait: curl against the binary TCP port is no readiness
+        # probe, and 0.10 holds such a connection open without answering.
         options: >-
           --privileged
           --health-cmd "iggy ping"
@@ -112,17 +117,6 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      - name: Wait for Iggy to be ready
-        run: |
-          for i in {1..30}; do
-            if curl -s http://localhost:8090 > /dev/null 2>&1; then
-              echo "Iggy is ready"
-              break
-            fi
-            echo "Waiting for Iggy... ($i/30)"
-            sleep 2
-          done
 
       - name: Run stress tests
         run: |

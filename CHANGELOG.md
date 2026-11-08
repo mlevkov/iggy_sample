@@ -170,6 +170,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The weekly stress-test job's Iggy service container had stayed on
   `apache/iggy:0.8.0` through the 0.9 upgrade, against its own "keep in
   lockstep" comment; it now runs 0.10.0 with the advertised address it needs
+- The weekly stress-test job hung on 0.10: its readiness step ran `curl`
+  without a timeout against Iggy's binary TCP port, and 0.10 holds such a
+  connection open without answering. The step is gone (the service health
+  check already gates the job's steps), and the job now times out after
+  30 minutes
 - The provisioned Grafana "Iggy Overview" dashboard charted metric names
   the server does not export (`iggy_messages_bytes_total`,
   `http_request_duration_seconds_bucket`, `iggy_streams_count`), so four of
