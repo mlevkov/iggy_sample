@@ -5,9 +5,9 @@ use serde::Deserialize;
 use tracing::instrument;
 
 use super::util::parse_timestamp_with_context;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::middleware::RequestTimeout;
-use crate::models::{CreateTopicRequest, TopicInfo};
+use crate::models::{CreateTopicRequest, TopicInfo, TopicOptionsView};
 use crate::state::AppState;
 use crate::validation::{validate_partition_count, validate_resource_name};
 
@@ -51,6 +51,7 @@ pub async fn list_topics(
                 partitions_count: t.partitions_count,
                 size_bytes: t.size.as_bytes_u64(),
                 messages_count: t.messages_count,
+                options: TopicOptionsView::from_stored(&t.options),
             }
         })
         .collect();
@@ -84,10 +85,13 @@ pub async fn get_topic(
         partitions_count: topic.partitions_count,
         size_bytes: topic.size.as_bytes_u64(),
         messages_count: topic.messages_count,
+        options: TopicOptionsView::from_stored(&topic.options),
     }))
 }
 
-/// Create a new topic in a stream.
+/// Create a new topic in a stream, with any per-topic options in the body's
+/// `options` object. Options are validated here before anything reaches the
+/// server; the server's own admission errors also answer 400.
 #[instrument(skip(state, timeout, payload))]
 pub async fn create_topic(
     State(state): State<AppState>,
@@ -100,10 +104,14 @@ pub async fn create_topic(
     // Validate request body
     validate_resource_name(&payload.name, "Topic")?;
     validate_partition_count(payload.partitions, "Topic")?;
+    let options = payload
+        .options
+        .validate(payload.partitions, |key| format!("options.{key}"))
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
 
     state
         .iggy_scoped(timeout)
-        .create_topic(&path.stream, &payload.name, payload.partitions)
+        .create_topic(&path.stream, &payload.name, payload.partitions, &options)
         .await?;
 
     Ok(StatusCode::CREATED)

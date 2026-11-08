@@ -151,6 +151,36 @@ The fuzz tests verify that validation functions never panic on any input.
   stops a reconnect session (otherwise infinite at `MAX_RECONNECT_ATTEMPTS=0`)
   and exits startup with `EX_PROTOCOL`.
 
+## Per-Topic Options
+
+Since server 0.9, durability, segment, flush and retention settings belong to
+each topic and are fixed at creation (ADR-0001 PR 2, on SDK 0.12 per
+ADR-0002). `src/models/topic_options.rs` holds the whole contract:
+
+- `TopicOptionsInput` is the raw form, from the request body's `options`
+  object. `validate()` checks each option against the
+  server's bounds (the SDK's `iggy_common` constants and validators) and the
+  rules that combine options: a finite `max_topic_size` must be at least the
+  segment size (the server's own error for that prints neither value), and
+  preallocation is capped across partitions. Iggy's spellings for "server
+  default" (`"server_default"`, `"0"`) are refused: omitting the option says
+  that, and keeps read-back provenance honest.
+- `TopicOptionsView` reports a topic's stored options with each value in the
+  form `POST` accepts (sizes in exact units, since the SDK's display rounds)
+  and its `source`: `explicit`, `default` (filled by the server at
+  admission) or `unset`.
+- **SDK 0.12 always sends both durability keys** (`TopicCreateOptions` has no
+  "unset" for them, and the trait API offers no way around it), so they read
+  back `explicit` on every topic this gateway creates. Documented rather
+  than worked around with hand-built wire requests.
+- Request bodies refuse unknown fields at both levels, so a misspelt or
+  misplaced option fails (`422`) instead of silently leaving a topic on a
+  default. Server admission errors for options map to `400`
+  (`classify_iggy_error`).
+- Not offered: `compression_algorithm` (stored, not applied by the server),
+  `partition_resize_policy`, `replication_factor` (the clustering demo), and
+  topic updates (ADR-0002).
+
 ## Partition Indexing
 
 Iggy uses **0-indexed partitions**:

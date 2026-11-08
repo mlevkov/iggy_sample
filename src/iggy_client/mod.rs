@@ -83,7 +83,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::models::Event;
+use crate::models::{Event, TopicOptions};
 
 // Re-exports for public API
 // Crate-internal: the breaker is a mechanism of the resilience executor, not
@@ -202,17 +202,6 @@ pub struct IggyClientWrapper {
     state: Arc<ConnectionState>,
     /// Circuit breaker for fail-fast during outages
     circuit_breaker: Arc<CircuitBreaker>,
-}
-
-/// Options for every topic this service creates: `partitions` partitions,
-/// no message expiry and no size cap.
-fn topic_create_options(partitions: u32) -> TopicCreateOptions {
-    TopicCreateOptions {
-        partitions_count: Some(partitions),
-        message_expiry: Some(IggyExpiry::NeverExpire),
-        max_topic_size: Some(MaxTopicSize::Unlimited),
-        ..Default::default()
-    }
 }
 
 /// Clamp a requested per-request deadline to the configured global timeout:
@@ -618,7 +607,7 @@ impl IggyClientWrapper {
                 }
                 Ok(None) => {
                     info!(stream, topic, partitions, "Creating topic");
-                    let options = topic_create_options(partitions);
+                    let options = TopicOptions::default().create_options(partitions);
                     match settled(&client, || client.create_topic(&stream_id, topic, &options))
                         .await
                     {
@@ -985,12 +974,18 @@ impl IggyClientWrapper {
 
     /// Create a new topic.
     #[instrument(skip(self))]
-    pub async fn create_topic(&self, stream: &str, topic: &str, partitions: u32) -> AppResult<()> {
+    pub async fn create_topic(
+        &self,
+        stream: &str,
+        topic: &str,
+        partitions: u32,
+        options: &TopicOptions,
+    ) -> AppResult<()> {
         self.with_reconnect(|| async {
             let client = self.client.read().await;
             let stream_id = to_identifier(stream, "stream")?;
 
-            let options = topic_create_options(partitions);
+            let options = options.create_options(partitions);
             settled(&client, || client.create_topic(&stream_id, topic, &options))
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;

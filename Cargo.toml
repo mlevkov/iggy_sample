@@ -30,7 +30,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Message streaming (Apache Iggy Rust SDK; 0.12 pairs with the server-0.10 line)
 iggy = "0.12.0"
 # Same version as `iggy` (one upstream release). Named directly only for
-# `DiagnosticEvent`, which the `iggy` prelude does not re-export.
+# what the `iggy` prelude does not re-export: `DiagnosticEvent`, and the
+# topic-option bounds and validators (`MAX_TOPIC_SEGMENT_SIZE`, ...).
 iggy_common = "0.12.0"
 
 # Serialization

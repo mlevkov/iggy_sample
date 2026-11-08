@@ -318,6 +318,55 @@ curl -X POST http://localhost:8000/streams/my-stream/topics \
   -d '{"name": "my-topic", "partitions": 3}'
 ```
 
+Per-topic storage options go in an optional `options` object. They are fixed
+when the topic is created; any you omit take the server's defaults.
+
+```bash
+curl -X POST http://localhost:8000/streams/my-stream/topics \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "payments",
+    "partitions": 3,
+    "options": {
+      "durability": "persisted",
+      "message_expiry": "30days",
+      "max_topic_size": "10 GiB",
+      "segment_size": "256 MiB"
+    }
+  }'
+```
+
+| Option | Values | Server default |
+|---|---|---|
+| `durability` | `replicated` or `persisted`: what a send waits for | `replicated` |
+| `consumer_offset_durability` | The same, for explicit consumer-offset stores and deletes | `replicated` |
+| `message_expiry` | A duration (`"7days"`, `"1h 30m"`) or `"unlimited"` | `unlimited` |
+| `max_topic_size` | A size (`"10 GiB"`) or `"unlimited"`; at least the segment size | `unlimited` |
+| `segment_size` | 1 MiB to 1 GiB, in multiples of 512 B | `1 GiB` |
+| `messages_required_to_save` | 1 to 16777216 buffered messages per segment write | `1024` |
+| `size_of_messages_required_to_save` | Up to 1 GiB buffered per segment write | `1 MiB` |
+| `preallocate_segments` | `true` reserves each segment's full size on disk | `false` |
+
+An invalid value answers `400` naming the option (`options.segment_size`). An
+unknown key, including an option placed beside `options` instead of inside
+it, answers `422`, so a typo never silently leaves a topic on a default.
+
+Topic reads (`GET /streams/{stream}/topics` and `/topics/{topic}`) report
+every option with its value, in the form `POST` accepts, and its `source`:
+
+```json
+"options": {
+  "durability": {"value": "persisted", "source": "explicit"},
+  "max_topic_size": {"value": "unlimited", "source": "default"},
+  "segment_size": {"value": "256 MiB", "source": "explicit"}
+}
+```
+
+`explicit` means the creating client sent the value, and `default` that the
+server filled it in. `unset` (with a `null` value) means the topic stores
+none. SDK 0.12 always sends both durability options, so on topics created
+through the SDK, this gateway included, they always read `explicit`.
+
 ### List Streams
 
 ```bash
