@@ -210,8 +210,11 @@ jobs:
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        # Pinned: both coverage steps read the TOTAL row's tenth field, so a
+        # release that changes the row's layout must be a deliberate bump.
+        # Keep ci.yml and pr.yml on the same version.
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Generate coverage summary
         run: |
