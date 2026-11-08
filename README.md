@@ -349,7 +349,9 @@ curl -X POST http://localhost:8000/streams/my-stream/topics \
 
 An invalid value answers `400` naming the option (`options.segment_size`). An
 unknown key, including an option placed beside `options` instead of inside
-it, answers `422`, so a typo never silently leaves a topic on a default.
+it, answers `422`, so a typo never silently leaves a topic on a default. The
+[durable storage guide](docs/durable-storage-guide.md) explains what each
+option does.
 
 Topic reads (`GET /streams/{stream}/topics` and `/topics/{topic}`) report
 every option with its value, in the form `POST` accepts, and its `source`:

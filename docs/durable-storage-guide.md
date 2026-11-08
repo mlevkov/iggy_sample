@@ -1,21 +1,14 @@
 # Apache Iggy Durable Storage Guide
 
-A comprehensive guide to configuring Apache Iggy for durable, production-ready message storage.
+How Apache Iggy stores messages, what each durability and retention setting
+guarantees, and how to set them through this gateway.
 
-> **Out of date for server 0.10.0, which this repository now runs.** Since
-> 0.9 the server flattens `[system]` (the `IGGY_SYSTEM_*` variables below lose
-> `SYSTEM_`), rejects `enforce_fsync` at boot, and takes segment and flush
-> settings as per-topic options with a `replicated`/`persisted` durability
-> policy. The rewrite is the per-topic options PR in
-> [ADR-0001](adr/0001-iggy-0.9-upgrade-and-demos.md), which
-> [ADR-0002](adr/0002-iggy-0.10-before-topic-options.md) builds on 0.10;
-> until then, read the configuration below as 0.8 reference only.
-
-> **Validated key-by-key against Apache Iggy server 0.8.0** (upstream tag `server-0.8.0`,
-> shipped default config `core/server/config.toml` and config sources in
-> `core/configs/src/server_config/`) on 2026-07-05.
-
----
+> **Validated against Apache Iggy server 0.10.0 and Rust SDK 0.12.0**
+> (upstream tag `server-0.10.0`, commit `91e02063`): the shipped
+> `core/server/config.toml`, the SDK's option catalog, and a running
+> `apache/iggy:0.10.0` container, on 2026-11-08. The 0.8 edition of this guide
+> is in git history; most of its configuration no longer exists (see
+> [Removed since 0.8](#removed-since-08)).
 
 ## Table of Contents
 
@@ -29,7 +22,7 @@ A comprehensive guide to configuring Apache Iggy for durable, production-ready m
 8. [Production Recommendations](#production-recommendations)
 9. [Current Limitations](#current-limitations)
 10. [Configuration Reference](#configuration-reference)
-11. [Sources and Further Reading](#sources-and-further-reading)
+11. [Sources](#sources)
 
 ---
 
@@ -37,720 +30,507 @@ A comprehensive guide to configuring Apache Iggy for durable, production-ready m
 
 ### Append-Only Log Model
 
-Iggy uses an **append-only log** as its core storage abstraction. This is the same fundamental design used by Kafka, Apache BookKeeper, and other high-performance streaming systems.
+Each partition is an append-only log. Messages are written in batches to the
+partition's open *segment*; when the segment reaches the topic's
+`segment_size`, it is sealed and a new one opens. Retention deletes whole
+sealed segments, oldest first, and never touches the open one.
+
+Since 0.9 every write also goes through consensus (VSR, viewstamped
+replication), even on a single node. Each partition keeps a write-ahead log
+(WAL) of *prepares*: an operation is journaled there, committed, then applied
+to the segment. Recovery after a crash replays the WAL.
 
 ```
-Topic: "orders" (3 partitions)
-├── partitions/0/
-│   ├── 00000000000000000000.log     (messages from offset 0)
-│   ├── 00000000000000000000.index   (offset + timestamp index)
-│   ├── 00000000000001000000.log     (messages from offset 1,000,000)
-│   └── ...
-├── partitions/1/
-│   └── ...
-└── partitions/2/
-    └── ...
+Producer ──► partition primary ──► WAL prepare ──► commit ──► segment append
+                                    (prepares-1/)              (*.log, *.index)
 ```
 
-Segment files are named by their 20-digit zero-padded start offset. Each segment
-has a single `.index` companion file covering both positional and time-based lookups
-(older Iggy versions used separate `.idx`/`.tidx` files).
+### On-Disk Layout
 
-### Key Characteristics
+Observed in a running `apache/iggy:0.10.0` container after creating one
+stream, one topic and sending one message:
 
-| Property | Description |
-|----------|-------------|
-| **Immutable records** | Messages cannot be modified once written |
-| **Sequential writes** | Optimized for append operations |
-| **Indexed access** | Fast lookups by offset and timestamp |
-| **Segment-based** | Data split into manageable chunks |
+```
+local_data/
+├── storage-format              # format marker; 0.10 refuses other formats
+├── metadata/journal.wal        # metadata WAL: streams, topics, users, ...
+├── state/
+├── partition-initialization/
+├── runtime/current_config.toml # the effective server config
+├── logs/iggy-server.log
+└── streams/0/topics/0/partitions/0/
+    ├── 00000000000000000000.log    # segment: message batches
+    ├── 00000000000000000000.index  # sparse offset/time index
+    ├── superblock.a                # partition consensus state
+    ├── created.revision
+    ├── offsets/                    # stored consumer offsets
+    └── prepares-1/                 # partition WAL
+        ├── prepares-0.wal
+        ├── frontier
+        └── segment-0-0.log         # hard link to the segment above
+```
+
+Stream, topic and partition directories are numbered from 0. The WAL holds
+segment bodies by hard link until it reclaims them, so a segment and its WAL
+reference are one file on disk, not two.
 
 ### Storage Location
 
-By default, all data is persisted under the `local_data` directory. Configure
-the path in the server's `config.toml` (server 0.8.0 embeds a default config;
-point `IGGY_CONFIG_PATH` at your own file to override it):
+| Setting | Value |
+|---|---|
+| Server key | `path` (environment override `IGGY_PATH`) |
+| Shipped default | `local_data`, relative to the image's working directory `/app` |
+| This repository's compose stack | volume `iggy_data_0_10` mounted at `/app/local_data` |
 
-```toml
-[system]
-path = "local_data"  # Change to your preferred location
-```
-
-Or via environment variable:
-
-```bash
-export IGGY_SYSTEM_PATH=/var/lib/iggy/data
-```
+The volume name carries the release line because 0.10 refuses a 0.9 data
+directory: "storage at /iggy/data does not match this build's storage format;
+startup refused without modifying data. No in-place upgrade is supported"
+([ADR-0002](adr/0002-iggy-0.10-before-topic-options.md)). Upgrading means
+starting on an empty directory, or migrating data out and back in through
+clients.
 
 ---
 
 ## Durability Configuration
 
-Durability in Iggy is controlled by **fsync** settings. fsync forces the operating system to flush data from kernel buffers to the physical storage device, ensuring data survives crashes.
+### Durability Is Per Topic
 
-### The fsync Trade-off
+Up to 0.8, durability was server-wide: `[system.partition] enforce_fsync`,
+the background `[message_saver]`, and flush thresholds in `config.toml`. Since 0.9 these are
+**per-topic options**, set when the topic is created and fixed from then on.
+0.9 rejects `enforce_fsync` at boot, and 0.10's shipped config has no message
+saver.
 
-```
-Without fsync (default):
-┌─────────┐    ┌─────────────┐    ┌──────────┐
-│  Iggy   │ → │ OS Buffer   │ → │   Disk   │
-│ Server  │    │   Cache     │    │          │
-└─────────┘    └─────────────┘    └──────────┘
-                     ↑
-              Data lives here temporarily.
-              Lost on power failure or crash.
+Two options decide what a successful call has waited for:
 
-With fsync enabled:
-┌─────────┐    ┌─────────────┐    ┌──────────┐
-│  Iggy   │ → │ OS Buffer   │ ═══│   Disk   │
-│ Server  │    │   Cache     │ ↑  │          │
-└─────────┘    └─────────────┘ │  └──────────┘
-                               │
-                    fsync() forces write to disk
-                    before acknowledging message.
-```
+| Option | Covers | Values | Default |
+|---|---|---|---|
+| `durability` | Message sends | `replicated`, `persisted` | `replicated` |
+| `consumer_offset_durability` | Explicit consumer-offset stores and deletes | `replicated`, `persisted` | `replicated` |
 
-### Core Durability Settings
+They are independent: neither inherits the other.
 
-#### 1. Message Saver Configuration
+### The Two Policies
 
-The top-level `[message_saver]` section controls background persistence
-(defaults shown are the shipped 0.8.0 defaults):
+Both policies write data to storage. They differ in what has happened before
+the server answers success:
 
-```toml
-[message_saver]
-# Enable the background process that saves buffered data to disk
-enabled = true
+- **`replicated`** waits for the VSR commit and its application, without an
+  extra stable-storage barrier. After a crash, a replicated partition recovers
+  up to the last WAL frontier it published: at checkpoints, durable operations
+  and graceful shutdown. Writes acknowledged after that frontier can be lost
+  in a crash.
+- **`persisted`** also requires recoverable stable-storage copies at the
+  replication quorum before success. On a single node the quorum is that one
+  replica, so success follows local persistence.
 
-# Force synchronous writes to disk on each save
-# (see the caveat below: the 0.8.0 saver's actual flush behavior does not
-# honor this setting - treat it as intent, not a guarantee)
-enforce_fsync = true
+Two caveats from the server's own documentation:
 
-# Interval for running the message saver (default: 30 s)
-interval = "30 s"
-```
+- A persisted prepare is limited to 64 MiB, including the consensus header.
+  Larger operations are rejected permanently.
+- **Poll auto-commit is asynchronous.** A successful poll does not confirm that
+  the offset it submitted committed or became durable, whatever
+  `consumer_offset_durability` says. This gateway's `auto_commit=true` polls
+  use exactly that path (`CommitPolicy::OnRead`). Where an offset must survive
+  a crash, store it explicitly.
 
-> **Caveat (verified against 0.8.0 sources):** the saver task in server
-> 0.8.0 issues its periodic flush with `fsync: false` while merely logging
-> the `enforce_fsync` setting, so treat saver-based durability as
-> UNVERIFIED at this version — if you need a hard on-disk guarantee, use
-> per-message fsync (`[system.partition] enforce_fsync = true`) below.
+### Flush Scheduling
 
-#### 2. Per-Message fsync (Maximum Durability)
+| Option | Default | Range |
+|---|---|---|
+| `messages_required_to_save` | 1024 | 1 to 16777216 |
+| `size_of_messages_required_to_save` | 1 MiB | 1 B to 1 GiB |
 
-For the strongest durability guarantee, force fsync after every message:
+These thresholds schedule ordinary segment writes from the in-memory buffer.
+They are **not** a durability setting: the WAL, not the segment, is what
+recovery relies on, and required persistence, capacity pressure and lifecycle
+operations flush sooner anyway. Under 0.8, `messages_required_to_save = 1` was
+the way to get per-message durability. On 0.10, use `durability: persisted`
+for that, and tune these only for throughput and latency.
 
-```toml
-[system.partition]
-# Force fsync on every partition write (default: false)
-enforce_fsync = true
+### Setting Options Through This Gateway
 
-# Flush after each message (set to 1 for maximum durability; default: 1024)
-messages_required_to_save = 1
-
-# Companion size threshold - a save is also triggered once buffered
-# messages reach this size (default: "1 MiB")
-size_of_messages_required_to_save = "1 MiB"
-```
-
-Or via environment variables:
+Create a topic with an `options` object:
 
 ```bash
-export IGGY_SYSTEM_PARTITION_ENFORCE_FSYNC=true
-export IGGY_SYSTEM_PARTITION_MESSAGES_REQUIRED_TO_SAVE=1
+curl -X POST http://localhost:8000/streams/my-stream/topics \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "payments",
+    "partitions": 3,
+    "options": {
+      "durability": "persisted",
+      "consumer_offset_durability": "persisted"
+    }
+  }'
 ```
 
-### Durability Levels
+The default topic takes the same options from `IGGY_TOPIC_<OPTION>`
+environment variables, e.g. `IGGY_TOPIC_DURABILITY=persisted`. They apply only
+when the gateway creates the topic. For a topic that already exists, the
+gateway logs a warning for each option that differs and leaves the topic as
+it is.
 
-| Level | Configuration | Latency | Data Loss Risk |
-|-------|---------------|---------|----------------|
-| **Maximum** | `[system.partition]` `enforce_fsync=true`, `messages_required_to_save=1` | ~9ms P99 | None (survives power loss) |
-| **High** | `[system.partition]` `enforce_fsync=true`, `messages_required_to_save=100` | ~1-2ms P99 | Up to 100 messages |
-| **Balanced** | `[system.partition]` `enforce_fsync=false` + `[message_saver]` `enforce_fsync=true`, `interval="1s"` | ~0.5ms P99 | Up to 1 saver interval — see the saver fsync caveat above |
-| **Performance** | `enforce_fsync=false` everywhere | ~0.1ms P99 | Unbounded (OS-dependent) |
+The gateway validates every option against the server's bounds before sending
+it. An invalid value answers `400` naming the option, and an unknown key
+answers `422`, so a typo cannot silently leave a topic on `replicated`. The
+full option table is in the [README](../README.md#create-a-topic).
 
-### Performance Benchmarks
+### Reading Options Back
 
-With fsync-per-message enabled, Iggy achieves impressive durability performance:
+`GET /streams/{stream}/topics/{topic}` reports every option with its stored
+value and where it came from:
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| P99 Producer Latency | ~9.48ms | With `enforce_fsync=true`, `messages_required_to_save=1` |
-| P9999 Producer Latency | ~9.48ms | Consistent even at tail |
-| P99 Consumer Latency | <3ms | Reading from durable storage |
+```json
+"options": {
+  "durability": {"value": "persisted", "source": "explicit"},
+  "consumer_offset_durability": {"value": "replicated", "source": "explicit"},
+  "message_expiry": {"value": "unlimited", "source": "default"},
+  "segment_size": {"value": "1 GiB", "source": "default"}
+}
+```
 
-Single-digit millisecond latencies at P9999 for a fully durable workload is excellent performance, competitive with or exceeding many other streaming platforms.
+- `explicit`: the client that created the topic sent the value.
+- `default`: the server filled it in when it admitted the topic.
+- `unset`: the topic stores no value (`value` is `null`).
 
-> These figures are Iggy's published benchmark numbers; they were NOT
-> re-measured as part of this guide's 0.8.0 key-by-key validation (which
-> covers configuration keys and behaviors only).
+SDK 0.12 always sends both durability options, so on any topic created
+through the SDK, this gateway included, they read `explicit` even when the
+caller omitted them. An omitted one reads `replicated`. Check `value`, not
+`source`, to know a topic's guarantee.
 
 ---
 
 ## Segment Management
 
-Iggy stores messages in **segments**, which are physical files on disk.
+### Segment Size
 
-### Segment Configuration
+`segment_size` is per topic: 1 MiB to 1 GiB, in multiples of 512 B, with a
+default of 1 GiB. It is a soft limit, since a segment may close one whole
+batch past it.
 
-```toml
-[system.segment]
-# Soft limit for segment size before rolling to a new segment (default: "1 GiB")
-# Hard maximum is 1 GiB, and the size must be a multiple of 512 B.
-# Larger = fewer files, potentially slower recovery
-# Smaller = more files, faster recovery, more overhead
-size = "1 GiB"
+| Smaller segments | Larger segments |
+|---|---|
+| Retention frees space in finer steps | Fewer files per partition |
+| A small `max_topic_size` becomes possible (it must be at least one segment) | Less per-segment overhead |
+| More files and more index entries to recover | Retention frees space in 1 GiB steps |
 
-# Index caching strategy (single .index file covers offset + time lookups):
-#   "all" (or true)    = keep all indexes in memory (fastest, most memory)
-#   "open_segment"     = cache indexes only for the currently open segment (default)
-#   "none" (or false)  = always read indexes from disk (least memory)
-cache_indexes = "open_segment"
+### Preallocation
 
-[system.partition]
-# Validate checksums (CRC) when loading data (integrity check; default: false)
-validate_checksum = true
-```
+`preallocate_segments: true` reserves each segment's full `segment_size` on
+disk when it opens, where the filesystem supports it. It is off by default:
+with the default 1 GiB segments it costs 1 GiB of real disk per partition as
+soon as the topic is created. The server caps what one topic may reserve,
+`segment_size` times the partition count, at 64 GiB, and the gateway checks
+that cap before creating the topic.
 
-> **Changed in 0.8.0**: `cache_indexes` is now a string enum (`"all"`,
-> `"open_segment"`, `"none"`) rather than a boolean, the separate
-> `cache_time_indexes` option was removed (one combined index file), and
-> `validate_checksum` lives under `[system.partition]`, not `[system.segment]`.
+### Index Files and Checksums
 
-### Segment Lifecycle
+Each segment has a sparse `.index` file for offset and timestamp lookups.
+Message batches carry checksums. `[partition] validate_checksum` (default
+`true` in 0.10) verifies them on every read from segment storage, and a
+mismatch is reported rather than served. Recovery validates batches against
+their checksums and partition identity whatever this setting says.
 
-```
-1. ACTIVE: Current segment receiving writes
-   └── 00000000000000000000.log (< size limit)
+### Partition WAL Budget
 
-2. SEALED: Size limit reached, new segment created
-   ├── 00000000000000000000.log (closed, read-only)
-   └── 00000000000001000000.log (now active)
-
-3. EXPIRED: All messages in segment past retention
-   └── 00000000000000000000.log (eligible for deletion)
-
-4. DELETED: Removed by the message cleaner
-   └── (the active segment is always protected)
-```
-
-### Index Files
-
-Each segment has one associated index file:
-
-| File | Purpose |
-|------|---------|
-| `.log` | Message data (binary format) |
-| `.index` | Combined index (find message by offset or timestamp) |
-
-### Checksum Validation
-
-Enable checksum validation to detect data corruption:
-
-```toml
-[system.partition]
-validate_checksum = true  # Validates CRCs when loading data (default: false)
-```
-
-This adds overhead during data loading but catches corruption early.
+| Key (`[partition]`) | Default | Meaning |
+|---|---|---|
+| `wal_bytes_max` | `256 MiB` | Per-partition budget for the active WAL plus queued and in-flight prepares. Checkpointing starts at half. Full message payloads count against it under both policies |
+| `wal_group_commit_delay_micros` | `0` (off) | For `persisted` partitions: wait up to this long for more prepares, so one storage barrier covers a group. Trades acknowledgment latency for fewer device writes; durability is unchanged |
+| `prepare_queue_depth` | `32` | Uncommitted sends in flight per partition. Past it and its spill queue, the server answers `TransientNotAccepted`, which this gateway returns as a retryable `503` |
 
 ---
 
 ## Data Retention Policies
 
-Iggy supports both time-based and size-based retention. Server-wide defaults
-for new topics live under `[system.topic]`; both policies can be active
-simultaneously and can be overridden per-topic via `CreateTopic`/`UpdateTopic`.
-
-> **Important**: retention is enforced by the background **message cleaner**,
-> which is **disabled by default** in 0.8.0. Enable it or expired data will
-> never be deleted:
->
-> ```toml
-> [data_maintenance.messages]
-> cleaner_enabled = true   # default: false
-> interval = "1 m"         # how often the cleaner runs (default: "1 m")
-> ```
+Retention is per topic, set at creation, and deletes whole sealed segments.
+The active segment is never touched.
 
 ### Time-Based Retention (Message Expiry)
 
-Messages are deleted after a specified duration:
-
-```toml
-[system.topic]
-# Human-readable format
-message_expiry = "7 days"           # 7 days
-message_expiry = "2 days 4 hours"   # 2 days + 4 hours
-message_expiry = "none"             # Never expire (default)
-```
-
-Expiry is evaluated per-segment: a sealed segment is removed once all messages
-within it have expired. The active (open) segment is always protected.
+`message_expiry` is a duration such as `"7days"`, `"12h"` or `"1h 30m"`, or
+`"unlimited"` (the default) to keep messages forever. Sealed segments older
+than the expiry are deleted.
 
 ### Size-Based Retention (Max Topic Size)
 
-Limit the total size of a topic:
+`max_topic_size` is a size such as `"10 GiB"`, or `"unlimited"` (the default).
+Past it, the oldest sealed segments are deleted.
+
+- **It is best-effort, not a hard disk bound.** The cap is enforced per
+  partition, as the cap divided by the partition count. The active segment is
+  never trimmed, and a lagging committed consumer pins the sealed segments
+  behind it.
+- **A finite cap must be at least the topic's segment size.** With the default
+  1 GiB segments, a cap below 1 GiB is refused. Set a smaller `segment_size`
+  for a smaller cap. The server refuses such a topic too, but its 0.10 error
+  message prints neither value, so the gateway checks first and says what the
+  floor is.
+
+Both policies can be active at once.
+
+### The Cleaner
+
+Retention runs in the server's segment cleaner:
 
 ```toml
-[system.topic]
-# Maximum topic size; "unlimited" or "0" = no size limit (default: "unlimited")
-max_size = "10 GiB"
+[data_maintenance.messages]
+cleaner_enabled = true   # default in 0.10
+interval = "1 m"
 ```
 
-When a topic reaches **90% of `max_size`**, the oldest sealed segments are
-deleted in whole-segment increments to make room for new messages. There is no
-separate `delete_oldest_segments` switch in 0.8.0 — this behavior is automatic
-whenever `max_size` is set and the message cleaner is enabled.
+It is on by default in 0.10. (Under 0.8 it was off by default, and retention
+silently did nothing until it was enabled.)
 
 ### Retention Strategy by Use Case
 
-| Use Case | Time Retention | Size Limit | Rationale |
-|----------|----------------|------------|-----------|
-| Real-time processing | 1-7 days | 10-50 GB | Data processed quickly, no need to keep |
-| Audit logs | 1-7 years | Unlimited | Compliance requirements |
-| Event sourcing | Never expire | Unlimited | Events are source of truth |
-| Metrics/telemetry | 30-90 days | 100 GB | Balance history vs storage cost |
-| Dev/test environments | 1 day | 1 GB | Quick turnover, limited resources |
-
-### Configuring Per-Topic Retention
-
-When creating topics via the SDK (signature as of iggy 0.10.0):
-
-```rust
-use iggy::prelude::*;
-use std::str::FromStr;
-
-// 7-day retention with a 10 GiB size cap
-client.create_topic(
-    &"mystream".try_into()?,             // stream_id: &Identifier
-    "events",                            // topic name
-    3,                                   // partitions_count
-    CompressionAlgorithm::default(),     // compression ("none")
-    None,                                // replication_factor
-    IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?),
-    MaxTopicSize::Custom(IggyByteSize::from_str("10GiB")?),
-).await?;
-
-// Never expire (event sourcing)
-client.create_topic(
-    &"mystream".try_into()?,
-    "event-store",
-    10,
-    CompressionAlgorithm::default(),
-    None,
-    IggyExpiry::NeverExpire,
-    MaxTopicSize::Unlimited,             // no size limit
-).await?;
-```
+| Use case | `options` |
+|---|---|
+| Event sourcing, audit log | `{"durability": "persisted", "message_expiry": "unlimited", "max_topic_size": "unlimited"}` |
+| Payments, orders | `{"durability": "persisted", "consumer_offset_durability": "persisted", "message_expiry": "90days"}` |
+| Application events | `{"message_expiry": "7days"}` |
+| Metrics, logs | `{"message_expiry": "24h", "max_topic_size": "10 GiB", "segment_size": "256 MiB"}` |
+| Ephemeral notifications | `{"message_expiry": "1h", "max_topic_size": "1 GiB", "segment_size": "64 MiB"}` |
 
 ---
 
 ## Backup and Archiving
 
-> **Removed in 0.8.0**: the built-in segment archiver
-> (`[data_maintenance.archiver]` with `disk` and `s3` backends) existed in the
-> legacy 0.4.x server line but was **removed** in the io_uring server rewrite
-> (0.7.x/0.8.x). Server 0.8.0 ships **no built-in archiving to disk or S3**.
-> A `[system.segment] archive_expired` flag (default `false`) is still
-> accepted by the config parser, but no archiver backend exists in 0.8.0, so
-> the flag has no effect — expired segments are simply deleted by the message
-> cleaner.
-
-Until archiving returns upstream, handle backups at the infrastructure level.
+There is no built-in archiver: it was removed before 0.8. Back up the data
+directory, or stream data out through clients.
 
 ### Filesystem-Level Backup
 
-The entire server state lives under `system.path` (default `local_data`), so
-any file-level backup tool works. For a consistent snapshot, either stop the
-server or use filesystem/volume snapshots (LVM, ZFS, EBS):
+- **Take a consistent copy.** Stop the server, or snapshot the volume (LVM,
+  ZFS or a cloud disk snapshot) and copy from the snapshot. A copy of a live
+  directory can catch a segment and its WAL mid-write.
+- **Preserve hard links.** WAL references are hard links to segment files
+  ([On-Disk Layout](#on-disk-layout)). `rsync -aH` or `cp -a` keep them as
+  links. Copying them as separate files doubles their size in the backup.
+- **Restore onto the same release line.** 0.10 refuses data from another
+  storage format without modifying it. The server's own config notes that a
+  rollback after an upgrade needs a consistent pre-upgrade backup.
+
+For the compose stack:
 
 ```bash
-# Simple sync of the data directory to S3 (run against a snapshot,
-# or accept that the active segment may be mid-write)
-aws s3 sync /var/lib/iggy/data s3://iggy-backups/production/iggy/
+docker compose stop iggy
+# tar keeps hard links as links
+docker run --rm -v iggy_sample_iggy_data_0_10:/data -v "$PWD":/backup \
+  alpine tar czf /backup/iggy-data.tgz -C /data .
+docker compose start iggy
 ```
 
-### Backup Directory
+### Streaming Data Out
 
-Iggy reserves a backup location inside the data directory, used by the server
-for compatibility conversions (not a general-purpose archiver):
-
-```toml
-[system.backup]
-# Path for storing backup data, relative to system.path (default: "backup")
-path = "backup"
-
-[system.backup.compatibility]
-# Subpath for converted segment data after compatibility conversion
-path = "compatibility"
-```
-
-### Streaming Data Out (Connectors)
-
-For continuous off-server copies of message data, the Iggy **connectors
-runtime** (a separate component from the server) can sink topics to external
-systems (e.g., PostgreSQL, Elasticsearch, Iceberg, Quickwit). This is a
-replication-style pipeline rather than a segment archive, but it is the
-supported way to keep an external durable copy with 0.8.0.
+Upstream's connectors runtime (`apache/iggy-connect`) can copy topics to
+external sinks continuously. ADR-0001's connectors demo adds an HTTP source
+and sink to this repository.
 
 ---
 
 ## Recovery and Data Integrity
 
-### Automatic State Recovery
+### What Recovery Does
 
-The config schema retains a recovery flag:
+From the server's documented recovery behaviour at 0.10:
 
-```toml
-[system.recovery]
-# Recreate streams/topics/partitions if expected data for existing state
-# is missing (default: false)
-recreate_missing_state = true
-```
+- Message batches are validated against their checksums and partition
+  identity before any data is served.
+- A genuinely incomplete tail can be truncated. Damage in the interior of the
+  log, or valid records after a damaged range, are refused or repaired, never
+  blindly truncated.
+- **`replicated` partitions** check the log from byte zero, because background
+  writeback can preserve later pages before earlier ones.
+  **`persisted` partitions** can use the faster index-anchored path, since
+  their completed flushes constrain the incomplete tail.
+- Unrecoverable local segment data is fenced and repaired from peers when
+  peers exist. **A single node cannot fetch a missing copy from anywhere.**
+  Fenced files are kept for diagnosis.
+- Recovery never replaces an acknowledged durable history with an empty
+  partition.
+- Index reconstruction across many segments can take time. A slow start is not
+  by itself a stalled server.
 
-> **Caveat (0.8.0)**: this key is accepted by the config parser, but as of
-> server 0.8.0 it is not referenced anywhere in the server code — it is a
-> holdover from the legacy server line and currently has **no effect**. The
-> 0.8.0 server performs its own crash-recovery on startup (offset clamping,
-> checksum-validated loading when `validate_checksum` is enabled), but it does
-> not rebuild missing metadata from raw segment files. Do not rely on this
-> flag; rely on backups.
+### Upgrades
 
-### Manual Recovery Steps
+0.10 checks the `storage-format` marker at boot and refuses a directory it
+does not match, without modifying it. There is no in-place upgrade from 0.9.
+Keep the old volume until the new deployment is verified; this repository's
+compose stack uses a new volume per release line for that reason.
 
-1. **Identify corruption**: Check logs for checksum errors or missing segments
+### Preventing Data Loss
 
-2. **Stop the server**: Ensure no writes during recovery
-
-3. **Verify segment files**: Check for truncated or zero-byte files
-   ```bash
-   find /var/lib/iggy/data -name "*.log" -size 0
-   ```
-
-4. **Restore from backup** (if syncing the data directory to S3):
-   ```bash
-   aws s3 sync s3://iggy-backups/production/iggy/ /var/lib/iggy/data/
-   ```
-
-5. **Restart and verify**:
-   ```bash
-   iggy-server
-   ```
-
-### Preventing Data Corruption
-
-| Measure | Configuration | Purpose |
-|---------|---------------|---------|
-| Checksums | `[system.partition]` `validate_checksum = true` | Detect corruption on load |
-| fsync | `enforce_fsync = true` | Prevent partial writes |
-| S3 backup | (infrastructure, e.g. `aws s3 sync`) | Off-site redundancy |
-| EBS snapshots | (infrastructure) | Point-in-time recovery |
+| Risk | Mitigation |
+|---|---|
+| Crash loses recent `replicated` writes | `durability: persisted` for data that must survive a crash |
+| Auto-committed offset lost in a crash | Store offsets explicitly for consumers that must not reprocess or skip |
+| Disk loss on a single node | Volume snapshots or backups; a cluster for replica repair |
+| Disk full | `max_topic_size` and `message_expiry` on every unbounded topic; monitor free space |
+| Silent corruption | Keep `validate_checksum = true` (the default) |
 
 ---
 
 ## Performance vs Durability Trade-offs
 
-### Understanding the Trade-off
+`persisted` adds a stable-storage barrier to every send's acknowledgment, so
+its cost depends on the device's barrier latency, not on Iggy. Measure it on
+your hardware before you choose; this guide quotes no figures, because none
+were measured for 0.10.
 
-Every durability feature has a performance cost:
+| Profile | Topic options | Server tuning |
+|---|---|---|
+| **Throughput** (metrics, logs) | defaults (`replicated`), short `message_expiry` | none |
+| **Balanced** (most applications) | `replicated` messages, `persisted` consumer offsets if offsets are stored explicitly | none |
+| **Maximum durability** (payments, ledgers) | `persisted` for both | `wal_group_commit_delay_micros` near the measured barrier time, if throughput suffers |
 
-```
-Performance ←────────────────────────────────→ Durability
+Flush thresholds (`messages_required_to_save`,
+`size_of_messages_required_to_save`) move cost between batching and latency.
+They do not change what an acknowledgment guarantees.
 
-[No fsync]      [Batched fsync]      [Per-message fsync]
- ~0.1ms              ~1ms                  ~9ms
- Data at risk    Some data risk         No data loss
-```
+### Hardware
 
-### Choosing Your Configuration
-
-#### High-Throughput, Lower Durability (Metrics, Logs)
-
-```toml
-[system.partition]
-enforce_fsync = false
-
-[message_saver]
-enabled = true
-enforce_fsync = false
-interval = "5s"
-```
-
-- Throughput: Millions of messages/second
-- Latency: Sub-millisecond
-- Risk: May lose several seconds of data on crash
-
-#### High (Most Applications)
-
-```toml
-[system.partition]
-enforce_fsync = true
-messages_required_to_save = 100
-
-[message_saver]
-enabled = true
-enforce_fsync = true
-interval = "1s"
-```
-
-- Throughput: Hundreds of thousands of messages/second
-- Latency: 1-2ms
-- Risk: May lose up to 100 messages on crash
-
-#### Maximum Durability (Financial, Critical Systems)
-
-```toml
-[system.partition]
-enforce_fsync = true
-messages_required_to_save = 1
-
-[message_saver]
-enabled = true
-enforce_fsync = true
-```
-
-- Throughput: Tens of thousands of messages/second
-- Latency: ~9ms
-- Risk: No data loss (survives power failure)
-
-### Hardware Considerations
-
-fsync performance depends heavily on storage:
-
-| Storage Type | fsync Latency | Recommendation |
-|--------------|---------------|----------------|
-| NVMe SSD | 0.1-1ms | Best for durable workloads |
-| SATA SSD | 1-5ms | Good for balanced workloads |
-| HDD | 5-15ms | Avoid for high-durability needs |
-| Network (EBS gp3) | 1-3ms | Good, use provisioned IOPS |
-| Network (EBS io2) | 0.5-1ms | Best for cloud deployments |
+- **NVMe SSDs** keep barrier latency low, which matters most for `persisted`.
+- **Separate volumes** for data and the OS keep log I/O from competing.
+- **Filesystem:** preallocation needs a filesystem that supports it (ext4 and
+  XFS do).
 
 ---
 
 ## Production Recommendations
 
-### Recommended Production Configuration
+### Server Configuration
+
+0.10's defaults are reasonable for most deployments. The keys that matter for
+storage:
 
 ```toml
-# config.toml - Production Configuration (Iggy server 0.8.0)
+# Apache Iggy server 0.10.0 - storage-related keys (shipped defaults)
+path = "local_data"                    # mount a dedicated volume here
 
-[system]
-path = "/var/lib/iggy/data"
+[partition]
+validate_checksum = true               # keep on
+wal_bytes_max = "256 MiB"              # raise for high-throughput partitions
+wal_group_commit_delay_micros = 0      # tune only for persisted topics
 
-[system.partition]
-enforce_fsync = true
-messages_required_to_save = 100  # Balance: durability with reasonable latency
-validate_checksum = true
-
-[message_saver]
-enabled = true
-enforce_fsync = true
-interval = "1s"
-
-[system.segment]
-size = "1 GiB"
-cache_indexes = "open_segment"
-
-[system.topic]
-message_expiry = "7 days"   # Adjust per your needs
-max_size = "unlimited"      # Or e.g. "50 GiB"
-
-# Required for retention to be enforced (disabled by default!)
 [data_maintenance.messages]
-cleaner_enabled = true
+cleaner_enabled = true                 # retention runs only while this is on
 interval = "1 m"
+
+[metadata]
+partitions_max = 0                     # 0 = no cap on total partitions
 ```
 
-> **Note**: the built-in S3/disk archiver from older Iggy versions does not
-> exist in 0.8.0 — see [Backup and Archiving](#backup-and-archiving) for
-> infrastructure-level alternatives.
+Each key has an environment override. Upstream documents `IGGY_PATH` and
+`IGGY_PARTITION_CONSUMER_OFFSETS_MAX` by name, and the other keys follow the
+same `IGGY_<SECTION>_<KEY>` pattern.
 
-### Infrastructure Checklist
+### Topic Defaults
 
-- [ ] **Storage**: Use NVMe SSD or provisioned IOPS EBS
-- [ ] **Filesystem**: ext4 or XFS with `noatime` mount option
-- [ ] **Backup**: Sync the data directory to S3 and/or use EBS snapshots (no built-in archiver in 0.8.0)
-- [ ] **Monitoring**: Alert on disk space, segment count, backup failures
-- [ ] **Capacity**: Plan for 2x expected data volume
-- [ ] **Recovery testing**: Regularly test restore from backups
+Decide durability per topic rather than per server, and set it explicitly:
 
-### Monitoring Metrics
+```bash
+# The gateway's default topic, from the environment
+IGGY_TOPIC_DURABILITY=persisted
+IGGY_TOPIC_CONSUMER_OFFSET_DURABILITY=persisted
+IGGY_TOPIC_MESSAGE_EXPIRY=30days
+```
 
-Key metrics to monitor for storage health:
+### Checklist
 
-| Metric | Alert Threshold | Action |
-|--------|-----------------|--------|
-| Disk usage | >80% | Add storage or reduce retention |
-| Segment count | >1000 per partition | Review segment size settings |
-| Backup failures | Any | Check S3 credentials/connectivity |
-| fsync latency | >50ms | Check storage health |
-| Checksum errors | Any | Investigate corruption source |
+- [ ] The data directory is on a dedicated, monitored volume.
+- [ ] Every topic that matters has `durability: persisted`, confirmed with a
+      `GET` on the topic.
+- [ ] Every topic has `message_expiry` or `max_topic_size`, unless it is meant
+      to grow forever.
+- [ ] Backups are consistent snapshots, keep hard links, and have been
+      restored at least once.
+- [ ] Consumers that must not lose position store offsets explicitly.
+
+### Monitoring
+
+The server's `/metrics` endpoint (it needs a bearer token since 0.9; the
+compose stack's Prometheus uses a personal access token) exposes per-shard
+WAL metrics, among them:
+
+| Metric | Meaning |
+|---|---|
+| `partition_wal_retained_bytes`, plus the queued and in-flight byte gauges | Together, the WAL budget in use (against `wal_bytes_max`) |
+| `partition_wal_disk_bytes` | WAL file length, excluding referenced segment bodies |
+| `partition_wal_prepares_total` / `partition_wal_batches_total` | Prepares per durable group |
+| `partition_wal_group_commit_waits_total` | Groups that took the optional commit wait |
+
+Alert on disk usage and on sustained `TransientNotAccepted` (`503` from this
+gateway), which means a partition's queues are full.
 
 ---
 
 ## Current Limitations
 
-As of Iggy server v0.8.0 (April 2026):
-
-### Single-Node Architecture
-
-Iggy 0.8.0 is effectively a **single-node** system for production purposes.
-The 0.8.0 config does introduce an **experimental `[cluster]` section**
-(disabled by default) with node/peer definitions, but clustered replication is
-still under active development and not production-ready in this release.
-
-**Implications:**
-- No automatic failover
-- Single point of failure for availability
-- Rely on filesystem backups + infrastructure (EBS snapshots) for redundancy
-
-**Roadmap:**
-- Clustering via Viewstamped Replication is planned for future releases
-- Will provide automatic failover and data replication
-
-### Mitigation Strategies
-
-Until clustering is production-ready:
-
-1. **S3 backup**: Periodically sync the data directory to durable cloud storage
-2. **EBS Snapshots**: If on AWS, use automated EBS snapshots
-3. **Cold standby**: Keep a replica populated from S3 backups
-4. **Infrastructure HA**: Use container orchestration for process restarts
-
-```
-Primary ──writes──→ Iggy ──s3 sync──→ S3
-                      │
-                      └── EBS Snapshot (every hour)
-
-On failure:
-1. Launch new instance
-2. Attach latest EBS snapshot (or restore from S3)
-3. Start Iggy
-4. Resume operations (some data loss possible)
-```
+- **Single node in this repository.** The compose stack runs one node, so
+  there is no replica to repair from and `persisted` means local persistence
+  only. ADR-0001's clustering demo adds a three-node stack.
+- **Options are fixed at creation here.** SDK 0.12 can update some topic
+  options, but this gateway does not offer updates (ADR-0002). Changing a
+  topic's durability or segment size means creating a new topic.
+- **`compression_algorithm` is stored but not applied** by the server, so the
+  gateway does not offer it.
+- **Replication factor** is per topic in 0.10 and belongs to the clustering
+  demo (ADR-0002).
 
 ---
 
 ## Configuration Reference
 
-### Environment Variables
+### Per-Topic Options
 
-All configuration can be set via environment variables using the pattern
-`IGGY_<CONFIG_PATH>` — the TOML path uppercased with `_` separators (e.g.
-`system.partition.enforce_fsync` → `IGGY_SYSTEM_PARTITION_ENFORCE_FSYNC`).
-The 0.8.0 server generates these mappings at compile time, so only real config
-keys are accepted. A custom config file path can be given via
-`IGGY_CONFIG_PATH` (otherwise the embedded default `core/server/config.toml`
-is used).
+| Option | Values | Default |
+|---|---|---|
+| `durability` | `replicated`, `persisted` | `replicated` |
+| `consumer_offset_durability` | `replicated`, `persisted` | `replicated` |
+| `message_expiry` | duration (`"7days"`) or `"unlimited"` | `unlimited` |
+| `max_topic_size` | size (`"10 GiB"`) or `"unlimited"`; at least `segment_size` | `unlimited` |
+| `segment_size` | 1 MiB to 1 GiB, multiple of 512 B | `1 GiB` |
+| `messages_required_to_save` | 1 to 16777216 | `1024` |
+| `size_of_messages_required_to_save` | 1 B to 1 GiB | `1 MiB` |
+| `preallocate_segments` | `true`, `false`; at most 64 GiB reserved per topic | `false` |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `IGGY_SYSTEM_PATH` | `local_data` | Data directory |
-| `IGGY_SYSTEM_PARTITION_ENFORCE_FSYNC` | `false` | Enable fsync on partition writes |
-| `IGGY_SYSTEM_PARTITION_MESSAGES_REQUIRED_TO_SAVE` | `1024` | Buffered messages before flush |
-| `IGGY_SYSTEM_PARTITION_SIZE_OF_MESSAGES_REQUIRED_TO_SAVE` | `1 MiB` | Buffered size before flush |
-| `IGGY_SYSTEM_PARTITION_VALIDATE_CHECKSUM` | `false` | Validate CRCs on load |
-| `IGGY_SYSTEM_SEGMENT_SIZE` | `1 GiB` | Segment size (max 1 GiB, multiple of 512 B) |
-| `IGGY_SYSTEM_SEGMENT_CACHE_INDEXES` | `open_segment` | `all`, `open_segment`, or `none` |
-| `IGGY_SYSTEM_TOPIC_MESSAGE_EXPIRY` | `none` | Default message TTL for new topics |
-| `IGGY_SYSTEM_TOPIC_MAX_SIZE` | `unlimited` | Default max topic size |
-| `IGGY_MESSAGE_SAVER_ENABLED` | `true` | Background message saver |
-| `IGGY_MESSAGE_SAVER_ENFORCE_FSYNC` | `true` | fsync on background saves |
-| `IGGY_MESSAGE_SAVER_INTERVAL` | `30 s` | Saver interval |
-| `IGGY_DATA_MAINTENANCE_MESSAGES_CLEANER_ENABLED` | `false` | Retention cleaner (enable for expiry/size limits!) |
-| `IGGY_DATA_MAINTENANCE_MESSAGES_INTERVAL` | `1 m` | Cleaner interval |
-| `IGGY_SYSTEM_STATE_ENFORCE_FSYNC` | `false` | fsync on metadata state updates |
-| `IGGY_SYSTEM_RECOVERY_RECREATE_MISSING_STATE` | `false` | Accepted but has no effect in 0.8.0 |
+Sizes accept binary (`MiB`, `GiB`) and decimal (`MB`, `GB`) units. Iggy's
+spellings for "server default" (`"server_default"`, `"0"`) are refused: omit
+the option instead.
 
-### Complete config.toml Template (Durability-Related Sections)
+### Gateway Environment Variables
 
-```toml
-# Apache Iggy Server 0.8.0 Configuration
-# Durable-storage-related sections; values shown are recommended
-# production settings (shipped defaults noted in comments)
+`IGGY_TOPIC_<OPTION>` for any option above, applied when the gateway creates
+the default topic (`IGGY_STREAM`/`IGGY_TOPIC`, `IGGY_PARTITIONS` partitions).
+Unset or empty leaves the option to the server, and an invalid value fails
+startup naming the variable.
 
-[system]
-# Base path for all data (default: "local_data")
-path = "local_data"
+### Removed Since 0.8
 
-[system.state]
-# fsync on metadata state updates (default: false)
-enforce_fsync = false
-
-[system.partition]
-# Synchronous writes for durability (default: false)
-enforce_fsync = true
-
-# Count of buffered messages before triggering a save
-# (1 = immediate, higher = batched; soft limit; default: 1024)
-messages_required_to_save = 100
-
-# Size of buffered messages before triggering a save (default: "1 MiB")
-size_of_messages_required_to_save = "1 MiB"
-
-# Validate CRC checksums when loading data (default: false)
-validate_checksum = true
-
-[message_saver]
-# Background persistence (defaults: enabled = true, enforce_fsync = true,
-# interval = "30 s")
-enabled = true
-enforce_fsync = true
-interval = "1s"
-
-[system.segment]
-# Soft segment size limit; max 1 GiB, multiple of 512 B (default: "1 GiB")
-size = "1 GiB"
-
-# Index caching: "all" | "open_segment" | "none" (default: "open_segment")
-cache_indexes = "open_segment"
-
-# Parsed but non-functional in 0.8.0 (no archiver backend exists)
-archive_expired = false
-
-[system.topic]
-# Default message retention for new topics (default: "none" = keep forever)
-message_expiry = "7 days"
-
-# Default max topic size; oldest sealed segments deleted at 90% of this
-# (default: "unlimited")
-max_size = "unlimited"
-
-# Retention enforcement - MUST be enabled for expiry/size limits to apply
-[data_maintenance.messages]
-# (default: false)
-cleaner_enabled = true
-# (default: "1 m")
-interval = "1 m"
-
-[system.recovery]
-# Accepted by the parser but has no effect in server 0.8.0 (default: false)
-recreate_missing_state = false
-```
+| 0.8 setting | Since 0.9 |
+|---|---|
+| `[system.partition] enforce_fsync` | Rejected at boot by 0.9. Use per-topic `durability` |
+| `[message_saver]` | No saver in 0.10's config. The WAL and the durability policy cover persistence |
+| `[system.partition] messages_required_to_save`, `size_of_messages_required_to_save` | Per-topic options |
+| `[system.segment] size` | Per-topic `segment_size` |
+| `[system.topic]` default expiry and size | Per-topic options; the defaults are fixed by the option catalog |
+| `[data_maintenance.messages] cleaner_enabled = false` | Now `true` by default |
+| `IGGY_SYSTEM_*` variables | `[system]` was flattened, so `SYSTEM_` is dropped (`IGGY_SYSTEM_PATH` is now `IGGY_PATH`) |
 
 ---
 
-## Sources and Further Reading
+## Sources
 
-### Official Documentation
-- [Apache Iggy GitHub Repository](https://github.com/apache/iggy)
-- [Iggy Architecture Documentation](https://iggy.apache.org/docs/introduction/architecture/)
-- [Iggy Server Configuration](https://iggy.apache.org/docs/server/configuration)
-- [Iggy Official Website](https://iggy.apache.org/)
-
-### Related Concepts
-- [Apache Kafka Storage Internals](https://kafka.apache.org/documentation/#design_filesystem) - Similar log-based architecture
-- [fsync and Data Durability](https://lwn.net/Articles/457667/) - Linux kernel perspective
-- [Write-Ahead Logging](https://en.wikipedia.org/wiki/Write-ahead_logging) - Foundational concept
-
-### Performance References
-- [Iggy Benchmarks](https://github.com/apache/iggy/tree/master/bench) - Official benchmark suite
-- [io_uring and Modern I/O](https://iggy.apache.org/blogs/2025/11/17/websocket-io-uring/) - Iggy's I/O architecture
-
----
-
-*Last updated: 2026-07-05*
-*Iggy server version: 0.8.0 — every configuration key in this guide was
-validated key-by-key against the upstream `server-0.8.0` tag
-(`core/server/config.toml` + `core/configs/src/server_config/`).*
+- Server configuration with inline documentation:
+  `core/server/config.toml` at
+  [`server-0.10.0`](https://github.com/apache/iggy/releases/tag/server-0.10.0)
+  (`91e02063`), sections `[partition]`, `[metadata]` and
+  `[data_maintenance.messages]`.
+- SDK option catalog and bounds: `iggy_common` 0.12.0,
+  `src/types/options/mod.rs` and `src/types/options/catalog.rs`.
+- [ADR-0001](adr/0001-iggy-0.9-upgrade-and-demos.md) and
+  [ADR-0002](adr/0002-iggy-0.10-before-topic-options.md): the upgrade path and
+  what was verified for each release.
+- [Apache Iggy documentation](https://iggy.apache.org/docs/).

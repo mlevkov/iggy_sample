@@ -8,7 +8,7 @@ This directory contains comprehensive guides for understanding and working with 
 |-------|-------------|
 | [Event-Driven Architecture Guide](guide.md) | Core concepts, streams/topics/partitions, consumer groups, error handling patterns, and production patterns (outbox, saga, idempotency) |
 | [Partitioning Guide](partitioning-guide.md) | Deep dive into partition keys, ordering guarantees, and partition selection strategies |
-| [Durable Storage Guide](durable-storage-guide.md) | Storage architecture, fsync configuration, retention, backup strategies (the built-in archiver was removed before server 0.8.0), recovery procedures, and production recommendations |
+| [Durable Storage Guide](durable-storage-guide.md) | Storage architecture, per-topic durability (`replicated`/`persisted`) and retention options on server 0.10, setting them through the gateway, backup, recovery, and production recommendations |
 | [Structured Concurrency](structured-concurrency.md) | Task lifecycle management, cancellation tokens, and graceful shutdown patterns |
 | [Architecture Decision Records](adr/README.md) | Significant design decisions and their reasoning, starting with the Iggy upgrade plan (0.9, then 0.10) |
 
@@ -26,8 +26,8 @@ This directory contains comprehensive guides for understanding and working with 
 - [Message Flow Patterns](guide.md#message-flow-patterns) - Pub/sub, work queues, event sourcing
 
 **Data Durability**
-- [Durability Configuration](durable-storage-guide.md#durability-configuration) - fsync settings and trade-offs
-- [Backup and Archiving](durable-storage-guide.md#backup-and-archiving) - backup strategies (built-in archiver removed in 0.8.0)
+- [Durability Configuration](durable-storage-guide.md#durability-configuration) - per-topic durability policies and trade-offs
+- [Backup and Archiving](durable-storage-guide.md#backup-and-archiving) - consistent filesystem backups (no built-in archiver)
 - [Recovery](durable-storage-guide.md#recovery-and-data-integrity) - Disaster recovery procedures
 
 **Message Ordering**

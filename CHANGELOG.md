@@ -96,6 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UnsupportedOptionKey`, `OptionsBlockTooLarge`, `InvalidTopicSize`,
   `InvalidSegmentSize`, `InvalidReplicationFactor`) answer `400` instead of
   `500`
+- `docs/durable-storage-guide.md` is rewritten for server 0.10: per-topic
+  `replicated`/`persisted` durability, flush scheduling, segments and
+  preallocation, retention and the cleaner (on by default since 0.9), backup
+  with hard links preserved, recovery, and a table mapping each removed 0.8
+  setting to its replacement. The partitioning guide's 0.8 server
+  configuration section is replaced the same way (TD-2026-07-06)
 - **Breaking:** Apache Iggy server 0.8.0 -> 0.10.0 and Rust SDK 0.10.0 ->
   0.12.0, together, by way of 0.9.0 and 0.11.0 (ADR-0001, ADR-0002). Each SDK
   speaks only its own release's wire protocol, so a mismatched server fails

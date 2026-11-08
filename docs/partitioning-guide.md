@@ -658,119 +658,71 @@ Maps timestamp → offset
 Lookup: "messages after 10:01:30" → start at offset 1000500
 ```
 
-### Memory and Caching
-
-Iggy provides configurable index caching:
-
-| Cache Mode | Behavior | Memory Usage | Read Performance |
-|------------|----------|--------------|------------------|
-| `all` | All indexes in memory | High | Fastest |
-| `open_segment` | Only active segment | Medium | Fast for recent |
-| `none` | Read from disk | Low | Slower |
-
 ---
 
 ## Iggy Server Configuration
 
-These settings in `server.toml` affect partition behavior.
+Since server 0.9, the storage settings that shape partitions belong to each
+topic, set when the topic is created: segment size, flush thresholds,
+durability, message expiry and the size cap. They apply to every partition of
+the topic. This gateway accepts them in the `options` object of
+`POST /streams/{stream}/topics`:
 
-### Partition Settings
-
-```toml
-[system.partition]
-# Directory for partition data (relative to topic.path)
-path = "partitions"
-
-# Force fsync after every write (durability vs performance)
-# true = data safe on disk immediately (slower)
-# false = OS manages write buffering (faster, small data loss risk on crash)
-enforce_fsync = false
-
-# Validate CRC checksums when loading data
-# true = detect corruption on startup (slower startup)
-# false = trust data integrity (faster startup)
-validate_checksum = false
-
-# Buffered messages before forced disk write
-# Higher = better throughput, more memory, larger data loss window
-messages_required_to_save = 1024  # default, minimum: 32
-
-# Buffered bytes before forced disk write
-# Triggers save when either this OR messages_required_to_save is reached
-size_of_messages_required_to_save = "1 MiB"  # minimum: 512 B
+```json
+{
+  "name": "orders",
+  "partitions": 6,
+  "options": {
+    "segment_size": "256 MiB",
+    "message_expiry": "7days",
+    "max_topic_size": "60 GiB"
+  }
+}
 ```
 
-### Segment Settings
+What matters for partitioning:
 
-```toml
-[system.segment]
-# Maximum segment file size before rolling to new segment
-# Smaller = more files, faster deletion; Larger = fewer files, better sequential I/O
-size = "1 GiB"  # maximum: 1 GiB
+- **`max_topic_size` is enforced per partition**, as the cap divided by the
+  partition count: 60 GiB across 6 partitions retains about 10 GiB in each.
+  A hot partition (a skewed key) reaches its share first and loses its
+  oldest data first.
+- **A finite cap must be at least one segment** (`segment_size`, 1 GiB by
+  default), counted for the whole topic, not per partition.
+- **`preallocate_segments` reserves `segment_size` per partition** when the
+  topic is created, up to 64 GiB per topic, so many partitions multiply its
+  disk cost.
+- **Retention runs in the server's cleaner**, which 0.10 enables by default
+  (`[data_maintenance.messages] cleaner_enabled = true`, every minute). It
+  deletes whole sealed segments, never a partition's open one.
 
-# Index caching strategy
-# "all" = cache all indexes (fastest reads, most memory)
-# "open_segment" = cache only active segment (balanced)
-# "none" = no caching (lowest memory, slowest reads)
-cache_indexes = "open_segment"
-
-# File system confirmation behavior
-# "wait" = block until OS confirms write
-# "no_wait" = return immediately (faster, less safe)
-server_confirmation = "wait"
-```
-
-### Topic Settings (Affects All Partitions)
-
-```toml
-[system.topic]
-# Maximum total size for all partitions in a topic
-# "unlimited" or size like "100 GiB"
-max_size = "unlimited"
-
-# Message expiration time (retention policy)
-# "none" = keep forever
-# Time format: "7 days", "24 hours", "30 minutes"
-message_expiry = "none"
-```
-
-> **Server 0.9 and later:** this section describes 0.8. Since 0.9 the
-> messages cleaner runs by default (`data_maintenance.messages.cleaner_enabled
-> = true`, every minute), and retention moves with the other storage settings
-> to per-topic options; the rewrite follows in the per-topic options PR
-> (ADR-0001, ADR-0002).
-
-Size-based cleanup is automatic in server 0.8.0: once a topic reaches 90% of
-`max_size`, the oldest **sealed** segments are deleted (there is no separate
-`delete_oldest_segments` switch). Note that BOTH expiry- and size-based
-retention are enforced by the `[data_maintenance.messages]` cleaner, which
-is **disabled by default** — see the
+The 0.8 settings this section used to show (`[system.partition]`,
+`[system.segment]`, `[system.topic]`, `cache_indexes`) are gone from 0.10's
+configuration. The
 [durable-storage guide](durable-storage-guide.md#data-retention-policies)
-for the full retention configuration.
+covers each option, its bounds, and the server-wide keys that remain.
 
-### Message Deduplication
+### Retry Deduplication
 
-```toml
-[system.message_deduplication]
-# Enable server-side duplicate detection by message ID
-enabled = false
+0.8's message-ID deduplication (`[system.message_deduplication]`) is gone.
+Since 0.9 each partition deduplicates **retries within a client session**:
+when the SDK resends a request whose reply it lost, the partition recognises
+it and does not append it twice (`RequestAlreadyApplied`, which this gateway
+answers with `202`). `[partition] dedup_clients_max` (default 4096) sizes that
+protection per partition. A full table refuses new writers with
+`TransientNotAccepted` rather than evicting existing protection.
 
-# Maximum message IDs to track
-max_entries = 10000
-
-# How long to remember message IDs
-expiry = "1 m"
-```
+This covers the SDK's own retries, not an application that sends the same
+message twice. Give messages stable IDs and deduplicate in consumers where
+that matters.
 
 ### Configuration Trade-offs
 
-| Goal | Configuration |
+| Goal | Topic `options` |
 |------|---------------|
-| **Maximum durability** | `enforce_fsync = true`, `validate_checksum = true` |
-| **Maximum throughput** | `enforce_fsync = false`, `messages_required_to_save = 5000` |
-| **Low memory** | `cache_indexes = "none"`, smaller `messages_required_to_save` |
-| **Fast reads** | `cache_indexes = "all"` |
-| **Auto-cleanup** | `[system.topic] message_expiry = "7 days"` + `[data_maintenance.messages] cleaner_enabled = true` |
+| **Maximum durability** | `"durability": "persisted"`, `"consumer_offset_durability": "persisted"` |
+| **Maximum throughput** | defaults (`replicated`); raise `messages_required_to_save` to batch more per segment write |
+| **Bounded disk** | `"max_topic_size"`, with a `segment_size` small enough to fit under it |
+| **Auto-cleanup** | `"message_expiry": "7days"` (the cleaner runs by default) |
 
 ---
 
