@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three times with a backoff, and the others wait for the outcome. A cached
   image is not pulled at all
 
+### Security
+
+- `connectors/init.sh` passes the root password and the runtime's personal
+  access token to the `iggy` CLI through its environment (`IGGY_USERNAME`,
+  `IGGY_PASSWORD`, `IGGY_TOKEN`), not as arguments. Any user who can list
+  a process can read its arguments; its environment is readable only by
+  its own user and root
+
 ## [0.5.0] - 2026-11-08
 
 Apache Iggy server 0.10.0 and Rust SDK 0.12.0 (ADR-0001, ADR-0002), with

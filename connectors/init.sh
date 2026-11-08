@@ -60,8 +60,15 @@ ensure_secret "$connector_secrets/webhook_hmac_secret" 32 "$connectors_uid" 0400
 ensure_secret "$connector_secrets/sink_inbound_token" 32 0 0444
 ensure_secret "$iggy_secrets/connectors_api_key" 32 0 0444
 
+# Credentials reach the CLI (0.15) through its environment, never its
+# arguments: any user who can list a process can read its arguments (on a
+# Linux host, host users too), while its environment is readable only by
+# its own user and root. IGGY_TOKEN takes precedence over the
+# IGGY_USERNAME/IGGY_PASSWORD pair, and a token that fails does not fall
+# back to the pair; an empty IGGY_TOKEN counts as unset.
 iggy_cli() {
-    iggy --tcp-server-address "$server" -u "$username" -p "$password" "$@"
+    IGGY_TOKEN="" IGGY_USERNAME="$username" IGGY_PASSWORD="$password" \
+        iggy --tcp-server-address "$server" "$@"
 }
 
 # Keep a token that still signs in. A token is shown only when it is
@@ -69,7 +76,7 @@ iggy_cli() {
 # holding the old one could not sign in again after a reconnect.
 pat_file="$iggy_secrets/connectors_pat"
 if [ -s "$pat_file" ] &&
-    iggy --tcp-server-address "$server" --token "$(cat "$pat_file")" stream list >/dev/null 2>&1; then
+    IGGY_TOKEN="$(cat "$pat_file")" iggy --tcp-server-address "$server" stream list >/dev/null 2>&1; then
     echo "connectors-init: kept the $token_name token"
 else
     # The delete may exit non-zero even when it succeeds: the CLI then tries
