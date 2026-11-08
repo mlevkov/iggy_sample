@@ -26,10 +26,12 @@ them too.
 | #87 | `4e11946` | `e466d44` | This block, State 2 |
 | #88 | `2ca3962` | `4fa5d35` | Integration fixture: the container's port below the ephemeral range ("Cannot bind" flake) |
 | #89 | `e4370c0` | `fcd4fa0` | Integration fixture: one image pull per run, with retries (pull flake) |
+| #90 | `635dca2` | `c58df12` | This block's kickoff, brought up to date after #88 and #89 |
 
-#87 to #89 came after the tag, so none is in v0.5.0. The changelog's
-`[Unreleased]` holds the two fixes from #88 and #89; #87 changed only this
-file.
+#87 to #90 came after the tag, so none is in v0.5.0. The changelog's
+`[Unreleased]` holds the two fixes from #88 and #89; #87 and #90 changed
+only this file. The PR that carries this line adds ADR-0002's dated
+Corrections entry for the release blog post (open-work item 1).
 
 **v0.5.0 is released.**
 - **Tag:** annotated `v0.5.0` on `d24a269`, with the message "v0.5.0: Iggy
@@ -101,14 +103,17 @@ user says the Iggy maintainer will comment on them later. Post nothing.
 
 ### THE OPEN WORK
 
-Nothing is due before 2026-11-09 (the blog post's expected date) or
-2026-11-15 (the scheduled run). No tech-debt record is bound to the next
-release: TD-2026-09-03 and TD-2026-09-04 are resolved. If the user asks for
-nothing, ask; do not invent work.
+Nothing is due before 2026-11-15 (the scheduled run). No tech-debt record
+is bound to the next release: TD-2026-09-03 and TD-2026-09-04 are resolved.
+If the user asks for nothing, ask; do not invent work.
 
-1. **Re-check ADR-0002 against the 0.10.0 release blog post,** as State 1
-   item 1 describes. It still answered 404 after the release, with
-   apache/iggy-website `main` still at `331d0614`.
+1. **Done: ADR-0002 is checked against the 0.10.0 release blog post**
+   (<https://iggy.apache.org/blogs/2026/11/09/release-0.10.0/>, dated
+   2026-11-09; the user gave the link on 2026-11-08). The decision stands.
+   The post added two facts, now ADR-0002's Corrections entry "2026-11-08:
+   the release blog post": an HTTP relay needs a key every node shares (so
+   the original 503 input holds for nodes without one), and the protocol
+   label is 0.12.2. State 1 item 1 is closed with it.
 2. **Read the 2026-11-15 scheduled Extended Tests run,** as State 1 item 2
    describes. `d24a269` is after `5b211e6`, so a run on it counts.
 3. **Upstream #4784 to #4787,** as State 1 item 3 describes. In addition,
@@ -193,6 +198,7 @@ nothing, ask; do not invent work.
 | The fix works | #86's PR Checks run 42513865804 (Coverage Diff job 128832500251), and CI run 42513865807 (Code Coverage job 128833120127) | Coverage Diff printed `Current test coverage: 90.11% of lines`. The Code Coverage log has the `TOTAL` row and no warning. The check-runs API does not return the job summary (`output.summary` is empty), so its "Line coverage: 90.11%" line was inferred from the missing warning |
 | The "Cannot bind to socket" flake is a replica/client port collision inside the container | `start_on_shard_zero` in `core/message_bus/src/replica/io.rs` at `91e02063`, which binds the replica listener (line 208) before the client listener (line 209). Then `apache/iggy:0.10.0` (local image ID `sha256:176125a0…`), run locally with the fixture's environment, `--privileged` and `--sysctl net.ipv4.ip_local_port_range="37621 37621"` | With `IGGY_TCP_ADDRESS=0.0.0.0:37621` the container exits with CI's exact line: "failed to start server listeners via replica_io replica_addr=0.0.0.0:0 client_addr=0.0.0.0:37621 error=Cannot bind to socket". With port 20000 and the same range it boots. The container's default range is 32768-60999 |
 | Concurrent pulls caused the pull flake, and the fix pulls once | testcontainers 0.28.0 `src/runners/async_runner.rs:343-361` (`start` pulls on a 404 from create, no retry). Then the suite with `ensure_iggy_image`, three ways, each a temporary edit restored afterwards: as written; with the `inspect_image` check skipped and an `eprintln` before the pull; with the pull's tag set to `0.10.0-does-not-exist`, filtered to `test_auth` | As written: 44 of 44, the cached image used. Check skipped: 44 of 44, and the pull ran **once** for the whole suite. Missing tag: 3 attempts in total (two "retrying" lines), and all 4 tests failed with the same "Failed to pull apache/iggy:0.10.0-does-not-exist after 3 attempts", in 18.8 s |
+| The release blog post adds two facts to ADR-0002, and changes no decision | the post's HTML, fetched 2026-11-08 (HTTP 200, 460641 bytes); ADR-0002 at `635dca2`; the guide and change summary as fetched for #83; `core/server/src/http/state.rs` and `forward.rs`, and `core/sdk/src/links/replicas.rs`, all at `91e02063` | The two facts are the relay key requirement and protocol 0.12.2; everything else it says about ADR-0002's subjects agrees. Primary spreading and rebalancing were already in the change summary (#4619). The post's "random 0 to 2 seconds before its first request to each primary on another node" is, in the SDK source, a random pause in `[0, reconnection_interval]` (1 s by default) before each background link dial: not recorded in the ADR, since no claim depends on it |
 | The 0.5.0 binary passes the verifier's host check | a local debug build of the `03d5eaa` tree, run from an empty directory with `env -i OPERATION_TIMEOUT_SECS=0 RUST_LOG=info` | Exit 78, and "Starting Iggy Sample Application v0.5.0". Verify Release 42515088161 then passed on the release asset, with 0 skipped |
 
 ### Kickoff
@@ -201,26 +207,26 @@ nothing, ask; do not invent work.
 Continue iggy_sample (/Users/maxim/rust_projects/iggy_sample).
 Start with: git switch main && git pull. Then read docs/SESSION-STATE.md:
 block "CURRENT: State 2" first, then State 1's "THE OPEN WORK" items
-1-3, "Deliberate calls", "CARRIED" and "DO NOT RE-DERIVE", which still
+2 and 3, "Deliberate calls", "CARRIED" and "DO NOT RE-DERIVE", which still
 hold. Treat both probe tables as settled; do not re-derive those findings.
 
 State: v0.5.0 is released. The annotated tag is on d24a269, and Release
-(42514350003) and Verify Release (42515088161) are green. main is at
-e4370c0 (#89), or at the docs-only merge that changed this line. Since
-the tag, #87 added State 2, and #88 and #89 fixed the integration
-fixture's two flakes, in test code only. Iggy server
+(42514350003) and Verify Release (42515088161) are green. The last code
+change on main is e4370c0 (#89); every merge after it is docs-only.
+Since the tag, #87 added State 2, #88 and #89 fixed the integration
+fixture's two flakes, in test code only, #90 updated this kickoff, and
+the next merge added ADR-0002's Corrections entry for the release blog
+post. Iggy server
 0.10.0, SDK 0.12.0, connectors 0.6.0. There is no feature work in flight,
 and no tech-debt record is bound to the next release. Nothing is due
-before 2026-11-09 or 2026-11-15. If the user asked for nothing, ask; do
-not invent work.
+before 2026-11-15. If the user asked for nothing, ask; do not invent
+work.
 
 Open work, in order:
-1. Is the 0.10.0 release blog post published?
-     gh api repos/apache/iggy-website/contents/content/blog/release-0.10.0.mdx --jq .name
-   It answered 404 on 2026-11-08, also after the release. Its front-matter
-   date sets the URL, so do not poll a guessed date. Once it is out,
-   compare it with ADR-0002 and its Corrections section. Add anything new
-   as a dated Corrections entry; a changed decision needs a new ADR.
+1. Done: ADR-0002 is checked against the 0.10.0 release blog post
+   (https://iggy.apache.org/blogs/2026/11/09/release-0.10.0/). Its dated
+   Corrections entry records the two facts the post added; the decision
+   stands. Do not redo it.
 2. After 2026-11-15, read the first scheduled Extended Tests run of the
    Cluster Tests and Connectors Tests jobs:
      gh run list --workflow extended-tests.yml --event schedule --limit 1
