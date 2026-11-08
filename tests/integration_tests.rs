@@ -231,6 +231,16 @@ impl TestFixture {
             default_stream: "test-stream".to_string(),
             default_topic: "test-events".to_string(),
             topic_partitions: 2,
+            // Exercises IGGY_TOPIC_* -> creation: the default topic is created
+            // with these, and test_default_topic_carries_configured_options
+            // reads them back.
+            default_topic_options: iggy_sample::models::TopicOptionsInput {
+                segment_size: Some("16 MiB".to_string()),
+                messages_required_to_save: Some(512),
+                ..Default::default()
+            }
+            .validate(2, |key| key.to_string())
+            .map_err(|e| e.to_string())?,
             // Connection resilience (relaxed for tests)
             max_reconnect_attempts: 3,
             reconnect_base_delay: Duration::from_millis(100),
@@ -1204,6 +1214,219 @@ async fn test_create_topic_validation() {
     assert_eq!(response.status().as_u16(), 400);
 }
 
+/// One stored option from a topic read: `(value, source)`.
+fn reported(topic: &serde_json::Value, option: &str) -> (serde_json::Value, String) {
+    let entry = |field: &str| topic.pointer(&format!("/options/{option}/{field}"));
+    (
+        entry("value").cloned().unwrap_or_default(),
+        entry("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("missing")
+            .to_string(),
+    )
+}
+
+#[tokio::test]
+async fn test_create_topic_with_options_reports_values_and_provenance() {
+    let fixture = TestFixture::new().await;
+
+    let response = fixture
+        .client
+        .post(fixture.url("/streams/test-stream/topics"))
+        .json(&json!({
+            "name": "options-topic",
+            "partitions": 2,
+            "options": {
+                "durability": "persisted",
+                "message_expiry": "7days",
+                "segment_size": "16 MiB",
+                "messages_required_to_save": 1
+            }
+        }))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 201);
+
+    let topic: serde_json::Value = fixture
+        .client
+        .get(fixture.url("/streams/test-stream/topics/options-topic"))
+        .send()
+        .await
+        .expect("Request failed")
+        .json()
+        .await
+        .expect("Invalid JSON");
+
+    // Sent by the caller.
+    assert_eq!(
+        reported(&topic, "durability"),
+        (json!("persisted"), "explicit".into())
+    );
+    assert_eq!(
+        reported(&topic, "message_expiry"),
+        (json!("7days"), "explicit".into())
+    );
+    assert_eq!(
+        reported(&topic, "segment_size"),
+        (json!("16 MiB"), "explicit".into())
+    );
+    assert_eq!(
+        reported(&topic, "messages_required_to_save"),
+        (json!(1), "explicit".into())
+    );
+    // SDK 0.12 always sends both durability keys, so an omitted one is
+    // explicit too, at its default.
+    assert_eq!(
+        reported(&topic, "consumer_offset_durability"),
+        (json!("replicated"), "explicit".into())
+    );
+    // Filled in by the server at admission.
+    assert_eq!(
+        reported(&topic, "max_topic_size"),
+        (json!("unlimited"), "default".into())
+    );
+    assert_eq!(
+        reported(&topic, "size_of_messages_required_to_save"),
+        (json!("1 MiB"), "default".into())
+    );
+    assert_eq!(
+        reported(&topic, "preallocate_segments"),
+        (json!(false), "default".into())
+    );
+
+    // Listing reports the same options.
+    let topics: serde_json::Value = fixture
+        .client
+        .get(fixture.url("/streams/test-stream/topics"))
+        .send()
+        .await
+        .expect("Request failed")
+        .json()
+        .await
+        .expect("Invalid JSON");
+    let listed = topics
+        .as_array()
+        .and_then(|all| {
+            all.iter()
+                .find(|t| t.get("name") == Some(&json!("options-topic")))
+        })
+        .expect("created topic is listed");
+    assert_eq!(listed.get("options"), topic.get("options"));
+}
+
+#[tokio::test]
+async fn test_default_topic_carries_configured_options() {
+    let fixture = TestFixture::new().await;
+
+    let topic: serde_json::Value = fixture
+        .client
+        .get(fixture.url("/streams/test-stream/topics/test-events"))
+        .send()
+        .await
+        .expect("Request failed")
+        .json()
+        .await
+        .expect("Invalid JSON");
+
+    // The fixture's default_topic_options, as IGGY_TOPIC_* would set them.
+    assert_eq!(
+        reported(&topic, "segment_size"),
+        (json!("16 MiB"), "explicit".into())
+    );
+    assert_eq!(
+        reported(&topic, "messages_required_to_save"),
+        (json!(512), "explicit".into())
+    );
+    assert_eq!(
+        reported(&topic, "message_expiry"),
+        (json!("unlimited"), "default".into())
+    );
+}
+
+#[tokio::test]
+async fn test_create_topic_refuses_invalid_options() {
+    let fixture = TestFixture::new().await;
+
+    // Out of the server's bounds: refused by the gateway, naming the option.
+    let response = fixture
+        .client
+        .post(fixture.url("/streams/test-stream/topics"))
+        .json(&json!({"name": "bad-options", "options": {"segment_size": "100 KiB"}}))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 400);
+    let body: serde_json::Value = response.json().await.expect("Invalid JSON");
+    assert!(
+        body.to_string().contains("options.segment_size"),
+        "error should name the option: {body}"
+    );
+
+    // An option outside `options`, or misspelt, is refused rather than
+    // ignored, which would leave the topic on a server default.
+    for body in [
+        json!({"name": "bad-options", "durability": "persisted"}),
+        json!({"name": "bad-options", "options": {"durabilty": "persisted"}}),
+    ] {
+        let response = fixture
+            .client
+            .post(fixture.url("/streams/test-stream/topics"))
+            .json(&body)
+            .send()
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status().as_u16(), 422, "{body}");
+    }
+
+    // None of the refused requests created the topic.
+    let response = fixture
+        .client
+        .get(fixture.url("/streams/test-stream/topics/bad-options"))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 404);
+}
+
+/// A finite `max_topic_size` below the segment size. The server refuses it
+/// with a message that prints neither value; the gateway refuses it first and
+/// says what the floor is. At the floor, the server agrees.
+#[tokio::test]
+async fn test_max_topic_size_must_cover_one_segment() {
+    let fixture = TestFixture::new().await;
+
+    let response = fixture
+        .client
+        .post(fixture.url("/streams/test-stream/topics"))
+        .json(&json!({
+            "name": "tiny-cap",
+            "options": {"segment_size": "16 MiB", "max_topic_size": "1 MiB"}
+        }))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 400);
+    let body = response.text().await.unwrap_or_default();
+    assert!(
+        body.contains("options.max_topic_size") && body.contains("16 MiB"),
+        "{body}"
+    );
+
+    let response = fixture
+        .client
+        .post(fixture.url("/streams/test-stream/topics"))
+        .json(&json!({
+            "name": "segment-cap",
+            "partitions": 2,
+            "options": {"segment_size": "16 MiB", "max_topic_size": "16 MiB"}
+        }))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 201);
+}
+
 // ============================================================================
 // Message Flow Tests
 // ============================================================================
@@ -1608,6 +1831,7 @@ impl SecureTestFixture {
             default_stream: "secure-test-stream".to_string(),
             default_topic: "secure-test-events".to_string(),
             topic_partitions: 2,
+            default_topic_options: Default::default(),
             max_reconnect_attempts: 3,
             reconnect_base_delay: Duration::from_millis(100),
             reconnect_max_delay: Duration::from_secs(1),

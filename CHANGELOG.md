@@ -41,6 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `EX_PROTOCOL` (76) rather than `EX_UNAVAILABLE`
 - The startup connection-timeout message says to check the server version,
   the likeliest cause once the address is known to be right
+- Per-topic options on topic creation (ADR-0001 PR 2, on SDK 0.12 per
+  ADR-0002): `POST /streams/{stream}/topics` takes an optional `options`
+  object with `durability`, `consumer_offset_durability`, `message_expiry`,
+  `max_topic_size`, `segment_size`, `messages_required_to_save`,
+  `size_of_messages_required_to_save` and `preallocate_segments`. Each is
+  checked against the server's bounds before anything is sent, and an
+  invalid one answers `400` naming it (`options.segment_size`). A finite
+  `max_topic_size` below the segment size is refused with the floor stated;
+  the server refuses it too, with a message that prints neither value
+- Topic reads (`GET /streams/{s}/topics`, `/topics/{t}`) report each stored
+  option's value, in the form `POST` accepts, and its `source`: `explicit`
+  (sent by the creating client), `default` (filled by the server) or `unset`.
+  SDK 0.12 always sends both durability options, so they read `explicit` on
+  every topic created through the SDK
+- `IGGY_TOPIC_<OPTION>` environment variables set the default topic's options
+  (e.g. `IGGY_TOPIC_DURABILITY=persisted`); an invalid value fails startup
+  naming the variable. They apply when the gateway creates the topic, and for
+  an existing topic each option that differs is logged as a warning
 - `scripts/verify-release.sh` checks a release.yml run step by step instead
   of trusting its conclusion: that the tag names the commit the run built;
   what each step printed; the release notes; that every asset is
@@ -67,6 +85,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `POST /streams/{stream}/topics` refuses unknown fields with
+  `422`, at the top level and inside `options`. Unknown fields were ignored,
+  so a misspelt or misplaced option would have left the topic on a server
+  default without any error
+- Topics created without options no longer send `message_expiry` (never) and
+  `max_topic_size` (unlimited) explicitly. The server's defaults are the same
+  values, so retention is unchanged; topic reads report them as `default`
+- The server's option admission errors (`InvalidOptionValue`,
+  `UnsupportedOptionKey`, `OptionsBlockTooLarge`, `InvalidTopicSize`,
+  `InvalidSegmentSize`, `InvalidReplicationFactor`) answer `400` instead of
+  `500`
+- `docs/durable-storage-guide.md` is rewritten for server 0.10: per-topic
+  `replicated`/`persisted` durability, flush scheduling, segments and
+  preallocation, retention and the cleaner (on by default since 0.9), backup
+  with hard links preserved, recovery, and a table mapping each removed 0.8
+  setting to its replacement. The partitioning guide's 0.8 server
+  configuration section is replaced the same way (TD-2026-07-06)
 - **Breaking:** Apache Iggy server 0.8.0 -> 0.10.0 and Rust SDK 0.10.0 ->
   0.12.0, together, by way of 0.9.0 and 0.11.0 (ADR-0001, ADR-0002). Each SDK
   speaks only its own release's wire protocol, so a mismatched server fails
@@ -122,6 +157,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The quick-reference create-topic example in `docs/guide.md` sent fields
+  the API never read (`topic_id`, `partitions_count`), so its topic got one
+  partition instead of three; with unknown fields now refused it would fail
 - The integration fixture advertised `127.0.0.1` with the in-container port
   8090. The SDK dials a node's advertised endpoint on failover, so a test
   whose container stopped signed in to whatever Iggy listened on the host's

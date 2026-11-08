@@ -63,6 +63,16 @@ pub fn classify_iggy_error(error: IggyError, fallback: fn(String) -> AppError) -
         IggyError::IncompatibleProtocolVersion(..) => {
             AppError::IncompatibleServer(error.to_string())
         }
+        // The server refused a topic option at admission. The gateway checks
+        // each option before sending it (`TopicOptionsInput::validate`); these
+        // are the checks it does not repeat, and a server whose option catalog
+        // differs from this SDK's.
+        IggyError::InvalidOptionValue(_)
+        | IggyError::UnsupportedOptionKey(_)
+        | IggyError::OptionsBlockTooLarge(_)
+        | IggyError::InvalidTopicSize(..)
+        | IggyError::InvalidSegmentSize(_)
+        | IggyError::InvalidReplicationFactor => AppError::BadRequest(error.to_string()),
         other => fallback(other.to_string()),
     }
 }
@@ -120,6 +130,8 @@ pub fn rand_jitter() -> f64 {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use iggy::prelude::{IggyByteSize, MaxTopicSize};
+
     use super::*;
 
     #[test]
@@ -251,6 +263,29 @@ mod tests {
             assert!(
                 !super::super::resilience::is_connection_error(&classified),
                 "{label} must not be a connection error"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_topic_option_rejections_are_bad_requests() {
+        let cases = [
+            IggyError::InvalidOptionValue("segment_size".into()),
+            IggyError::UnsupportedOptionKey("compression".into()),
+            IggyError::OptionsBlockTooLarge("topic".into()),
+            IggyError::InvalidTopicSize(
+                MaxTopicSize::Custom(IggyByteSize::from(1_u64)),
+                IggyByteSize::from(1_u64 << 30),
+            ),
+            IggyError::InvalidSegmentSize(7),
+            IggyError::InvalidReplicationFactor,
+        ];
+        for error in cases {
+            let label = format!("{error:?}");
+            let classified = classify_iggy_error(error, AppError::TopicError);
+            assert!(
+                matches!(classified, AppError::BadRequest(_)),
+                "{label}: got {classified:?}"
             );
         }
     }

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::Event;
+use super::{Event, TopicOptionsInput, TopicOptionsView};
 
 /// Request to create a new stream.
 #[derive(Debug, Deserialize)]
@@ -12,13 +12,22 @@ pub struct CreateStreamRequest {
 }
 
 /// Request to create a new topic within a stream.
+///
+/// Unknown fields are refused at both levels, so an option sent beside
+/// `options` instead of inside it, or misspelt, fails instead of leaving the
+/// topic on a server default.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTopicRequest {
     /// Topic name (must be unique within the stream)
     pub name: String,
     /// Number of partitions for parallel processing
     #[serde(default = "default_partitions")]
     pub partitions: u32,
+    /// Per-topic options, fixed at creation. Omitted ones take the server's
+    /// defaults.
+    #[serde(default)]
+    pub options: TopicOptionsInput,
 }
 
 fn default_partitions() -> u32 {
@@ -112,6 +121,8 @@ pub struct TopicInfo {
     pub size_bytes: u64,
     /// Total message count
     pub messages_count: u64,
+    /// Stored per-topic options, each with its value and who chose it
+    pub options: TopicOptionsView,
 }
 
 /// Health check response.
@@ -171,6 +182,26 @@ mod tests {
 
         assert_eq!(request.name, "my-topic");
         assert_eq!(request.partitions, 1);
+        assert_eq!(request.options, TopicOptionsInput::default());
+    }
+
+    #[test]
+    fn test_create_topic_request_reads_nested_options() {
+        let json = r#"{"name": "orders", "options": {"durability": "persisted", "messages_required_to_save": 1}}"#;
+        let request: CreateTopicRequest =
+            serde_json::from_str(json).expect("Deserialization should succeed");
+
+        assert_eq!(request.options.durability.as_deref(), Some("persisted"));
+        assert_eq!(request.options.messages_required_to_save, Some(1));
+    }
+
+    #[test]
+    fn test_create_topic_request_refuses_an_option_outside_options() {
+        let json = r#"{"name": "orders", "durability": "persisted"}"#;
+        let error = serde_json::from_str::<CreateTopicRequest>(json)
+            .expect_err("a top-level option must not be ignored");
+
+        assert!(error.to_string().contains("unknown field `durability`"));
     }
 
     #[test]

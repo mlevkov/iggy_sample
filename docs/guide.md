@@ -942,12 +942,12 @@ curl http://localhost:8000/
 # Create stream
 curl -X POST http://localhost:8000/streams \
   -H "Content-Type: application/json" \
-  -d '{"stream_id": 1, "name": "my-stream"}'
+  -d '{"name": "my-stream"}'
 
-# Create topic
+# Create topic (per-topic options are optional; see the README)
 curl -X POST http://localhost:8000/streams/my-stream/topics \
   -H "Content-Type: application/json" \
-  -d '{"topic_id": 1, "name": "events", "partitions_count": 3}'
+  -d '{"name": "events", "partitions": 3, "options": {"durability": "persisted"}}'
 
 # Send message
 curl -X POST http://localhost:8000/streams/my-stream/topics/events/messages \
@@ -968,6 +968,9 @@ IGGY_CONNECTION_STRING=iggy://user:pass@host:8090
 IGGY_STREAM=sample-stream
 IGGY_TOPIC=events
 IGGY_PARTITIONS=3
+# Default topic options, applied when the gateway creates it (any option of
+# POST /streams/{s}/topics, as IGGY_TOPIC_<OPTION>)
+IGGY_TOPIC_DURABILITY=persisted
 
 # Rate limiting
 RATE_LIMIT_RPS=100

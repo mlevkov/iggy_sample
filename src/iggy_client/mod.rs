@@ -83,7 +83,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::models::Event;
+use crate::models::{Event, TopicOptions, TopicOptionsView};
 
 // Re-exports for public API
 // Crate-internal: the breaker is a mechanism of the resilience executor, not
@@ -202,17 +202,6 @@ pub struct IggyClientWrapper {
     state: Arc<ConnectionState>,
     /// Circuit breaker for fail-fast during outages
     circuit_breaker: Arc<CircuitBreaker>,
-}
-
-/// Options for every topic this service creates: `partitions` partitions,
-/// no message expiry and no size cap.
-fn topic_create_options(partitions: u32) -> TopicCreateOptions {
-    TopicCreateOptions {
-        partitions_count: Some(partitions),
-        message_expiry: Some(IggyExpiry::NeverExpire),
-        max_topic_size: Some(MaxTopicSize::Unlimited),
-        ..Default::default()
-    }
 }
 
 /// Clamp a requested per-request deadline to the configured global timeout:
@@ -600,25 +589,46 @@ impl IggyClientWrapper {
         .await
     }
 
-    /// Ensure the specified topic exists within a stream, creating it if necessary.
+    /// Ensure the specified topic exists within a stream, creating it with
+    /// `options` if necessary.
     ///
     /// This is idempotent - calling it multiple times with the same parameters
-    /// will not create duplicate topics.
+    /// will not create duplicate topics. Topic options are fixed at creation,
+    /// so an existing topic keeps its own; any that contradict `options` are
+    /// logged as a warning.
     #[instrument(skip(self))]
-    pub async fn ensure_topic(&self, stream: &str, topic: &str, partitions: u32) -> AppResult<()> {
+    pub async fn ensure_topic(
+        &self,
+        stream: &str,
+        topic: &str,
+        partitions: u32,
+        options: &TopicOptions,
+    ) -> AppResult<()> {
         self.with_reconnect(|| async {
             let client = self.client.read().await;
             let stream_id = to_identifier(stream, "stream")?;
             let topic_id = to_identifier(topic, "topic")?;
 
             match client.get_topic(&stream_id, &topic_id).await {
-                Ok(Some(_)) => {
+                Ok(Some(existing)) => {
                     debug!(stream, topic, "Topic already exists");
+                    let stored = TopicOptionsView::from_stored(&existing.options);
+                    for difference in options.differences(&stored) {
+                        warn!(
+                            stream,
+                            topic,
+                            option = difference.key,
+                            configured = %difference.wanted,
+                            stored = %difference.stored,
+                            "Existing topic keeps its own option: topic options are fixed \
+                             at creation, so recreate the topic to apply the configured value"
+                        );
+                    }
                     Ok(())
                 }
                 Ok(None) => {
                     info!(stream, topic, partitions, "Creating topic");
-                    let options = topic_create_options(partitions);
+                    let options = options.create_options(partitions);
                     match settled(&client, || client.create_topic(&stream_id, topic, &options))
                         .await
                     {
@@ -650,6 +660,7 @@ impl IggyClientWrapper {
             &self.config.default_stream,
             &self.config.default_topic,
             self.config.topic_partitions,
+            &self.config.default_topic_options,
         )
         .await?;
         Ok(())
@@ -985,12 +996,18 @@ impl IggyClientWrapper {
 
     /// Create a new topic.
     #[instrument(skip(self))]
-    pub async fn create_topic(&self, stream: &str, topic: &str, partitions: u32) -> AppResult<()> {
+    pub async fn create_topic(
+        &self,
+        stream: &str,
+        topic: &str,
+        partitions: u32,
+        options: &TopicOptions,
+    ) -> AppResult<()> {
         self.with_reconnect(|| async {
             let client = self.client.read().await;
             let stream_id = to_identifier(stream, "stream")?;
 
-            let options = topic_create_options(partitions);
+            let options = options.create_options(partitions);
             settled(&client, || client.create_topic(&stream_id, topic, &options))
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;
