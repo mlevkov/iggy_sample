@@ -23,6 +23,18 @@
 //! every address must look like `host:port` before it is logged or repeated:
 //! otherwise part of a password could land in the server list, and from
 //! there in the logs.
+//!
+//! # Reconnection retries
+//!
+//! Each seed's connection string also caps the SDK's reconnection retries at
+//! [`DEFAULT_RECONNECTION_RETRIES`] unless the string sets the option itself
+//! (ADR-0003). With the SDK's default, `unlimited`, a full outage never ends
+//! a client's reconnecting, so every call waits out the SDK's 30 s deadline
+//! and fails with `TransientNotAccepted`, which the circuit breaker
+//! deliberately does not count. With a cap, the SDK reports `NotConnected`
+//! once its retries run out, the breaker opens, and callers get an immediate
+//! 503 until the server is back. The SDK's keepalive restarts a client that
+//! ran out, with a fresh budget, so the client still recovers on its own.
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,15 +75,57 @@ impl fmt::Debug for Seed {
     }
 }
 
+/// The SDK reconnection retries each seed uses when the connection string
+/// sets none: the attempts after the first, with jittered backoff from 1 s,
+/// doubling, capped at 10 s. Three ride out a server restart of a few seconds
+/// and give up after about 7.5 s on average, 15 s at most, so a call never
+/// waits the full 30 s request timeout on a server that is down (ADR-0003).
+pub(crate) const DEFAULT_RECONNECTION_RETRIES: u32 = 3;
+
+/// The option that caps reconnection retries for a connection string
+/// scheme, or `None` for a transport without reconnection (HTTP) or one the
+/// SDK does not know.
+fn reconnection_option(scheme: &str) -> Option<&'static str> {
+    match scheme {
+        "iggy" | "iggy+tcp" | "iggy+ws" => Some("reconnection_retries"),
+        "iggy+quic" => Some("reconnection_max_retries"),
+        _ => None,
+    }
+}
+
+/// The `?options` part of each seed's connection string: the given options,
+/// plus the default reconnection cap when the transport has one and the
+/// options do not set it.
+fn seed_options(scheme: &str, options: Option<&str>) -> String {
+    let options = options.filter(|options| !options.is_empty());
+    let default = reconnection_option(scheme).filter(|key| {
+        !options.is_some_and(|options| {
+            options
+                .split('&')
+                .any(|option| option.split_once('=').map_or(option, |(name, _)| name) == *key)
+        })
+    });
+    match (options, default) {
+        (Some(options), Some(key)) => {
+            format!("?{options}&{key}={DEFAULT_RECONNECTION_RETRIES}")
+        }
+        (Some(options), None) => format!("?{options}"),
+        (None, Some(key)) => format!("?{key}={DEFAULT_RECONNECTION_RETRIES}"),
+        (None, None) => String::new(),
+    }
+}
+
 /// Expand a connection string that may list several comma-separated server
-/// addresses into one seed per address, in the order given.
+/// addresses into one seed per address, in the order given. Each seed keeps
+/// the string's options and gains [`DEFAULT_RECONNECTION_RETRIES`] when they
+/// do not set the transport's reconnection cap.
 ///
 /// # Errors
 ///
 /// A reason the string cannot be expanded. The reason never repeats the
 /// string, which holds credentials, and names an address only once it has
 /// passed the `host:port` check. Everything past the split (the scheme, the
-/// credentials, the port number, the options) is left to the SDK's own
+/// credentials, the port number, the option values) is left to the SDK's own
 /// parser when a client is built.
 pub(crate) fn expand(connection_string: &str) -> Result<Vec<Seed>, String> {
     let (scheme, rest) = connection_string
@@ -105,9 +159,7 @@ pub(crate) fn expand(connection_string: &str) -> Result<Vec<Seed>, String> {
                 "the connection string lists server {address} twice"
             ));
         }
-        let options = options
-            .map(|options| format!("?{options}"))
-            .unwrap_or_default();
+        let options = seed_options(scheme, options);
         seeds.push(Seed {
             address: address.to_string(),
             connection_string: format!("{scheme}://{credentials}@{address}{options}"),
@@ -255,13 +307,86 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_keeps_a_single_address_unchanged() {
+    fn test_expand_keeps_a_single_address_and_caps_its_retries() {
         let seeds = expand("iggy://iggy:secret@localhost:8090").unwrap();
         assert_eq!(addresses(&seeds), ["localhost:8090"]);
         assert_eq!(
             seeds[0].connection_string(),
-            "iggy://iggy:secret@localhost:8090"
+            "iggy://iggy:secret@localhost:8090?reconnection_retries=3"
         );
+    }
+
+    #[test]
+    fn test_expand_appends_the_retry_cap_to_other_options() {
+        let seeds = expand("iggy://iggy:secret@a:1?heartbeat_interval=2s&nodelay=true").unwrap();
+        assert_eq!(
+            seeds[0].connection_string(),
+            "iggy://iggy:secret@a:1?heartbeat_interval=2s&nodelay=true&reconnection_retries=3"
+        );
+    }
+
+    #[test]
+    fn test_expand_keeps_an_explicit_retry_setting_including_unlimited() {
+        for value in ["unlimited", "0", "10"] {
+            let seeds = expand(&format!(
+                "iggy://iggy:secret@a:1?reconnection_retries={value}&nodelay=true"
+            ))
+            .unwrap();
+            assert_eq!(
+                seeds[0].connection_string(),
+                format!("iggy://iggy:secret@a:1?reconnection_retries={value}&nodelay=true")
+            );
+        }
+    }
+
+    #[test]
+    fn test_expand_uses_each_transports_own_retry_option() {
+        let cases = [
+            (
+                "iggy+tcp://u:p@a:1",
+                "iggy+tcp://u:p@a:1?reconnection_retries=3",
+            ),
+            (
+                "iggy+ws://u:p@a:1",
+                "iggy+ws://u:p@a:1?reconnection_retries=3",
+            ),
+            (
+                "iggy+quic://u:p@a:1",
+                "iggy+quic://u:p@a:1?reconnection_max_retries=3",
+            ),
+            (
+                "iggy+quic://u:p@a:1?reconnection_max_retries=unlimited",
+                "iggy+quic://u:p@a:1?reconnection_max_retries=unlimited",
+            ),
+            // HTTP has no reconnection, and `retries` is its request retry
+            ("iggy+http://u:p@a:1", "iggy+http://u:p@a:1"),
+            (
+                "iggy+http://u:p@a:1?retries=2",
+                "iggy+http://u:p@a:1?retries=2",
+            ),
+        ];
+        for (input, expected) in cases {
+            let seeds = expand(input).unwrap();
+            assert_eq!(seeds[0].connection_string(), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn test_expanded_connection_strings_parse_in_the_sdk() {
+        use iggy::prelude::IggyClient;
+        for input in [
+            "iggy://iggy:secret@127.0.0.1:8090",
+            "iggy://iggy:secret@127.0.0.1:8090?heartbeat_interval=2s",
+            "iggy+quic://iggy:secret@127.0.0.1:8080",
+            "iggy+ws://iggy:secret@127.0.0.1:8092",
+            "iggy+http://iggy:secret@127.0.0.1:3000",
+        ] {
+            let seeds = expand(input).unwrap();
+            assert!(
+                IggyClient::from_connection_string(seeds[0].connection_string()).is_ok(),
+                "{input}"
+            );
+        }
     }
 
     #[test]
@@ -283,7 +408,10 @@ mod tests {
     #[test]
     fn test_expand_keeps_a_personal_access_token() {
         let seeds = expand("iggy+tcp://iggypat-token@a:1,b:2").unwrap();
-        assert_eq!(seeds[1].connection_string(), "iggy+tcp://iggypat-token@b:2");
+        assert_eq!(
+            seeds[1].connection_string(),
+            "iggy+tcp://iggypat-token@b:2?reconnection_retries=3"
+        );
     }
 
     #[test]

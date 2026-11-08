@@ -459,6 +459,16 @@ once signed in the SDK follows the cluster's roster itself.
 iggy://iggy:iggy@10.29.0.10:8090,10.29.0.11:8090,10.29.0.12:8090
 ```
 
+Options after `?` go to the SDK. The gateway caps the SDK's reconnection
+retries at 3 unless you set the option yourself
+([ADR-0003](docs/adr/0003-cap-sdk-reconnection-retries.md)). It rides out a
+server restart of a few seconds. After that, requests get an immediate 503
+while the server is down, instead of each waiting 30 s. To keep retrying
+without a limit, the SDK's own default:
+```
+iggy://iggy:iggy@localhost:8090?reconnection_retries=unlimited
+```
+
 ## Project Structure
 
 ```

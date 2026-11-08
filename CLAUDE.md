@@ -20,6 +20,8 @@ The Iggy upgrades and the clustering and connector demos follow
 PR sequence and scope, as amended by
 [ADR-0002](docs/adr/0002-iggy-0.10-before-topic-options.md) (move to 0.10
 before the per-topic options PR).
+[ADR-0003](docs/adr/0003-cap-sdk-reconnection-retries.md) caps the SDK's
+reconnection retries by default.
 
 ## Configuration
 
@@ -281,19 +283,33 @@ subscription iterator — neither maps onto stateless request/response
 semantics. The high-level clients are the right choice for dedicated
 pipeline workers; a protocol gateway belongs on the trait API.
 
-Resilience is layered: the SDK's connection-string clients ship with
-transport-level auto-reconnection (default on, unlimited retries), which
-swallows most mid-operation connection failures into blocking retries. The
-wrapper therefore treats **timeouts** as circuit-breaker failures, classifies
-the SDK error variants that do escape (`classify_iggy_error`), and runs live
-`ping` health probes so `/health` and `/ready` reflect reality during an
-outage rather than a latched startup flag.
+Resilience is layered. The SDK's connection-string clients reconnect on
+their own, and while they are still retrying they hold calls up to the SDK's
+30 s deadline. The wrapper therefore treats **timeouts** as circuit-breaker
+failures, classifies the SDK error variants that do escape
+(`classify_iggy_error`), and runs live `ping` health probes, so `/health`
+and `/ready` reflect reality during an outage rather than a latched startup
+flag.
+
+**Reconnection retries are capped at 3 by default** (ADR-0003,
+`seeds::DEFAULT_RECONNECTION_RETRIES`). `seeds::expand` adds the transport's
+option (`reconnection_retries`, or `reconnection_max_retries` for QUIC) to
+each seed unless `IGGY_CONNECTION_STRING` sets it.
+- **Why:** with the SDK default, `unlimited`, a full outage makes every call
+  wait out the SDK deadline and fail as `TransientNotAccepted`, which the
+  breaker deliberately ignores, so requests hang for 30 s indefinitely.
+- **With the cap:** the SDK answers `NotConnected` once its retries run out.
+  The breaker opens and requests get an immediate 503. The SDK's keepalive
+  (every 5 s) restarts a client that ran out, with a fresh budget, so it
+  recovers on its own.
+- `tests/integration_tests.rs::test_a_call_to_a_stopped_server_ends_as_a_connection_error`
+  fails without the cap.
 
 The SDK's diagnostic events (`src/iggy_client/events.rs`, TD-2026-07-02)
 end a recorded outage as soon as the SDK reconnects (`Connected` triggers an
 immediate ping) and start one as soon as the last link closes: SDK 0.12
-publishes `Disconnected` then, even with the default
-`reconnection_retries=unlimited` (0.11 did not). The ping stays the source of
+publishes `Disconnected` then, while it is still retrying (0.11 did so only
+once a bounded retry sweep gave up). The ping stays the source of
 truth and the backstop for a server that stops answering without closing the
 connection.
 
