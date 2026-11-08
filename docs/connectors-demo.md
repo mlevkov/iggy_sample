@@ -167,9 +167,11 @@ The receiver (`src/handlers/sink.rs`, `src/services/sink_inbox.rs`):
 - **`POST` needs `Authorization: Bearer <token>`.** The token is checked in
   constant time, before the body is read. A missing or wrong token answers
   `401` and is counted.
+- **The content type is checked next, also before the body is read.**
+  Anything other than `application/x-ndjson` answers `415`. Without the
+  token, a wrong content type still answers `401`.
 - **A batch is kept whole or not at all.** A line that is not an envelope
-  answers `400`, naming the line. A content type other than
-  `application/x-ndjson` answers `415`. Success answers
+  answers `400`, naming the line. Success answers
   `200 {"accepted": <n>}`.
 - **`GET /sink/inbound` reports the receiver.** It returns lifetime counters
   and the newest deliveries, newest first: at most 100 of them, and at most

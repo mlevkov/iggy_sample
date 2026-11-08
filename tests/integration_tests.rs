@@ -2511,14 +2511,27 @@ async fn test_sink_inbound_refuses_a_missing_or_wrong_token() {
         .post(fixture.url("/sink/inbound"))
         .bearer_auth("not-the-sink-token-0123456789abcdef")
         .header("content-type", "application/x-ndjson")
-        .body(body)
+        .body(body.clone())
         .send()
         .await
         .expect("Request failed");
     assert_eq!(wrong.status().as_u16(), 401);
 
+    // The token is checked before the content type: without it, a wrong
+    // content type still answers 401, and counts as unauthorized only.
+    let wrong_type = fixture
+        .client
+        .post(fixture.url("/sink/inbound"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(wrong_type.status().as_u16(), 401);
+
     let inbox = sink_inbox(&fixture).await;
-    assert_eq!(inbox.get("unauthorized_requests"), Some(&json!(2)));
+    assert_eq!(inbox.get("unauthorized_requests"), Some(&json!(3)));
+    assert_eq!(inbox.get("batches_rejected"), Some(&json!(0)));
     assert_eq!(inbox.get("messages_received"), Some(&json!(0)));
 }
 

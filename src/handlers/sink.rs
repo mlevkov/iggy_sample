@@ -3,9 +3,12 @@
 //! retention bounds and the delivery semantics.
 //!
 //! The routes exist only when `SINK_INBOUND_TOKEN` is set. `POST` needs that
-//! token as a bearer credential, checked by [`require_sink_token`] before the
-//! body is read. `GET` is guarded like every other read, by `API_KEY` when
-//! one is configured.
+//! token as a bearer credential ([`require_sink_token`]), then the `ndjson`
+//! content type ([`require_ndjson`]), both checked before the body is read.
+//! `GET` is guarded like every other read, by `API_KEY` when one is
+//! configured.
+
+use std::sync::Arc;
 
 use axum::Json;
 use axum::body::Bytes;
@@ -20,6 +23,7 @@ use tracing::{debug, instrument, warn};
 use crate::error::{AppError, AppResult};
 use crate::metrics;
 use crate::models::SinkInboxView;
+use crate::services::SinkInbox;
 use crate::services::sink_inbox::parse_batch;
 use crate::state::AppState;
 
@@ -61,23 +65,17 @@ pub async fn require_sink_token(
     next.run(request).await
 }
 
-/// Accept one `ndjson` batch from the HTTP sink.
-///
-/// Answers `200 {"accepted": <messages>}`; `400` for a batch with a line
-/// that is not a sink envelope (nothing from it is kept); `415` for any
-/// other content type; `413` past `MAX_REQUEST_BODY_SIZE`. The sink does not
-/// retry a 4xx, and it has already stored its offsets, so a refused batch
-/// is not delivered again.
-#[instrument(skip_all, fields(bytes = body.len()))]
-pub async fn receive_sink_batch(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
+/// Refuse a delivery that is not an `ndjson` batch (`415`), before its body
+/// is read: the sink's `json_array` and `individual` modes, and anything
+/// else. It runs after [`require_sink_token`], so the refusal is counted as
+/// an authenticated batch rejected, and a caller without the token learns
+/// nothing about content types.
+pub async fn require_ndjson(
+    State(inbox): State<Arc<SinkInbox>>,
+    request: Request,
+    next: Next,
 ) -> Response {
-    let Some(inbox) = state.sink_inbox.as_ref() else {
-        return receiver_disabled().into_response();
-    };
-    if !is_ndjson(&headers) {
+    if !is_ndjson(request.headers()) {
         inbox.reject();
         metrics::record_sink_inbound_request("rejected");
         return (
@@ -91,6 +89,21 @@ pub async fn receive_sink_batch(
         )
             .into_response();
     }
+    next.run(request).await
+}
+
+/// Accept one `ndjson` batch from the HTTP sink. The route reaches it only
+/// through [`require_sink_token`] and [`require_ndjson`].
+///
+/// Answers `200 {"accepted": <messages>}`; `400` for a batch with a line
+/// that is not a sink envelope (nothing from it is kept); `413` past
+/// `MAX_REQUEST_BODY_SIZE`. The sink does not retry a 4xx, and it has
+/// already stored its offsets, so a refused batch is not delivered again.
+#[instrument(skip_all, fields(bytes = body.len()))]
+pub async fn receive_sink_batch(State(state): State<AppState>, body: Bytes) -> Response {
+    let Some(inbox) = state.sink_inbox.as_ref() else {
+        return receiver_disabled().into_response();
+    };
     match parse_batch(&body, Utc::now()) {
         Ok(deliveries) => {
             let accepted = inbox.accept(deliveries);
@@ -129,7 +142,75 @@ fn is_ndjson(headers: &HeaderMap) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use axum::Router;
+    use axum::body::Body;
     use axum::http::HeaderValue;
+    use axum::middleware;
+    use axum::routing::post;
+    use tower::ServiceExt;
+
+    use crate::services::SinkToken;
+
+    /// A route guarded by [`require_ndjson`] whose handler records that it
+    /// ran. The handler is what reads a body, so a request it never reaches
+    /// was refused with its body unread.
+    fn guarded_route(inbox: &Arc<SinkInbox>, reached: &Arc<AtomicBool>) -> Router {
+        let reached: Arc<AtomicBool> = Arc::clone(reached);
+        Router::new()
+            .route(
+                "/",
+                post(move |_body: Bytes| async move {
+                    reached.store(true, Ordering::SeqCst);
+                    StatusCode::OK
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(inbox),
+                require_ndjson,
+            ))
+    }
+
+    fn test_inbox() -> Arc<SinkInbox> {
+        Arc::new(SinkInbox::new(SinkToken::new(&"t".repeat(32)).unwrap()))
+    }
+
+    fn request(content_type: Option<&'static str>) -> Request {
+        let mut builder = Request::post("/");
+        if let Some(value) = content_type {
+            builder = builder.header(header::CONTENT_TYPE, value);
+        }
+        builder.body(Body::from("{}\n")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_require_ndjson_refuses_other_types_before_the_handler_reads_the_body() {
+        let inbox: Arc<SinkInbox> = test_inbox();
+        let reached = Arc::new(AtomicBool::new(false));
+        for content_type in [Some("application/json"), Some("text/plain"), None] {
+            let response = guarded_route(&inbox, &reached)
+                .oneshot(request(content_type))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+        assert!(!reached.load(Ordering::SeqCst), "the handler ran");
+        assert_eq!(inbox.snapshot().batches_rejected, 3);
+    }
+
+    #[tokio::test]
+    async fn test_require_ndjson_passes_an_ndjson_batch_to_the_handler() {
+        let inbox: Arc<SinkInbox> = test_inbox();
+        let reached = Arc::new(AtomicBool::new(false));
+        let response = guarded_route(&inbox, &reached)
+            .oneshot(request(Some("application/x-ndjson; charset=utf-8")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(reached.load(Ordering::SeqCst));
+        assert_eq!(inbox.snapshot().batches_rejected, 0);
+    }
 
     fn with_content_type(value: &'static str) -> HeaderMap {
         let mut headers = HeaderMap::new();

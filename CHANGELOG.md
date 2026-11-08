@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `POST /sink/inbound` checks the content type before it reads the body,
+  in a layer after the bearer token check (`require_ndjson`). The
+  responses are unchanged, except for a body over `MAX_REQUEST_BODY_SIZE`
+  with the wrong content type: it answered `413` and now answers `415`. A
+  wrong content type without the token still answers `401`
+
 ### Fixed
 
 - An integration test could fail to start its Iggy container with
