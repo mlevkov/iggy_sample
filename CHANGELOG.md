@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A three-node cluster demo (ADR-0001 PR 3, with ADR-0002's per-topic
+  replication factor), described in `docs/cluster-demo.md`:
+  - `docker-compose.cluster.yaml` runs three nodes on a fixed subnet, with
+    the roster shared through a YAML anchor, a volume per node, the replica
+    links' pre-shared key from `.env`, and the gateway inside the network on
+    port 8001. No Iggy port is published.
+  - `scripts/cluster-failover-demo.sh` SIGKILLs the metadata leader under
+    live traffic, then reports the election time, failed sends, the slowest
+    send and the restarted node's return to sync. It exits non-zero on a
+    missed budget. In local runs the election took 5-6 s and no send failed;
+    the SDK held sends for up to about 5 s until a new primary answered.
+  - `tests/cluster_tests.rs` (ignored by default) checks the roster, that
+    each partition sits on as many nodes as its replication factor, that a
+    factor above the node count answers `400`, and that the gateway starts
+    with its first seed down.
 - `GET /cluster` reports the roster with each node's role and status, from
   cluster metadata. Server 0.10 reports every node `healthy`, even one that
   is down, and the docs say so; the live signal is `in_sync_members`

@@ -459,6 +459,7 @@ iggy_sample/
 ├── Cargo.toml              # Dependencies and metadata
 ├── Dockerfile              # Multi-stage build for production
 ├── docker-compose.yaml     # Local development setup
+├── docker-compose.cluster.yaml # Three-node cluster demo (docs/cluster-demo.md)
 ├── deny.toml               # License/security policy (cargo-deny)
 ├── .env.example            # Environment variable template
 ├── CLAUDE.md               # Project documentation for AI assistants
@@ -499,8 +500,10 @@ iggy_sample/
 │       ├── topics.rs       # Topic management
 │       └── util.rs         # Shared handler utilities
 ├── scripts/
+│   ├── cluster-failover-demo.sh # Kills the cluster leader under traffic
 │   └── verify-release.sh    # Checks a release run step by step
 ├── tests/
+│   ├── cluster_tests.rs     # Three-node cluster tests (ignored; weekly)
 │   ├── integration_tests.rs # End-to-end API tests
 │   ├── metrics_smoke_test.rs # Prometheus exporter smoke test
 │   └── model_tests.rs       # Unit tests for models
@@ -547,6 +550,19 @@ docker-compose logs -f app
 
 # Stop
 docker-compose down
+```
+
+### Three-Node Cluster
+
+`docker-compose.cluster.yaml` runs a three-node Iggy cluster with the gateway
+on port 8001, and `scripts/cluster-failover-demo.sh` kills the leader under
+traffic to show failover. See the [cluster demo guide](docs/cluster-demo.md).
+
+```bash
+echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
+docker compose -f docker-compose.cluster.yaml up -d --build --wait
+curl http://localhost:8001/cluster
+scripts/cluster-failover-demo.sh
 ```
 
 ### Build Docker Image Manually

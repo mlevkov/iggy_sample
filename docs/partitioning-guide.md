@@ -1034,7 +1034,7 @@ Solution:
 - Topic: "transactions" with 12 partitions
 - Partition key: account_id
 - Consumer group: "transaction-processors"
-- Replication factor: 3 (when available)
+- Replication factor: 3 (the `replication_factor` topic option since server 0.10; see the [cluster demo](cluster-demo.md#replication-factor))
 - acks: all (wait for all replicas)
 
 Why account_id as key?
