@@ -10,4 +10,4 @@ supersedes the old one.
 |-----|-------|--------|------|
 | [0001](0001-iggy-0.9-upgrade-and-demos.md) | Upgrade to Iggy server 0.9 / SDK 0.11, and add clustering and connector demos | Accepted; amended by 0002 | 2026-11-06 |
 | [0002](0002-iggy-0.10-before-topic-options.md) | Move to Iggy server 0.10 / SDK 0.12 before the per-topic options PR | Accepted; corrected 2026-11-08 | 2026-11-07 |
-| [0003](0003-cap-sdk-reconnection-retries.md) | Cap the SDK's reconnection retries at 3 by default | Accepted | 2026-11-08 |
+| [0003](0003-cap-sdk-reconnection-retries.md) | Cap the SDK's reconnection retries at 3 by default | Accepted; corrected 2026-11-08 | 2026-11-08 |

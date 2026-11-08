@@ -1,6 +1,6 @@
 # ADR-0003: Cap the SDK's reconnection retries at 3 by default
 
-- **Status:** Accepted
+- **Status:** Accepted; corrected 2026-11-08 ([Corrections](#corrections))
 - **Date:** 2026-11-08
 - **Deciders:** Maxim Levkov
 - **Resolves:** the option TD-2026-07-02 left open
@@ -97,6 +97,15 @@ with a send through the gateway every 0.5 s.
     through the other two nodes;
   - after the follower restarted, it was back in sync within 2 s, and 60
     sends across the rejoin all succeeded at once.
+
+## Corrections
+
+- **2026-11-08.** Context says that with `unlimited`, every call "waits out
+  the 30 s deadline", and the first alternative says requests "hang for
+  30 s each". Precisely: each call waits until the server returns or the
+  deadline passes. In the measurement above, sends during the outage took a
+  mean of 23.8 s, and those started within 30 s of the restart succeeded
+  once the server was back. The decision is unchanged.
 
 ## References
 

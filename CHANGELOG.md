@@ -169,8 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IGGY_CONNECTION_STRING` sets the option (`reconnection_retries`, or
   `reconnection_max_retries` for QUIC), per ADR-0003.
   - **Before:** with the SDK's default, `unlimited`, every request during a
-    full outage waited out the SDK's 30 s deadline and failed as
-    `503 not_accepted`, and the circuit breaker never opened.
+    full outage waited until the server returned or the SDK's 30 s deadline
+    passed, failing as `503 not_accepted` at the deadline, and the circuit breaker never opened.
   - **Now:** once the SDK's retries run out it answers `NotConnected`, the
     breaker opens, and requests get an immediate `503 circuit_open` until
     the server returns.
