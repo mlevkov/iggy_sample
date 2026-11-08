@@ -968,6 +968,9 @@ IGGY_CONNECTION_STRING=iggy://user:pass@host:8090
 IGGY_STREAM=sample-stream
 IGGY_TOPIC=events
 IGGY_PARTITIONS=3
+# Default topic options, applied when the gateway creates it (any option of
+# POST /streams/{s}/topics, as IGGY_TOPIC_<OPTION>)
+IGGY_TOPIC_DURABILITY=persisted
 
 # Rate limiting
 RATE_LIMIT_RPS=100

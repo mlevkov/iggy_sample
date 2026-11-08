@@ -30,6 +30,13 @@ convey on its own.
 `RATE_LIMIT_BURST` sets the instantaneous token-bucket capacity and
 **replaces** the default rather than adding to it.
 
+`IGGY_TOPIC_<OPTION>` (e.g. `IGGY_TOPIC_DURABILITY=persisted`) sets one
+per-topic option of the default topic, with the names and values of the
+`options` object on `POST /streams/{s}/topics`. Topic options are fixed at
+creation, so these apply only when the gateway creates the topic; for an
+existing topic `ensure_topic` logs each differing option as a warning and
+changes nothing.
+
 ### Security
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -158,7 +165,7 @@ each topic and are fixed at creation (ADR-0001 PR 2, on SDK 0.12 per
 ADR-0002). `src/models/topic_options.rs` holds the whole contract:
 
 - `TopicOptionsInput` is the raw form, from the request body's `options`
-  object. `validate()` checks each option against the
+  object or from `IGGY_TOPIC_*`. `validate()` checks each option against the
   server's bounds (the SDK's `iggy_common` constants and validators) and the
   rules that combine options: a finite `max_topic_size` must be at least the
   segment size (the server's own error for that prints neither value), and

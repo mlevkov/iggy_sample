@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (sent by the creating client), `default` (filled by the server) or `unset`.
   SDK 0.12 always sends both durability options, so they read `explicit` on
   every topic created through the SDK
+- `IGGY_TOPIC_<OPTION>` environment variables set the default topic's options
+  (e.g. `IGGY_TOPIC_DURABILITY=persisted`); an invalid value fails startup
+  naming the variable. They apply when the gateway creates the topic, and for
+  an existing topic each option that differs is logged as a warning
 - `scripts/verify-release.sh` checks a release.yml run step by step instead
   of trusting its conclusion: that the tag names the commit the run built;
   what each step printed; the release notes; that every asset is

@@ -392,6 +392,7 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 | `IGGY_STREAM` | `sample-stream` | Default stream name |
 | `IGGY_TOPIC` | `events` | Default topic name |
 | `IGGY_PARTITIONS` | `3` | Partitions for default topic |
+| `IGGY_TOPIC_<OPTION>` | (unset) | One per-topic option for the default topic, e.g. `IGGY_TOPIC_DURABILITY=persisted`, `IGGY_TOPIC_SEGMENT_SIZE="256 MiB"`. Any option in the [topic options table](#create-a-topic), same values. Applied only when the gateway creates the topic; for an existing topic, each differing option is logged as a warning |
 | `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
 
 ### Connection Resilience

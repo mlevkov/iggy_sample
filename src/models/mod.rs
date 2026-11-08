@@ -8,6 +8,6 @@ pub use api::{
 };
 pub use event::{Event, EventPayload, OrderEvent, OrderItem, OrderStatus, UserEvent};
 pub use topic_options::{
-    OptionSource, ReportedOption, TopicOptionError, TopicOptions, TopicOptionsInput,
-    TopicOptionsView,
+    OptionDifference, OptionSource, ReportedOption, TopicOptionError, TopicOptions,
+    TopicOptionsInput, TopicOptionsView,
 };

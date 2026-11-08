@@ -18,11 +18,22 @@
 //! - `POLL_MAX_COUNT`: Maximum messages per poll (default: 100)
 //! - `RATE_LIMIT_RPS`: Requests per second limit (default: 100)
 //! - `RATE_LIMIT_BURST`: Burst capacity for rate limiter (default: 50)
+//!
+//! # Default Topic Options
+//!
+//! `IGGY_TOPIC_<OPTION>` sets one per-topic option of the default topic, e.g.
+//! `IGGY_TOPIC_DURABILITY=persisted` or `IGGY_TOPIC_SEGMENT_SIZE="256 MiB"`.
+//! The options and their forms are those of `POST /streams/{s}/topics`
+//! ([`TopicOptionsInput`]); unset or empty leaves an option to the server.
+//! They apply only when the gateway creates the topic: topic options are fixed
+//! at creation, so for an existing topic the gateway logs each one that
+//! differs and leaves the topic unchanged.
 
 use std::env;
 use std::time::Duration;
 
 use crate::error::{AppError, AppResult};
+use crate::models::{TopicOptions, TopicOptionsInput};
 
 /// Application configuration loaded from environment variables.
 ///
@@ -59,6 +70,10 @@ pub struct Config {
 
     /// Number of partitions for the default topic
     pub topic_partitions: u32,
+
+    /// Per-topic options for the default topic, from `IGGY_TOPIC_<OPTION>`.
+    /// Applied only when the gateway creates the topic.
+    pub default_topic_options: TopicOptions,
 
     // =========================================================================
     // Connection Resilience Configuration
@@ -180,6 +195,10 @@ impl Config {
         // Load an .env file if present (ignore errors if not found)
         let _ = dotenvy::dotenv();
 
+        let topic_partitions = Self::parse_env("IGGY_PARTITIONS", 3)?;
+        let default_topic_options =
+            default_topic_options_from(|name| env::var(name).ok(), topic_partitions)?;
+
         let config = Self {
             // Server
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
@@ -190,7 +209,8 @@ impl Config {
                 .unwrap_or_else(|_| "iggy://iggy:iggy@localhost:8090".to_string()),
             default_stream: env::var("IGGY_STREAM").unwrap_or_else(|_| "sample-stream".to_string()),
             default_topic: env::var("IGGY_TOPIC").unwrap_or_else(|_| "events".to_string()),
-            topic_partitions: Self::parse_env("IGGY_PARTITIONS", 3)?,
+            topic_partitions,
+            default_topic_options,
 
             // Connection resilience
             max_reconnect_attempts: Self::parse_env("MAX_RECONNECT_ATTEMPTS", 0)?, // 0 = infinite
@@ -444,6 +464,55 @@ impl Config {
 
 /// The pure half of [`Config::parse_flag`], split out so tests need not set
 /// process environment variables.
+/// The environment variable for one default-topic option:
+/// `segment_size` reads `IGGY_TOPIC_SEGMENT_SIZE`.
+fn topic_option_env(key: &str) -> String {
+    format!("IGGY_TOPIC_{}", key.to_ascii_uppercase())
+}
+
+/// Read and validate the default topic's options through `lookup`, which
+/// returns an environment variable's value if set. An empty value counts as
+/// unset.
+fn default_topic_options_from(
+    lookup: impl Fn(&str) -> Option<String>,
+    partitions: u32,
+) -> AppResult<TopicOptions> {
+    use iggy::prelude::topic_option_keys as keys;
+
+    let text = |key: &str| {
+        lookup(&topic_option_env(key))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let messages_required_to_save = text(keys::MESSAGES_REQUIRED_TO_SAVE)
+        .map(|value| {
+            value.parse::<u32>().map_err(|e| {
+                AppError::ConfigError(format!(
+                    "Invalid {}: {e}",
+                    topic_option_env(keys::MESSAGES_REQUIRED_TO_SAVE)
+                ))
+            })
+        })
+        .transpose()?;
+    let preallocate_segments = text(keys::PREALLOCATE_SEGMENTS)
+        .map(|value| parse_flag_value(&topic_option_env(keys::PREALLOCATE_SEGMENTS), Some(&value)))
+        .transpose()?;
+
+    let input = TopicOptionsInput {
+        durability: text(keys::DURABILITY),
+        consumer_offset_durability: text(keys::CONSUMER_OFFSET_DURABILITY),
+        message_expiry: text(keys::MESSAGE_EXPIRY),
+        max_topic_size: text(keys::MAX_TOPIC_SIZE),
+        segment_size: text(keys::SEGMENT_SIZE),
+        messages_required_to_save,
+        size_of_messages_required_to_save: text(keys::SIZE_OF_MESSAGES_REQUIRED_TO_SAVE),
+        preallocate_segments,
+    };
+    input
+        .validate(partitions, topic_option_env)
+        .map_err(|error| AppError::ConfigError(format!("Invalid {error}")))
+}
+
 fn parse_flag_value(name: &str, raw: Option<&str>) -> AppResult<bool> {
     let value = raw.map(str::trim).unwrap_or_default();
     if value.is_empty() || value.eq_ignore_ascii_case("false") {
@@ -471,6 +540,7 @@ impl Default for Config {
             default_stream: "sample-stream".to_string(),
             default_topic: "events".to_string(),
             topic_partitions: 3,
+            default_topic_options: TopicOptions::default(),
             // Connection resilience
             max_reconnect_attempts: 0, // infinite
             reconnect_base_delay: Duration::from_secs(1),
@@ -674,6 +744,97 @@ mod tests {
         };
 
         assert!(config.validate().is_ok());
+    }
+
+    fn topic_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        move |name| vars.get(name).cloned()
+    }
+
+    #[test]
+    fn test_default_topic_options_unset_leave_everything_to_the_server() {
+        let options = default_topic_options_from(topic_env(&[]), 3).unwrap();
+        assert_eq!(options, TopicOptions::default());
+
+        let empty = topic_env(&[
+            ("IGGY_TOPIC_DURABILITY", " "),
+            ("IGGY_TOPIC_PREALLOCATE_SEGMENTS", ""),
+        ]);
+        assert_eq!(
+            default_topic_options_from(empty, 3).unwrap(),
+            TopicOptions::default()
+        );
+    }
+
+    #[test]
+    fn test_default_topic_options_read_each_variable() {
+        let env = topic_env(&[
+            ("IGGY_TOPIC_DURABILITY", "persisted"),
+            ("IGGY_TOPIC_CONSUMER_OFFSET_DURABILITY", "persisted"),
+            ("IGGY_TOPIC_MESSAGE_EXPIRY", "7days"),
+            ("IGGY_TOPIC_MAX_TOPIC_SIZE", "unlimited"),
+            ("IGGY_TOPIC_SEGMENT_SIZE", "256 MiB"),
+            ("IGGY_TOPIC_MESSAGES_REQUIRED_TO_SAVE", "1"),
+            ("IGGY_TOPIC_SIZE_OF_MESSAGES_REQUIRED_TO_SAVE", "4 KiB"),
+            ("IGGY_TOPIC_PREALLOCATE_SEGMENTS", "TRUE"),
+        ]);
+        let options = default_topic_options_from(env, 3).unwrap();
+
+        assert_eq!(
+            options.durability,
+            Some(iggy::prelude::Durability::Persisted)
+        );
+        assert_eq!(
+            options.consumer_offset_durability,
+            Some(iggy::prelude::Durability::Persisted)
+        );
+        assert!(options.message_expiry.is_some());
+        assert_eq!(
+            options.max_topic_size,
+            Some(iggy::prelude::MaxTopicSize::Unlimited)
+        );
+        assert_eq!(
+            options.segment_size.map(|size| size.as_bytes_u64()),
+            Some(256 << 20)
+        );
+        assert_eq!(options.messages_required_to_save, Some(1));
+        assert_eq!(
+            options
+                .size_of_messages_required_to_save
+                .map(|size| size.as_bytes_u64()),
+            Some(4096)
+        );
+        assert_eq!(options.preallocate_segments, Some(true));
+    }
+
+    #[test]
+    fn test_default_topic_options_name_the_variable_on_error() {
+        let cases = [
+            ("IGGY_TOPIC_DURABILITY", "fsync"),
+            ("IGGY_TOPIC_SEGMENT_SIZE", "100 KiB"),
+            ("IGGY_TOPIC_MESSAGES_REQUIRED_TO_SAVE", "many"),
+            ("IGGY_TOPIC_PREALLOCATE_SEGMENTS", "yes"),
+        ];
+        for (name, value) in cases {
+            let error = default_topic_options_from(topic_env(&[(name, value)]), 3)
+                .expect_err("invalid value must fail startup");
+            assert!(
+                matches!(&error, AppError::ConfigError(message) if message.contains(name)),
+                "{name}={value}: got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_topic_preallocation_is_checked_against_the_partition_count() {
+        let env = topic_env(&[("IGGY_TOPIC_PREALLOCATE_SEGMENTS", "true")]);
+        let error = default_topic_options_from(env, 100).expect_err("100 GiB reserved");
+        assert!(
+            matches!(error, AppError::ConfigError(message) if message.contains("IGGY_TOPIC_PREALLOCATE_SEGMENTS"))
+        );
     }
 
     #[test]

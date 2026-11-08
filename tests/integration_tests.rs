@@ -231,6 +231,16 @@ impl TestFixture {
             default_stream: "test-stream".to_string(),
             default_topic: "test-events".to_string(),
             topic_partitions: 2,
+            // Exercises IGGY_TOPIC_* -> creation: the default topic is created
+            // with these, and test_default_topic_carries_configured_options
+            // reads them back.
+            default_topic_options: iggy_sample::models::TopicOptionsInput {
+                segment_size: Some("16 MiB".to_string()),
+                messages_required_to_save: Some(512),
+                ..Default::default()
+            }
+            .validate(2, |key| key.to_string())
+            .map_err(|e| e.to_string())?,
             // Connection resilience (relaxed for tests)
             max_reconnect_attempts: 3,
             reconnect_base_delay: Duration::from_millis(100),
@@ -1306,6 +1316,35 @@ async fn test_create_topic_with_options_reports_values_and_provenance() {
 }
 
 #[tokio::test]
+async fn test_default_topic_carries_configured_options() {
+    let fixture = TestFixture::new().await;
+
+    let topic: serde_json::Value = fixture
+        .client
+        .get(fixture.url("/streams/test-stream/topics/test-events"))
+        .send()
+        .await
+        .expect("Request failed")
+        .json()
+        .await
+        .expect("Invalid JSON");
+
+    // The fixture's default_topic_options, as IGGY_TOPIC_* would set them.
+    assert_eq!(
+        reported(&topic, "segment_size"),
+        (json!("16 MiB"), "explicit".into())
+    );
+    assert_eq!(
+        reported(&topic, "messages_required_to_save"),
+        (json!(512), "explicit".into())
+    );
+    assert_eq!(
+        reported(&topic, "message_expiry"),
+        (json!("unlimited"), "default".into())
+    );
+}
+
+#[tokio::test]
 async fn test_create_topic_refuses_invalid_options() {
     let fixture = TestFixture::new().await;
 
@@ -1792,6 +1831,7 @@ impl SecureTestFixture {
             default_stream: "secure-test-stream".to_string(),
             default_topic: "secure-test-events".to_string(),
             topic_partitions: 2,
+            default_topic_options: Default::default(),
             max_reconnect_attempts: 3,
             reconnect_base_delay: Duration::from_millis(100),
             reconnect_max_delay: Duration::from_secs(1),

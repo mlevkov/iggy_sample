@@ -4,8 +4,8 @@
 //! Since server 0.9, segment, flush and durability settings belong to each
 //! topic and are fixed when it is created ([ADR-0001] PR 2, built on SDK 0.12
 //! per [ADR-0002]). The gateway takes them from the `options` object of
-//! `POST /streams/{stream}/topics` and checks them with
-//! [`TopicOptionsInput::validate`].
+//! `POST /streams/{stream}/topics`, and the default topic's from `IGGY_TOPIC_*`
+//! environment variables. Both go through [`TopicOptionsInput::validate`].
 //!
 //! # Values
 //!
@@ -52,7 +52,8 @@ use thiserror::Error;
 /// The reason given for a value that means "server default" in Iggy.
 const SERVER_DEFAULT_REFUSED: &str = "omit the option to use the server default";
 
-/// Per-topic options as a client supplies them, before validation. Every option is optional; an omitted one resolves to the
+/// Per-topic options as a client or the environment supplies them, before
+/// validation. Every option is optional; an omitted one resolves to the
 /// server's default when the topic is created.
 ///
 /// Unknown keys are refused, so a misspelt option fails instead of silently
@@ -85,7 +86,8 @@ pub struct TopicOptionsInput {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{name}: {reason}")]
 pub struct TopicOptionError {
-    /// The option as the caller named it, e.g. `options.segment_size`.
+    /// The option as the caller named it, e.g. `options.segment_size` or
+    /// `IGGY_TOPIC_SEGMENT_SIZE`.
     pub name: String,
     /// Why the value was refused.
     pub reason: String,
@@ -95,7 +97,8 @@ impl TopicOptionsInput {
     /// Validate every supplied option for a topic of `partitions` partitions.
     ///
     /// `label` maps an option key (`segment_size`) to the name the caller
-    /// used for it (`options.segment_size`), for the error.
+    /// used for it (`options.segment_size`, `IGGY_TOPIC_SEGMENT_SIZE`), for
+    /// the error.
     ///
     /// # Errors
     ///
@@ -220,6 +223,80 @@ impl TopicOptions {
             ..TopicCreateOptions::default()
         }
     }
+
+    /// The options set here that `stored` contradicts, as
+    /// `(key, set here, stored)`. An option set here that the topic does
+    /// not store counts as a difference, with `"unset"` as the stored value.
+    #[must_use]
+    pub fn differences(&self, stored: &TopicOptionsView) -> Vec<OptionDifference> {
+        let mut differences = Vec::new();
+        let mut compare = |key: &'static str, wanted: Option<String>, stored: Option<String>| {
+            if let Some(wanted) = wanted
+                && stored.as_ref() != Some(&wanted)
+            {
+                differences.push(OptionDifference {
+                    key,
+                    wanted,
+                    stored: stored.unwrap_or_else(|| "unset".to_string()),
+                });
+            }
+        };
+        compare(
+            keys::DURABILITY,
+            self.durability.map(format_durability),
+            stored.durability.value.clone(),
+        );
+        compare(
+            keys::CONSUMER_OFFSET_DURABILITY,
+            self.consumer_offset_durability.map(format_durability),
+            stored.consumer_offset_durability.value.clone(),
+        );
+        compare(
+            keys::MESSAGE_EXPIRY,
+            self.message_expiry.map(format_message_expiry),
+            stored.message_expiry.value.clone(),
+        );
+        compare(
+            keys::MAX_TOPIC_SIZE,
+            self.max_topic_size.map(format_max_topic_size),
+            stored.max_topic_size.value.clone(),
+        );
+        compare(
+            keys::SEGMENT_SIZE,
+            self.segment_size.map(format_byte_size),
+            stored.segment_size.value.clone(),
+        );
+        compare(
+            keys::MESSAGES_REQUIRED_TO_SAVE,
+            self.messages_required_to_save.map(|n| n.to_string()),
+            stored
+                .messages_required_to_save
+                .value
+                .map(|n| n.to_string()),
+        );
+        compare(
+            keys::SIZE_OF_MESSAGES_REQUIRED_TO_SAVE,
+            self.size_of_messages_required_to_save.map(format_byte_size),
+            stored.size_of_messages_required_to_save.value.clone(),
+        );
+        compare(
+            keys::PREALLOCATE_SEGMENTS,
+            self.preallocate_segments.map(|b| b.to_string()),
+            stored.preallocate_segments.value.map(|b| b.to_string()),
+        );
+        differences
+    }
+}
+
+/// One option on which wanted and stored values disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionDifference {
+    /// The option key, e.g. `durability`.
+    pub key: &'static str,
+    /// The value asked for, in reported form.
+    pub wanted: String,
+    /// The topic's stored value, in reported form, or `"unset"`.
+    pub stored: String,
 }
 
 /// Who chose a stored option's value.
@@ -752,5 +829,40 @@ mod tests {
         assert_eq!(view.messages_required_to_save.source, OptionSource::Default);
         assert_eq!(view.message_expiry.value, None);
         assert_eq!(view.message_expiry.source, OptionSource::Unset);
+    }
+
+    #[test]
+    fn test_differences_name_each_contradicted_option() {
+        let create = TopicCreateOptions {
+            segment_size: Some(IggyByteSize::from(16_u64 << 20)),
+            ..Default::default()
+        };
+        let mut stored = ResourceOptions::new();
+        stored_entry(&mut stored, keys::DURABILITY, &create);
+        stored_entry(&mut stored, keys::SEGMENT_SIZE, &create);
+        let view = TopicOptionsView::from_stored(&stored);
+
+        let wanted = TopicOptions {
+            durability: Some(Durability::Persisted),
+            segment_size: Some(IggyByteSize::from(16_u64 << 20)),
+            preallocate_segments: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            wanted.differences(&view),
+            vec![
+                OptionDifference {
+                    key: keys::DURABILITY,
+                    wanted: "persisted".into(),
+                    stored: "replicated".into(),
+                },
+                OptionDifference {
+                    key: keys::PREALLOCATE_SEGMENTS,
+                    wanted: "true".into(),
+                    stored: "unset".into(),
+                },
+            ]
+        );
+        assert!(TopicOptions::default().differences(&view).is_empty());
     }
 }
