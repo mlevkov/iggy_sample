@@ -259,6 +259,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - release.yml's crates.io publish job. The crate is `publish = false`, and
   its releases are repo-level only; the job could not succeed and failed on
   every stable release, hidden by `continue-on-error` (TD-2026-09-04)
+- CI's Codecov upload (TD-2026-09-03). Codecov rejected every upload for
+  want of a token, and `fail_ci_if_error: false` kept the job green. The
+  Code Coverage job still runs the suite under cargo-llvm-cov and writes
+  the line total to its job summary
 
 ### Fixed
 

@@ -858,8 +858,10 @@ This project uses GitHub Actions for continuous integration and deployment:
 - **Formatting**: `cargo fmt --check`
 - **Linting**: `cargo clippy -- -D warnings`, and `shellcheck` for `scripts/`
 - **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV on Linux
-- **Coverage**: `cargo llvm-cov`; the Codecov upload is not authenticated
-  yet (TD-2026-09-03)
+- **Coverage**: `cargo llvm-cov`. CI's Code Coverage job writes the line
+  total to its job summary, and on pull requests PR Checks' Coverage Diff
+  warns below 60% of lines. Nothing is uploaded to a coverage service
+  (TD-2026-09-03)
 - **Dependency policy**: `cargo deny --locked check` (advisories, bans,
   licenses, sources)
 - **Security**: `cargo-audit` vulnerability scanning; blocking on pushes and
