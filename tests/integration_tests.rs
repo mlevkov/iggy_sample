@@ -175,6 +175,9 @@ struct TestFixture {
 }
 
 impl TestFixture {
+    /// Bearer token of the gateway's HTTP sink receiver (`/sink/inbound`)
+    const SINK_TOKEN: &'static str = "test-sink-token-0123456789abcdef0123";
+
     /// Create a new test fixture with Iggy container and app server
     async fn new() -> Self {
         // Start Iggy container
@@ -264,6 +267,8 @@ impl TestFixture {
             cors_allowed_origins: vec!["*".to_string()],
             trusted_proxies: vec![], // Empty = trust all (test mode)
             allow_unverified_client_ips: false,
+            // The HTTP sink receiver, exercised by the test_sink_inbound_* tests
+            sink_inbound_token: Some(iggy_sample::services::SinkToken::new(Self::SINK_TOKEN)?),
             // Observability
             log_level: "warn".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
@@ -1913,6 +1918,8 @@ impl SecureTestFixture {
             // ignored - this makes the enforcement path itself wire-tested.
             trusted_proxies: vec!["10.0.0.0/8".to_string()],
             allow_unverified_client_ips: false,
+            // No sink receiver: test_sink_inbound_is_not_routed_without_a_token
+            sink_inbound_token: None,
             log_level: "warn".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
             metrics_port: 0, // Disabled for tests
@@ -2235,4 +2242,170 @@ async fn test_rate_limit_recovery() {
         "Should succeed after rate limit window resets, got {}",
         response.status()
     );
+}
+
+// =============================================================================
+// HTTP sink receiver (/sink/inbound, connectors demo)
+// =============================================================================
+
+/// One line of the HTTP sink's ndjson batch mode, as
+/// `iggy_connector_http_sink` 0.6.0 formats it.
+fn sink_envelope(offset: u64, payload: serde_json::Value) -> String {
+    json!({
+        "metadata": {
+            "iggy_id": format!("{:032x}", 1000 + offset),
+            "iggy_offset": offset,
+            "iggy_timestamp": 1_762_560_000_000_000_u64,
+            "iggy_stream": "test-stream",
+            "iggy_topic": "test-events",
+            "iggy_partition_id": 1
+        },
+        "payload": payload
+    })
+    .to_string()
+}
+
+async fn sink_inbox(fixture: &TestFixture) -> serde_json::Value {
+    let response = fixture
+        .client
+        .get(fixture.url("/sink/inbound"))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 200);
+    response.json().await.expect("Invalid JSON")
+}
+
+#[tokio::test]
+async fn test_sink_inbound_accepts_a_batch_and_reports_it_newest_first() {
+    let fixture = TestFixture::new().await;
+    let body = format!(
+        "{}\n{}\n",
+        sink_envelope(4, json!({"event_type": "first"})),
+        sink_envelope(5, json!({"event_type": "second"}))
+    );
+
+    let response = fixture
+        .client
+        .post(fixture.url("/sink/inbound"))
+        .bearer_auth(TestFixture::SINK_TOKEN)
+        .header("content-type", "application/x-ndjson")
+        .body(body)
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 200);
+    let answer: serde_json::Value = response.json().await.expect("Invalid JSON");
+    assert_eq!(answer, json!({"accepted": 2}));
+
+    let inbox = sink_inbox(&fixture).await;
+    assert_eq!(inbox.get("messages_received"), Some(&json!(2)));
+    assert_eq!(inbox.get("batches_accepted"), Some(&json!(1)));
+    assert_eq!(inbox.get("retained"), Some(&json!(2)));
+    assert_eq!(
+        inbox.pointer("/recent/0/payload/event_type"),
+        Some(&json!("second"))
+    );
+    assert_eq!(inbox.pointer("/recent/0/offset"), Some(&json!(5)));
+    assert_eq!(
+        inbox.pointer("/recent/0/id"),
+        Some(&json!(format!("{:032x}", 1005)))
+    );
+    assert_eq!(inbox.pointer("/recent/1/offset"), Some(&json!(4)));
+    assert_eq!(
+        inbox.pointer("/recent/1/topic"),
+        Some(&json!("test-events"))
+    );
+    assert!(inbox.get("last_received_at").is_some_and(|t| t.is_string()));
+}
+
+#[tokio::test]
+async fn test_sink_inbound_refuses_a_missing_or_wrong_token() {
+    let fixture = TestFixture::new().await;
+    let body = sink_envelope(0, json!({}));
+
+    let missing = fixture
+        .client
+        .post(fixture.url("/sink/inbound"))
+        .header("content-type", "application/x-ndjson")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(missing.status().as_u16(), 401);
+    assert_eq!(
+        missing
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer")
+    );
+
+    let wrong = fixture
+        .client
+        .post(fixture.url("/sink/inbound"))
+        .bearer_auth("not-the-sink-token-0123456789abcdef")
+        .header("content-type", "application/x-ndjson")
+        .body(body)
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(wrong.status().as_u16(), 401);
+
+    let inbox = sink_inbox(&fixture).await;
+    assert_eq!(inbox.get("unauthorized_requests"), Some(&json!(2)));
+    assert_eq!(inbox.get("messages_received"), Some(&json!(0)));
+}
+
+#[tokio::test]
+async fn test_sink_inbound_refuses_malformed_batches_and_other_content_types() {
+    let fixture = TestFixture::new().await;
+    let post = |content_type: &'static str, body: String| {
+        fixture
+            .client
+            .post(fixture.url("/sink/inbound"))
+            .bearer_auth(TestFixture::SINK_TOKEN)
+            .header("content-type", content_type)
+            .body(body)
+            .send()
+    };
+
+    // One bad line refuses the whole batch, naming the line.
+    let malformed = format!("{}\n{{\"payload\": 1}}\n", sink_envelope(0, json!({})));
+    let response = post("application/x-ndjson", malformed)
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 400);
+    let error: serde_json::Value = response.json().await.expect("Invalid JSON");
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(message.contains("line 2"), "{error}");
+
+    // The sink's json_array or individual modes are not accepted.
+    let response = post("application/json", sink_envelope(0, json!({})))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 415);
+
+    let inbox = sink_inbox(&fixture).await;
+    assert_eq!(inbox.get("batches_rejected"), Some(&json!(2)));
+    assert_eq!(inbox.get("messages_received"), Some(&json!(0)));
+}
+
+#[tokio::test]
+async fn test_sink_inbound_is_not_routed_without_a_token() {
+    let fixture = SecureTestFixture::new().await;
+
+    let response = fixture
+        .client
+        .post(fixture.url("/sink/inbound"))
+        .header("x-api-key", &fixture.api_key)
+        .header("content-type", "application/x-ndjson")
+        .body(sink_envelope(0, json!({})))
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status().as_u16(), 404);
 }

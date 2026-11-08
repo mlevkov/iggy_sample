@@ -28,12 +28,20 @@
 //! They apply only when the gateway creates the topic: topic options are fixed
 //! at creation, so for an existing topic the gateway logs each one that
 //! differs and leaves the topic unchanged.
+//!
+//! # Connectors Demo
+//!
+//! `SINK_INBOUND_TOKEN` (or `SINK_INBOUND_TOKEN_FILE`, a file holding it)
+//! enables `POST /sink/inbound`, the receiver for the HTTP sink connector,
+//! and the `GET` that reports what it received
+//! ([`crate::services::sink_inbox`]). Unset, those routes do not exist.
 
 use std::env;
 use std::time::Duration;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{TopicOptions, TopicOptionsInput};
+use crate::services::SinkToken;
 
 /// Application configuration loaded from environment variables.
 ///
@@ -171,6 +179,12 @@ pub struct Config {
     /// `TRUSTED_PROXIES` is set or `API_KEY` is not.
     pub allow_unverified_client_ips: bool,
 
+    /// Bearer token the connectors demo's HTTP sink presents on
+    /// `POST /sink/inbound` (`SINK_INBOUND_TOKEN`, or the file named by
+    /// `SINK_INBOUND_TOKEN_FILE`). `None` leaves the `/sink/inbound` routes
+    /// out of the router. Its `Debug` output is redacted.
+    pub sink_inbound_token: Option<SinkToken>,
+
     // =========================================================================
     // Observability Configuration
     // =========================================================================
@@ -257,6 +271,10 @@ impl Config {
             cors_allowed_origins: Self::parse_cors_origins(),
             trusted_proxies: Self::parse_trusted_proxies(),
             allow_unverified_client_ips: Self::parse_flag("ALLOW_UNVERIFIED_CLIENT_IPS")?,
+            sink_inbound_token: sink_inbound_token_from(
+                |name| env::var(name).ok(),
+                |path| std::fs::read_to_string(path),
+            )?,
 
             // Observability
             log_level: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -528,6 +546,43 @@ fn default_topic_options_from(
         .map_err(|error| AppError::ConfigError(format!("Invalid {error}")))
 }
 
+/// Read the sink receiver's token from `SINK_INBOUND_TOKEN`, or from the
+/// file `SINK_INBOUND_TOKEN_FILE` names, with trailing whitespace trimmed so
+/// a file written by `echo` works. `lookup` returns an environment
+/// variable's value if set (empty counts as unset); `read_file` reads a
+/// file. Setting both variables is an error, as is a token
+/// [`SinkToken::new`] refuses. No error repeats the token.
+fn sink_inbound_token_from(
+    lookup: impl Fn(&str) -> Option<String>,
+    read_file: impl Fn(&str) -> std::io::Result<String>,
+) -> AppResult<Option<SinkToken>> {
+    let direct = lookup("SINK_INBOUND_TOKEN").filter(|value| !value.is_empty());
+    let path = lookup("SINK_INBOUND_TOKEN_FILE").filter(|value| !value.trim().is_empty());
+    let (value, source) = match (direct, path) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {
+            return Err(AppError::ConfigError(
+                "Set SINK_INBOUND_TOKEN or SINK_INBOUND_TOKEN_FILE, not both".to_string(),
+            ));
+        }
+        (Some(value), None) => (value, "SINK_INBOUND_TOKEN".to_string()),
+        (None, Some(path)) => {
+            let content = read_file(&path).map_err(|error| {
+                AppError::ConfigError(format!(
+                    "SINK_INBOUND_TOKEN_FILE: cannot read {path}: {error}"
+                ))
+            })?;
+            (
+                content.trim_end().to_string(),
+                format!("SINK_INBOUND_TOKEN_FILE ({path})"),
+            )
+        }
+    };
+    SinkToken::new(&value)
+        .map(Some)
+        .map_err(|reason| AppError::ConfigError(format!("Invalid {source}: {reason}")))
+}
+
 /// The pure half of [`Config::parse_flag`], split out so tests need not set
 /// process environment variables.
 fn parse_flag_value(name: &str, raw: Option<&str>) -> AppResult<bool> {
@@ -581,6 +636,7 @@ impl Default for Config {
             cors_allowed_origins: vec!["*".to_string()],
             trusted_proxies: vec![], // Empty = trust all (dev mode)
             allow_unverified_client_ips: false,
+            sink_inbound_token: None,
             // Observability
             log_level: "info".to_string(),
             stats_cache_ttl: Duration::from_secs(5),
@@ -893,5 +949,81 @@ mod tests {
         };
 
         assert!(config.validate().is_ok());
+    }
+
+    const SINK_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    fn no_file(path: &str) -> std::io::Result<String> {
+        panic!("unexpected read of {path}")
+    }
+
+    #[test]
+    fn test_sink_inbound_token_unset_disables_the_receiver() {
+        let token = sink_inbound_token_from(topic_env(&[]), no_file).unwrap();
+        assert!(token.is_none());
+        let empty = topic_env(&[("SINK_INBOUND_TOKEN", ""), ("SINK_INBOUND_TOKEN_FILE", " ")]);
+        assert!(sink_inbound_token_from(empty, no_file).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sink_inbound_token_reads_the_variable() {
+        let lookup = topic_env(&[("SINK_INBOUND_TOKEN", SINK_TOKEN)]);
+        let token = sink_inbound_token_from(lookup, no_file).unwrap();
+        assert!(token.is_some());
+    }
+
+    #[test]
+    fn test_sink_inbound_token_reads_the_file_and_trims_its_newline() {
+        let lookup = topic_env(&[("SINK_INBOUND_TOKEN_FILE", "/run/secrets/token")]);
+        let token = sink_inbound_token_from(lookup, |path| {
+            assert_eq!(path, "/run/secrets/token");
+            Ok(format!("{SINK_TOKEN}\n"))
+        })
+        .unwrap();
+        assert!(token.is_some());
+    }
+
+    #[test]
+    fn test_sink_inbound_token_refuses_both_sources() {
+        let lookup = topic_env(&[
+            ("SINK_INBOUND_TOKEN", SINK_TOKEN),
+            ("SINK_INBOUND_TOKEN_FILE", "/run/secrets/token"),
+        ]);
+        let error = sink_inbound_token_from(lookup, no_file).unwrap_err();
+        assert!(error.to_string().contains("not both"), "{error}");
+    }
+
+    #[test]
+    fn test_sink_inbound_token_errors_name_the_source_but_not_the_value() {
+        let lookup = topic_env(&[("SINK_INBOUND_TOKEN", "too-short-secret")]);
+        let error = sink_inbound_token_from(lookup, no_file)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SINK_INBOUND_TOKEN"), "{error}");
+        assert!(!error.contains("too-short-secret"), "{error}");
+
+        let lookup = topic_env(&[("SINK_INBOUND_TOKEN_FILE", "/missing")]);
+        let error = sink_inbound_token_from(lookup, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot read /missing"), "{error}");
+
+        let lookup = topic_env(&[("SINK_INBOUND_TOKEN_FILE", "/run/secrets/token")]);
+        let error = sink_inbound_token_from(lookup, |_| Ok("short\n".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/run/secrets/token"), "{error}");
+        assert!(!error.contains("short\n"), "{error}");
+    }
+
+    #[test]
+    fn test_config_debug_redacts_the_sink_token() {
+        let config = Config {
+            sink_inbound_token: Some(SinkToken::new(SINK_TOKEN).unwrap()),
+            ..Config::default()
+        };
+        assert!(!format!("{config:?}").contains(SINK_TOKEN));
     }
 }

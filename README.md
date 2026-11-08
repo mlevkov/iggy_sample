@@ -160,6 +160,15 @@ Expected response:
 | `/stats` | GET | Service statistics (streams, messages, uptime) |
 | `/cluster` | GET | Cluster nodes with their roles and health (`single-node` when clustering is off) |
 
+### HTTP Sink Receiver (connectors demo)
+
+Routed only when `SINK_INBOUND_TOKEN` (or `SINK_INBOUND_TOKEN_FILE`) is set.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/sink/inbound` | POST | Receive an `ndjson` batch from the HTTP sink connector (`Authorization: Bearer <token>`) |
+| `/sink/inbound` | GET | What the sink delivered: counters and the newest deliveries |
+
 ### Messages (Default Stream/Topic)
 
 | Endpoint | Method | Description |
@@ -421,6 +430,8 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
 | `TRUSTED_PROXIES` | (none) | Comma-separated CIDR ranges of your reverse proxies; client IPs are taken from forwarded headers only when the peer is inside one. **Required when `API_KEY` is set** |
 | `ALLOW_UNVERIFIED_CLIENT_IPS` | `false` | Start with `API_KEY` but no `TRUSTED_PROXIES`, for local development only: brute-force protection then throttles but never blocks |
+| `SINK_INBOUND_TOKEN` | (none) | Bearer token of the HTTP sink receiver; 32 to 1024 printable characters. Unset, `/sink/inbound` does not exist |
+| `SINK_INBOUND_TOKEN_FILE` | (none) | A file holding that token instead (trailing newline ignored); set one or the other |
 
 ### Message Limits & Observability
 | Variable | Default | Description |
@@ -490,16 +501,19 @@ iggy_sample/
 │   │   ├── mod.rs          # Model exports
 │   │   ├── event.rs        # Domain events (uses rust_decimal)
 │   │   ├── topic_options.rs # Per-topic options: validation and read-back
+│   │   ├── sink.rs         # GET /sink/inbound response types
 │   │   └── api.rs          # API request/response types
 │   ├── services/
 │   │   ├── mod.rs          # Service exports
 │   │   ├── producer.rs     # Message producer service
-│   │   └── consumer.rs     # Message consumer service
+│   │   ├── consumer.rs     # Message consumer service
+│   │   └── sink_inbox.rs   # HTTP sink receiver: token, batch parsing, retention
 │   └── handlers/
 │       ├── mod.rs          # Handler exports
 │       ├── cluster.rs      # GET /cluster
 │       ├── health.rs       # Health endpoints
 │       ├── messages.rs     # Message endpoints
+│       ├── sink.rs         # POST/GET /sink/inbound
 │       ├── streams.rs      # Stream management
 │       ├── topics.rs       # Topic management
 │       └── util.rs         # Shared handler utilities

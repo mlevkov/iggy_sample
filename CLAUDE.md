@@ -45,6 +45,7 @@ changes nothing.
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
 | `TRUSTED_PROXIES` | (none) | Comma-separated CIDR ranges for trusted reverse proxies |
 | `ALLOW_UNVERIFIED_CLIENT_IPS` | `false` | Accept `API_KEY` without `TRUSTED_PROXIES` (local development only) |
+| `SINK_INBOUND_TOKEN` / `SINK_INBOUND_TOKEN_FILE` | (none) | Bearer token of the HTTP sink receiver; unset leaves `/sink/inbound` unrouted |
 
 #### Trusted Proxy Configuration
 

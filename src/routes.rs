@@ -51,6 +51,8 @@
 //! - `/messages` - Message operations on default stream/topic
 //! - `/streams` - Stream management
 //! - `/streams/{stream}/topics` - Topic management
+//! - `/sink/inbound` - Receiver for the HTTP sink connector, routed only
+//!   when `SINK_INBOUND_TOKEN` is set; `POST` also needs that token
 
 use std::sync::Arc;
 
@@ -133,6 +135,18 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
             "/streams/{stream}/topics/{topic}",
             delete(handlers::delete_topic),
         );
+
+    // Receiver for the connectors demo's HTTP sink. Only the POST takes the
+    // sink's bearer token, checked before its body is read; the GET is a
+    // read like the others.
+    if state.sink_inbox.is_some() {
+        let receive = post(handlers::receive_sink_batch).layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::require_sink_token,
+        ));
+        router = router.route("/sink/inbound", receive.get(handlers::sink_deliveries));
+        info!("Sink receiver enabled at /sink/inbound");
+    }
 
     // =========================================================================
     // Apply Middleware Stack (order matters - applied bottom to top)

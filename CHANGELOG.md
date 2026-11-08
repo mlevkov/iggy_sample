@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `POST /sink/inbound` and `GET /sink/inbound`, the HTTP sink connector's
+  receiver, routed only when `SINK_INBOUND_TOKEN` (or
+  `SINK_INBOUND_TOKEN_FILE`) is set:
+  - The `POST` needs that token as a bearer credential, checked in constant
+    time before the body is read; refusals answer `401` and are counted.
+  - It accepts an `ndjson` batch whole or not at all (`400` names the bad
+    line, `415` for another content type).
+  - The `GET` reports lifetime counters and the newest deliveries, at most
+    100 and 1 MiB.
+  - Two new metrics: `iggy_sink_inbound_requests_total{outcome}` and
+    `iggy_sink_inbound_messages_total`.
+  - The token must be 32 to 1024 printable characters, and the `Config`
+    debug output redacts it.
 - Poll responses report `skipped`: messages left out because their payload
   is not an `Event`. Before, the response only shrank, with a log line.
 - A three-node cluster demo (ADR-0001 PR 3, with ADR-0002's per-topic

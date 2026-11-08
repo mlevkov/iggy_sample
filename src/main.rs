@@ -120,6 +120,10 @@ async fn run() -> Result<(), exitcode::ExitCode> {
     info!("  POST /streams          - Create stream");
     info!("  GET  /streams/{{name}}   - Get stream info");
     info!("  DELETE /streams/{{name}} - Delete stream");
+    if state.sink_inbox.is_some() {
+        info!("  POST /sink/inbound     - Receive HTTP sink batches (bearer token)");
+        info!("  GET  /sink/inbound     - What the HTTP sink delivered");
+    }
 
     // Start server with graceful shutdown. ConnectInfo exposes the peer
     // address to the middleware stack, which TRUSTED_PROXIES enforcement
