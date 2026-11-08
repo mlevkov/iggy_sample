@@ -395,7 +395,8 @@ scripts/connectors-demo.sh
 - **Signatures over the body only.** The source verifies a hex HMAC of the
   raw body (GitHub-style). Schemes that sign a composed string, such as
   Stripe's or Twilio's, need verification downstream.
-- **No message encryption.** It is out of scope (ADR-0001); upstream
-  documents it as a one-line `[encryption]` setting.
+- **No message encryption.** It is out of scope (ADR-0001). Since 0.10,
+  each encrypted stream has its own data key, chosen when the stream is
+  created; enabling encryption later covers only new streams.
 - **Single host, single runtime.** Endpoints registered on one runtime
   process are not shared with another.
