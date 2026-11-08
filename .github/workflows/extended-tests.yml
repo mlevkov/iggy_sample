@@ -21,6 +21,11 @@ on:
         required: false
         default: true
         type: boolean
+      run_connectors_tests:
+        description: "Run the connectors tests and demo"
+        required: false
+        default: true
+        type: boolean
       run_memory_check:
         description: "Run memory leak check (Valgrind)"
         required: false
@@ -116,6 +121,46 @@ jobs:
       - name: Stop the cluster
         if: always()
         run: docker compose -f docker-compose.cluster.yaml down -v
+
+  # ==========================================================================
+  # Connectors demo (ADR-0001 PR 4)
+  # ==========================================================================
+  # The main stack plus docker-compose.connectors.yaml: builds the connector
+  # image (it compiles the HTTP source and sink plugins from apache/iggy at
+  # the pinned commit), then runs the ignored connector tests and the demo.
+  # connectors-init generates every secret, so the job sets none.
+  connectors-tests:
+    name: Connectors Tests
+    runs-on: ubuntu-latest
+    # Two release builds: the gateway (LTO) and the plugins
+    timeout-minutes: 45
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.run_connectors_tests == 'true' }}
+    env:
+      # Read by every docker compose call below (paths separated by ':')
+      COMPOSE_FILE: docker-compose.yaml:docker-compose.connectors.yaml
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Start the stack with the connectors
+        run: docker compose up -d --build --wait --wait-timeout 900
+
+      - name: Connectors tests
+        run: cargo test --locked --test connectors_tests -- --ignored --test-threads=1
+
+      - name: Connectors demo
+        run: scripts/connectors-demo.sh
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs --no-color --tail 300
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
 
   # ==========================================================================
   # Memory leak detection (Valgrind)
@@ -252,7 +297,7 @@ jobs:
   summary:
     name: Extended Tests Summary
     runs-on: ubuntu-latest
-    needs: [benchmarks, cluster-tests, memory-check, miri, feature-matrix, doc-coverage]
+    needs: [benchmarks, cluster-tests, connectors-tests, memory-check, miri, feature-matrix, doc-coverage]
     if: always()
     steps:
       - name: Generate summary
@@ -263,6 +308,7 @@ jobs:
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Benchmarks | ${{ needs.benchmarks.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Cluster Tests | ${{ needs.cluster-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Connectors Tests | ${{ needs.connectors-tests.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Memory Check | ${{ needs.memory-check.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Miri | ${{ needs.miri.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Feature Matrix | ${{ needs.feature-matrix.result }} |" >> $GITHUB_STEP_SUMMARY

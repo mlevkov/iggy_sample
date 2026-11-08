@@ -43,7 +43,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (194 unit tests, 31 integration tests, 18 model tests, plus a metrics exporter smoke test)
+- Comprehensive test suite (285 unit tests, 42 integration tests, 18 model tests, a metrics exporter smoke test, plus cluster and connectors tests that run weekly against their compose stacks)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
@@ -162,7 +162,7 @@ Expected response:
 
 ### HTTP Sink Receiver (connectors demo)
 
-Routed only when `SINK_INBOUND_TOKEN` (or `SINK_INBOUND_TOKEN_FILE`) is set.
+Routed only when `SINK_INBOUND_TOKEN` (or `SINK_INBOUND_TOKEN_FILE`) is set; see the [connectors demo](docs/connectors-demo.md#outbound-the-sink).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -290,8 +290,9 @@ curl "http://localhost:8000/messages?partition_id=1&count=10&auto_commit=true"
 ```
 
 A poll returns the messages that are `Event`s. Anything else in the topic
-(another producer's payload, such as a webhook body) is left out and counted
-in `skipped`; `current_offset` moves past it.
+(another producer's payload, such as a webhook body from the
+[connectors demo](docs/connectors-demo.md#inbound-webhooks)) is left out and
+counted in `skipped`; `current_offset` moves past it.
 
 ### Send Batch Messages
 
@@ -468,13 +469,20 @@ iggy_sample/
 │   │   ├── pr.yml              # PR checks (size, commits, docs)
 │   │   ├── release.yml         # Release builds, GitHub release, docs deploy
 │   │   ├── verify-release.yml  # Checks each green release run
-│   │   └── extended-tests.yml  # Weekly cluster, benchmark and memory tests
+│   │   └── extended-tests.yml  # Weekly cluster, connectors, benchmark and memory tests
 │   ├── dependabot.yml          # Automated dependency updates
 │   └── pull_request_template.md
 ├── Cargo.toml              # Dependencies and metadata
 ├── Dockerfile              # Multi-stage build for production
 ├── docker-compose.yaml     # Local development setup
 ├── docker-compose.cluster.yaml # Three-node cluster demo (docs/cluster-demo.md)
+├── docker-compose.connectors.yaml # Connectors demo overlay (docs/connectors-demo.md)
+├── connectors/
+│   ├── Dockerfile          # Connector runtime 0.6.0 + HTTP source/sink plugins
+│   ├── init.sh             # Generates the demo's secrets and runtime token
+│   ├── entrypoint.sh       # Renders the runtime config from the templates
+│   ├── healthcheck.sh      # Healthy once both connectors run
+│   └── templates/          # Runtime and connector TOML templates
 ├── deny.toml               # License/security policy (cargo-deny)
 ├── .env.example            # Environment variable template
 ├── CLAUDE.md               # Project documentation for AI assistants
@@ -519,9 +527,11 @@ iggy_sample/
 │       └── util.rs         # Shared handler utilities
 ├── scripts/
 │   ├── cluster-failover-demo.sh # Kills the cluster leader under traffic
+│   ├── connectors-demo.sh   # Runs both connector flows end to end
 │   └── verify-release.sh    # Checks a release run step by step
 ├── tests/
 │   ├── cluster_tests.rs     # Three-node cluster tests (ignored; weekly)
+│   ├── connectors_tests.rs  # Connectors demo tests (ignored; weekly)
 │   ├── integration_tests.rs # End-to-end API tests
 │   ├── metrics_smoke_test.rs # Prometheus exporter smoke test
 │   └── model_tests.rs       # Unit tests for models
@@ -583,6 +593,20 @@ curl http://localhost:8001/cluster
 scripts/cluster-failover-demo.sh
 ```
 
+### Connectors
+
+`docker-compose.connectors.yaml` adds Iggy's connector runtime to the main
+stack, with upstream's HTTP source (signed webhooks into a `persisted` topic,
+host port 8085) and HTTP sink (events back to the gateway's
+`POST /sink/inbound`). It generates its own secrets. See the
+[connectors demo guide](docs/connectors-demo.md), including what each
+direction guarantees.
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.connectors.yaml up -d --build --wait
+scripts/connectors-demo.sh
+```
+
 ### Build Docker Image Manually
 
 ```bash
@@ -603,6 +627,7 @@ The project includes a complete observability stack for monitoring and managing 
 | **Iggy Web UI** | 3000 (`/ui`) | Dashboard for streams, topics, messages, users, served by the server |
 | **Prometheus** | 9090 | Metrics collection with 15-day retention |
 | **Grafana** | 3001 | Pre-configured dashboards for visualization |
+| **Connector runtime** | 8085 (webhooks) | With the connectors overlay; its API (8081) and the webhook admin listener (8086) stay on the compose network |
 
 ### Iggy Web UI
 
@@ -622,6 +647,7 @@ http://localhost:3000/ui with credentials `iggy/iggy`.
 Pre-configured dashboards are automatically provisioned:
 
 - **Iggy Overview**: Server status, request rates, message throughput, latency percentiles
+- **Iggy Connectors**: Connectors running, webhook requests, messages through each connector, the gateway's sink receiver, stage latency, errors (with the connectors overlay)
 
 Access at http://localhost:3001 with credentials `admin/admin`.
 
@@ -653,14 +679,16 @@ curl 'http://localhost:9090/api/v1/query?query=up{job="iggy"}'
 observability/
 ├── iggy-pat-init.sh             # Creates the /metrics scrape token
 ├── prometheus/
-│   └── prometheus.yml           # Scrape configuration
+│   ├── prometheus.yml           # Scrape configuration
+│   └── connectors.yml           # Connector scrape jobs (connectors overlay)
 └── grafana/
     └── provisioning/
         ├── datasources/
         │   └── datasources.yml  # Prometheus datasource
         └── dashboards/
             ├── dashboards.yml   # Dashboard provisioning
-            └── iggy-overview.json
+            ├── iggy-overview.json
+            └── iggy-connectors.json
 ```
 
 ### Adding OpenTelemetry (Optional)

@@ -75,7 +75,11 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 [dev-dependencies]
+# HMAC-SHA256 webhook signatures in tests/connectors_tests.rs; both are
+# already in the dependency tree through the Iggy SDK.
+hex = "0.4"
 reqwest = { version = "0.13", features = ["json"] }
+ring = "0.17"
 testcontainers = "0.28"
 # test-util unlocks tokio::time::pause()/advance() for the paused-clock
 # resilience matrix (TD-2026-07-01); dev-only so production builds are
