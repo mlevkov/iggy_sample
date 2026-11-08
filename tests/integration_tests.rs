@@ -769,6 +769,58 @@ async fn test_connection_events_mark_server_loss_without_a_ping() {
         .expect("the follower task must not panic");
 }
 
+/// A call to a server that is down ends as a connection error, not as a
+/// timeout (ADR-0003).
+///
+/// `IGGY_CONNECTION_STRING` sets no `reconnection_retries`, so the gateway
+/// caps them at 3. The SDK gives up reconnecting within about 15 s and
+/// answers `NotConnected`, which is a connection error: it opens the circuit
+/// breaker and fails later requests at once. With the SDK's default,
+/// `unlimited`, the call would instead outlive the 25 s operation timeout
+/// and fail as `OperationTimeout`, and at the SDK's own 30 s deadline as
+/// `TransientNotAccepted`. The breaker counts neither as the server being
+/// down.
+#[tokio::test]
+async fn test_a_call_to_a_stopped_server_ends_as_a_connection_error() {
+    use iggy_sample::{AppError, Config, IggyClientWrapper};
+
+    let (container, iggy) = IggyContainer::start().await;
+    let config = Config {
+        iggy_connection_string: iggy.connection_string(),
+        operation_timeout: Duration::from_secs(25),
+        // One quick reconnect session, so the call returns soon after the
+        // SDK gives up
+        max_reconnect_attempts: 1,
+        reconnect_base_delay: Duration::from_millis(100),
+        reconnect_max_delay: Duration::from_secs(1),
+        metrics_port: 0,
+        ..Config::default()
+    };
+    let wrapper = IggyClientWrapper::new(config)
+        .await
+        .expect("wrapper should connect");
+    wrapper
+        .list_streams()
+        .await
+        .expect("a call while the server is up");
+
+    container.stop().await.expect("stop the Iggy container");
+    let started = std::time::Instant::now();
+    let result = wrapper.list_streams().await;
+    let elapsed = started.elapsed();
+
+    let error = result.expect_err("the server is down");
+    assert!(
+        matches!(
+            error,
+            AppError::Disconnected(_)
+                | AppError::ConnectionFailed(_)
+                | AppError::ConnectionReset(_)
+        ),
+        "expected a connection error after {elapsed:?}, got {error:?}"
+    );
+}
+
 /// A send whose call is dropped after its request left the client must not
 /// block later sends to the same partition.
 ///

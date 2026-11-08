@@ -39,9 +39,12 @@
 //! # Connection Resilience (two layers)
 //!
 //! The SDK itself provides transport-level reconnection for connection-string
-//! clients (enabled by default, unlimited retries at ~1s intervals). During an
-//! outage most operations therefore block inside the SDK rather than erroring,
-//! and surface here as timeouts. On top of that, this wrapper adds:
+//! clients, with jittered backoff from 1 s. While it is still retrying, an
+//! operation waits inside the SDK, up to its 30 s deadline, rather than
+//! erroring. The gateway caps the retries at 3 unless the connection string
+//! sets them (`seeds::DEFAULT_RECONNECTION_RETRIES`, ADR-0003), so during a
+//! longer outage the SDK answers `NotConnected` instead. On top of that, this
+//! wrapper adds:
 //! - Per-operation timeouts (so requests never block unboundedly in the SDK)
 //! - Circuit breaking driven by classified connection errors AND timeouts
 //! - Live health probes (`health_check`) that keep the connection state, and

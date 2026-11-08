@@ -22,10 +22,9 @@
 //!   transport reconnection succeeds. So an outage the ping recorded ends as
 //!   soon as the SDK is back, not up to one health-check interval later.
 //! - **Loss publishes `Disconnected` as soon as the last link closes**, while
-//!   the SDK goes on redialling, and again when a bounded reconnect sweep
-//!   gives up. So with connection strings' default
-//!   `reconnection_retries=unlimited` the event is a real loss signal, and
-//!   the integration suite asserts it with that default.
+//!   the SDK goes on redialling, and again when its reconnect retries run
+//!   out. So the event is a real loss signal whatever the retry setting, and
+//!   the integration suite asserts it.
 //!
 //! SDK 0.11 published `Disconnected` only when a bounded sweep gave up, so
 //! with unlimited retries the ping was the only loss signal. The ping stays
@@ -42,12 +41,10 @@
 //! reconnect, breaker and per-request timeouts stay, and events only make the
 //! connection state fresher.
 //!
-//! Bounding the SDK's retries (`reconnection_retries=N` in the connection
-//! string) would hand outage detection to the SDK: callers would get
-//! `CannotEstablishConnection` instead of blocking until a timeout, and the
-//! breaker would open on classified connection errors. That changes request
-//! behaviour during every outage, so it is left as a separate decision rather
-//! than a default set here.
+//! The gateway does cap the SDK's reconnection retries by default
+//! (`seeds::DEFAULT_RECONNECTION_RETRIES`, ADR-0003). Once they run out, the
+//! SDK answers `NotConnected` instead of holding a call to its 30 s deadline,
+//! and the breaker opens on that classified connection error.
 //!
 //! # Client swaps
 //!
