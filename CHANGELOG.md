@@ -297,6 +297,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `astral-tokio-tar` unmaintained with no patched version. The crate is
   dev-only (pulled in by `testcontainers`, whose latest release still uses
   it), so `deny.toml` now accepts the advisory with that reasoning
+- PR Checks' Coverage Diff job never read the coverage total. It looked for
+  a `Total coverage:` line that cargo-llvm-cov does not print, so every run
+  logged `unknown%` and its warning below 60% could not fire. It now reads
+  line coverage from the summary's `TOTAL` row (90.11% on #85) and warns
+  when it finds none
 
 ### Security
 
