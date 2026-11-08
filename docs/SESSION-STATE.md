@@ -23,6 +23,13 @@ them too.
 |---|---|---|---|
 | #85 | `7adfd66` | `4ed97d0` | This file with State 1; corrected statements in ADR-0002 and ADR-0003 |
 | #86 | `d24a269` | `03d5eaa` | v0.5.0: Coverage Diff fix, Codecov upload dropped (TD-2026-09-03), version 0.5.0 |
+| #87 | `4e11946` | `e466d44` | This block, State 2 |
+| #88 | `2ca3962` | `4fa5d35` | Integration fixture: the container's port below the ephemeral range ("Cannot bind" flake) |
+| #89 | `e4370c0` | `fcd4fa0` | Integration fixture: one image pull per run, with retries (pull flake) |
+
+#87 to #89 came after the tag, so none is in v0.5.0. The changelog's
+`[Unreleased]` holds the two fixes from #88 and #89; #87 changed only this
+file.
 
 **v0.5.0 is released.**
 - **Tag:** annotated `v0.5.0` on `d24a269`, with the message "v0.5.0: Iggy
@@ -82,6 +89,12 @@ user says the Iggy maintainer will comment on them later. Post nothing.
   shows the version line in `Cargo.toml` and `Cargo.lock`, plus #85's
   doc-comment edit in `src/iggy_client/seeds.rs`, and no code. So State
   1's local figures still stand. None was re-run.
+- **After the tag, only the integration tests changed.**
+  `git diff --stat d24a269 e4370c0 -- <the same paths>` lists
+  `tests/integration_tests.rs` alone (#88 and #89). The integration suite
+  is now 44 tests. It passed 44 of 44 locally after each fix, and in both
+  Integration Tests and Code Coverage on #89 (CI run 42519561167), with no
+  pull retried.
 - **The release binary:** Verify Release ran it on Linux (exit 78 under
   `OPERATION_TIMEOUT_SECS=0`, version logged). A local debug build of the
   `03d5eaa` tree did the same before the tag was pushed.
@@ -193,7 +206,9 @@ hold. Treat both probe tables as settled; do not re-derive those findings.
 
 State: v0.5.0 is released. The annotated tag is on d24a269, and Release
 (42514350003) and Verify Release (42515088161) are green. main is at
-d24a269, or at the later docs-only merge that added State 2. Iggy server
+e4370c0 (#89), or at the docs-only merge that changed this line. Since
+the tag, #87 added State 2, and #88 and #89 fixed the integration
+fixture's two flakes, in test code only. Iggy server
 0.10.0, SDK 0.12.0, connectors 0.6.0. There is no feature work in flight,
 and no tech-debt record is bound to the next release. Nothing is due
 before 2026-11-09 or 2026-11-15. If the user asked for nothing, ask; do
