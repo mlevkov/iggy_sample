@@ -312,31 +312,49 @@ which changed the sink ABI.
 
 ## Known Issues
 
-Found while building this demo, against the pinned releases:
+Found while building this demo against the pinned releases, and filed
+upstream:
 
-- **SDK 0.12.0's consumer stalls on a multi-partition topic that starts
-  empty.**
-  - **What happens:** an `IggyConsumer` in a consumer group with deferred
-    polling (the runtime's sink consumer) does not deliver the first message
-    written after it starts, if every partition was empty when it started.
-  - **When it clears:** the message arrives once another partition receives
-    one. From then on, delivery is prompt, even into partitions still empty.
-  - **What it does not affect:** a single-partition topic, or partitions
-    that already hold a message. The server's deferred poll is also
-    unaffected: a raw `poll_messages` with `max_wait` returns the message at
-    once.
+- **An `OnRead` consumer group holds messages next to an empty partition**
+  ([apache/iggy#4784](https://github.com/apache/iggy/issues/4784)).
+  - **What happens:** SDK 0.12.0's `IggyConsumer`, in a consumer group
+    with `CommitPolicy::OnRead` and a `Next` start, does not fetch a
+    partition while another partition in its readiness group (as the server
+    reports them) has never held a message. The runtime's sink consumer is
+    one of these: on master, a sink's default `at_most_once` guarantee polls
+    this way.
+  - **Why:** the reader checks each new partition to resolve where `Next`
+    starts. On an empty partition that check repeats every `max_wait`, and
+    while it is pending the reader does not start the fetch that would
+    deliver the group's other partitions.
+  - **When it clears:** once the empty partition receives a message. From
+    then on, delivery is prompt. If it never does, the messages next to it
+    are never delivered.
+  - **What it does not affect:** a single-partition topic, partitions that
+    all hold data, and the server's deferred read: a raw `poll_messages`
+    with `max_wait` returns the message at once.
   - **Here:** on a fresh stack, `events` has three empty partitions, so the
     demo and the tests send three events, which the gateway spreads over
     all three. A single event can wait indefinitely.
-- **A plugin's `open()` error is not logged.**
-  - **What happens:** the connector SDK turns a failed `open()` into a
-    status code. The runtime then logs only `Plugin initialization failed`,
-    and the HTTP sink does not log the reason itself.
-  - **How it showed:** the runtime image has no CA certificates, and the
-    sink's HTTP client refuses to build without system roots, even for an
-    `http://` URL. The image installs `ca-certificates` for that reason.
-- **The HTTP sink's README examples use `poll_interval`.** Runtime 0.6.0
-  refuses that setting; use `max_wait` (default 1 s) and `min_count`.
+- **The runtime image has no CA certificates**
+  ([apache/iggy#4787](https://github.com/apache/iggy/issues/4787)).
+  - **What happens:** reqwest, with rustls' platform verifier, refuses to
+    build a client without system roots, even for an `http://` URL ("No CA
+    certificates were loaded from the system").
+  - **Effect:** the HTTP sink cannot open, and the runtime itself will not
+    start with `[state] storage = "http"`. The image here installs
+    `ca-certificates` for that reason.
+- **A plugin's `open()` error is not logged**
+  ([apache/iggy#4786](https://github.com/apache/iggy/issues/4786)). The
+  connector SDK turns a failed `open()` into a status code. The runtime then
+  logs only `Plugin initialization failed`, and the HTTP sink does not log
+  the reason itself.
+- **Errors from the server print placeholder values**
+  ([apache/iggy#4785](https://github.com/apache/iggy/issues/4785)). A reply
+  carries only a status code, and the SDK fills the error's fields with
+  defaults, such as "Stream with ID: 0 was not found." This is why the
+  gateway checks `max_topic_size` against the segment size itself
+  ([Durable Storage Guide](durable-storage-guide.md)).
 
 ## Tests
 

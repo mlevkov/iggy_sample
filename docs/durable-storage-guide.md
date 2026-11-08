@@ -265,9 +265,10 @@ Past it, the oldest sealed segments are deleted.
   behind it.
 - **A finite cap must be at least the topic's segment size.** With the default
   1 GiB segments, a cap below 1 GiB is refused. Set a smaller `segment_size`
-  for a smaller cap. The server refuses such a topic too, but its 0.10 error
-  message prints neither value, so the gateway checks first and says what the
-  floor is.
+  for a smaller cap. The server refuses such a topic too, but the error the
+  client receives prints placeholder values instead of the real ones
+  ([apache/iggy#4785](https://github.com/apache/iggy/issues/4785)), so the
+  gateway checks first and says what the floor is.
 
 Both policies can be active at once.
 

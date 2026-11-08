@@ -169,7 +169,8 @@ ADR-0002). `src/models/topic_options.rs` holds the whole contract:
   object or from `IGGY_TOPIC_*`. `validate()` checks each option against the
   server's bounds (the SDK's `iggy_common` constants and validators) and the
   rules that combine options: a finite `max_topic_size` must be at least the
-  segment size (the server's own error for that prints neither value), and
+  segment size (the server's own error for that reaches the client with
+  placeholder values, apache/iggy#4785), and
   preallocation is capped across partitions. Iggy's spellings for "server
   default" (`"server_default"`, `"0"`) are refused: omitting the option says
   that, and keeps read-back provenance honest.
@@ -233,10 +234,10 @@ code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
   at the exact commit of the runtime image: they share a C ABI, so bump
   `IGGY_COMMIT` and the runtime tag together. The runtime image's revision
   label names a later commit, but the binary is release code.
-- **The runtime image needs `ca-certificates`.** Without system roots, the
-  HTTP sink's client fails to build. The connector SDK does not log a
-  plugin's `open()` error, so the runtime logs only "Plugin initialization
-  failed".
+- **The runtime image needs `ca-certificates`** (apache/iggy#4787).
+  Without system roots, the HTTP sink's client fails to build. The
+  connector SDK does not log a plugin's `open()` error (apache/iggy#4786),
+  so the runtime logs only "Plugin initialization failed".
 - **Plugin secrets come from rendered TOML, not the environment.** Runtime
   env overrides reach top-level plugin fields only. `connectors/init.sh`
   generates the secrets into the `connectors_secrets` and `iggy_secrets`
@@ -253,10 +254,11 @@ code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
   buffered in memory.
 - **The poll API counts non-`Event` payloads in `skipped`** rather than
   dropping them silently. The webhook topic takes any body.
-- **Known SDK 0.12.0 stall.** A consumer group that starts on a
-  multi-partition topic whose partitions are all empty holds the first
-  message until a second partition receives one. The demo and tests send
-  three events.
+- **Known SDK 0.12.0 stall** (apache/iggy#4784). An `OnRead` consumer
+  group, such as the sink's, does not fetch a partition while another
+  partition in its readiness group has never held a message. On a fresh
+  stack every partition is empty, so the demo and tests send three events,
+  one per partition.
 - `tests/connectors_tests.rs` is `#[ignore]`d and runs weekly in Extended
   Tests with `scripts/connectors-demo.sh`.
 

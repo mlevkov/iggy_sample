@@ -40,8 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The guide states each direction's delivery semantics: the sink delivers
     each batch at most once (offsets are stored when polled), and its HTTP
     retries can duplicate a batch. A source `200` means buffered in memory.
-    It also records an SDK 0.12.0 consumer stall on topics whose partitions
-    all start empty.
+    It also records the upstream issues found on the way: an SDK 0.12.0
+    consumer stall next to an empty partition (apache/iggy#4784), the
+    runtime image's missing CA certificates (#4787), plugin `open()` errors
+    that are never logged (#4786), and server errors that print placeholder
+    values (#4785).
 - `POST /sink/inbound` and `GET /sink/inbound`, the HTTP sink connector's
   receiver, routed only when `SINK_INBOUND_TOKEN` (or
   `SINK_INBOUND_TOKEN_FILE`) is set:

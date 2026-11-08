@@ -266,9 +266,9 @@ async fn test_a_webhook_that_is_not_an_event_is_counted_as_skipped() {
 }
 
 /// Three events, which the gateway spreads over the topic's three
-/// partitions: with SDK 0.12.0, a consumer group that starts on a topic whose
-/// partitions are all empty holds the first message until a second partition
-/// receives one (docs/connectors-demo.md, Known issues).
+/// partitions: with SDK 0.12.0, an `OnRead` consumer group does not fetch a
+/// partition while another in its readiness group has never held a message
+/// (apache/iggy#4784; docs/connectors-demo.md, Known Issues).
 #[tokio::test]
 #[ignore = "needs the docker-compose.connectors.yaml stack"]
 async fn test_events_sent_through_the_gateway_come_back_through_the_sink() {
