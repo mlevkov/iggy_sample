@@ -193,6 +193,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The Iggy client's tracing span recorded the whole connection string,
+  password included, at `info` level on every startup. It no longer
+  records it
 - The auth brute-force block is now checked before the API key is compared.
   The key used to be compared first, so a blocked IP still got an answer to
   every guess (200 for the right key, 429 for a wrong one), and the block

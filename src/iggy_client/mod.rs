@@ -224,7 +224,8 @@ impl IggyClientWrapper {
     /// - The connection string is invalid
     /// - The server is unreachable within the operation timeout
     /// - Authentication fails
-    #[instrument(skip(config), fields(connection_string = %config.iggy_connection_string))]
+    // Never record the connection string: it holds the credentials.
+    #[instrument(skip(config))]
     pub async fn new(config: Config) -> AppResult<Self> {
         info!("Initializing Iggy client");
 
