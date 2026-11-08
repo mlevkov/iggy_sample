@@ -38,15 +38,16 @@ struct IggyContainer {
 }
 
 impl IggyContainer {
-    // Server release paired with the Rust SDK 0.11 line (see Cargo.toml).
-    // 0.9 speaks only the VSR wire protocol, so the two move together.
+    // Server release paired with the Rust SDK 0.12 line (see Cargo.toml).
+    // The SDK speaks only its own release's wire protocol, so the two move
+    // together.
     const IMAGE: &'static str = "apache/iggy";
-    const TAG: &'static str = "0.9.0";
+    const TAG: &'static str = "0.10.0";
 
     /// Start an Iggy container and return the mapped TCP port
     async fn start() -> (ContainerAsync<GenericImage>, Self) {
-        // The server advertises its address plus its OWN TCP port, and SDK
-        // 0.11 dials that endpoint on failover even against a single node.
+        // The server advertises its address plus its OWN TCP port, and the
+        // SDK dials that endpoint on failover even against a single node.
         // So the container listens on the same port the host maps, chosen
         // free up front. With a fixed in-container 8090 the advertised
         // endpoint was the host's 127.0.0.1:8090, and a client whose
@@ -58,8 +59,8 @@ impl IggyContainer {
         // ImageExt methods (with_env_var, with_privileged) due to type transformations
         let container = GenericImage::new(Self::IMAGE, Self::TAG)
             .with_exposed_port(tcp_port.tcp())
-            // 0.9 no longer prints "Iggy server is running"; the HTTP
-            // listener is the last listener to come up.
+            // Since 0.9 the server no longer prints "Iggy server is running";
+            // the HTTP listener is the last listener to come up.
             .with_wait_for(WaitFor::message_on_stdout("server HTTP listener started"))
             // Root credentials (the server generates a random password by default)
             .with_env_var("IGGY_ROOT_USERNAME", "iggy")
@@ -69,13 +70,12 @@ impl IggyContainer {
             .with_env_var("IGGY_TCP_ADDRESS", format!("0.0.0.0:{tcp_port}"))
             .with_env_var("IGGY_HTTP_ADDRESS", "0.0.0.0:3000")
             .with_env_var("IGGY_QUIC_ADDRESS", "0.0.0.0:8080")
-            // 0.9 refuses to boot on a wildcard bind unless it knows the
-            // address clients dial: loopback, at the identity-mapped port.
+            // The server refuses to boot on a wildcard bind unless it knows
+            // the address clients dial: loopback, at the identity-mapped port.
             .with_env_var("IGGY_NODE_ADVERTISED_ADDRESS", "127.0.0.1")
             .with_mapped_port(tcp_port, tcp_port.tcp())
-            // The default "numa:auto" aborts where the host exposes no NUMA
-            // topology (Docker Desktop's VM among them).
-            .with_env_var("IGGY_SHARDING_CPU_ALLOCATION", "all")
+            // On by default, bound to loopback, and unused by the tests.
+            .with_env_var("IGGY_WEBSOCKET_ENABLED", "false")
             .with_startup_timeout(Duration::from_secs(120))
             .with_privileged(true)
             .start()
@@ -520,8 +520,8 @@ async fn poll_count(fixture: &TestFixture, query: &str) -> u64 {
     body.get("count").and_then(|v| v.as_u64()).expect("count")
 }
 
-/// Pins the SDK semantics of PollingStrategy::next + auto_commit (0.10, and
-/// 0.11 against server 0.9): a poll
+/// Pins the SDK semantics of PollingStrategy::next + auto_commit (SDK 0.10
+/// and 0.11, and 0.12's `CommitPolicy::OnRead` against server 0.10): a poll
 /// without an explicit offset resumes from the consumer's committed offset,
 /// so a second poll must not re-deliver the first poll's messages.
 #[tokio::test]
@@ -591,10 +591,9 @@ async fn test_poll_without_offset_advances_committed_offset() {
     );
 }
 
-/// Pins the SDK semantics of Partitioning::messages_key_str (0.10, and 0.11
-/// against server 0.9): all
-/// messages sharing a partition key must land in exactly one partition
-/// (per-entity ordering guarantee).
+/// Pins the SDK semantics of Partitioning::messages_key_str (SDK 0.10, 0.11
+/// and 0.12, the last against server 0.10): all messages sharing a partition
+/// key must land in exactly one partition (per-entity ordering guarantee).
 #[tokio::test]
 async fn test_same_partition_key_routes_to_single_partition() {
     let fixture = TestFixture::new().await;
@@ -701,11 +700,11 @@ async fn test_wrapper_defaults_idempotent_and_health_check_live() {
 /// (AppState spawns that, not the wrapper), so only the event follower can
 /// clear the connected flag; without it this test times out.
 ///
-/// SDK 0.11's TCP client publishes `Disconnected` only when its reconnect
-/// sweep gives up, so the connection string bounds the SDK's retries. With
-/// the default unlimited retries the SDK publishes nothing while it keeps
-/// redialling (observed: a dial a second, no event), and the periodic ping
-/// remains the only loss signal; see `iggy_client::events`.
+/// The connection string keeps the SDK's default unlimited reconnection
+/// retries. SDK 0.12 publishes `Disconnected` as soon as its last link to the
+/// server closes, while it goes on redialling. SDK 0.11 published it only
+/// when a bounded reconnect sweep gave up, so this test used to bound the
+/// retries; see `iggy_client::events`.
 #[tokio::test]
 async fn test_connection_events_mark_server_loss_without_a_ping() {
     use iggy_sample::{Config, IggyClientWrapper};
@@ -714,10 +713,7 @@ async fn test_connection_events_mark_server_loss_without_a_ping() {
     let (container, iggy) = IggyContainer::start().await;
     let proxy = CuttableProxy::start(iggy.tcp_port).await;
     let config = Config {
-        iggy_connection_string: format!(
-            "iggy://iggy:iggy@127.0.0.1:{}?reconnection_retries=2&reconnection_interval=200ms",
-            proxy.port
-        ),
+        iggy_connection_string: format!("iggy://iggy:iggy@127.0.0.1:{}", proxy.port),
         operation_timeout: Duration::from_secs(5),
         metrics_port: 0,
         ..Config::default()
@@ -740,8 +736,8 @@ async fn test_connection_events_mark_server_loss_without_a_ping() {
     container.stop().await.expect("stop the Iggy container");
     proxy.cut();
 
-    // The SDK finds the dropped connection on its next heartbeat (every 5 s)
-    // and gives up after two 200 ms retries.
+    // The SDK publishes Disconnected when the proxy closes its link, without
+    // waiting for a heartbeat or for its reconnect sweep to end.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while wrapper.is_connected() {
         assert!(

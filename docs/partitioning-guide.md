@@ -734,10 +734,11 @@ max_size = "unlimited"
 message_expiry = "none"
 ```
 
-> **Server 0.9 note:** this section describes 0.8. In 0.9 the messages
-> cleaner runs by default (`data_maintenance.messages.cleaner_enabled = true`,
-> every minute), and retention moves with the other storage settings to
-> per-topic options; the rewrite follows in the next PR (ADR-0001).
+> **Server 0.9 and later:** this section describes 0.8. Since 0.9 the
+> messages cleaner runs by default (`data_maintenance.messages.cleaner_enabled
+> = true`, every minute), and retention moves with the other storage settings
+> to per-topic options; the rewrite follows in the per-topic options PR
+> (ADR-0001, ADR-0002).
 
 Size-based cleanup is automatic in server 0.8.0: once a topic reaches 90% of
 `max_size`, the oldest **sealed** segments are deleted (there is no separate

@@ -2,11 +2,13 @@
 
 A comprehensive guide to configuring Apache Iggy for durable, production-ready message storage.
 
-> **Out of date for server 0.9.0, which this repository now runs.** 0.9
-> flattened `[system]` (the `IGGY_SYSTEM_*` variables below lose `SYSTEM_`),
-> rejects `enforce_fsync` at boot, and moved segment and flush settings to
-> per-topic options with a `replicated`/`persisted` durability policy. The
-> rewrite is the next PR in [ADR-0001](adr/0001-iggy-0.9-upgrade-and-demos.md);
+> **Out of date for server 0.10.0, which this repository now runs.** Since
+> 0.9 the server flattens `[system]` (the `IGGY_SYSTEM_*` variables below lose
+> `SYSTEM_`), rejects `enforce_fsync` at boot, and takes segment and flush
+> settings as per-topic options with a `replicated`/`persisted` durability
+> policy. The rewrite is the per-topic options PR in
+> [ADR-0001](adr/0001-iggy-0.9-upgrade-and-demos.md), which
+> [ADR-0002](adr/0002-iggy-0.10-before-topic-options.md) builds on 0.10;
 > until then, read the configuration below as 0.8 reference only.
 
 > **Validated key-by-key against Apache Iggy server 0.8.0** (upstream tag `server-0.8.0`,

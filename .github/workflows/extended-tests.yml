@@ -80,7 +80,7 @@ jobs:
     services:
       iggy:
         # Keep in lockstep with docker-compose.yaml and tests/integration_tests.rs
-        image: apache/iggy:0.8.0
+        image: apache/iggy:0.10.0
         ports:
           - 8090:8090
         env:
@@ -90,6 +90,12 @@ jobs:
           IGGY_ROOT_PASSWORD: iggy
           IGGY_TCP_ADDRESS: 0.0.0.0:8090
           IGGY_HTTP_ADDRESS: 0.0.0.0:3000
+          # The server refuses a wildcard bind unless it knows the address
+          # clients dial: the runner reaches it at localhost, port mapped 1:1
+          IGGY_NODE_ADVERTISED_ADDRESS: 127.0.0.1
+          # On by default, bound to loopback, and unused
+          IGGY_QUIC_ENABLED: "false"
+          IGGY_WEBSOCKET_ENABLED: "false"
         # --privileged: the io_uring-based server (0.6+) cannot create its
         # runtime under the default seccomp profile ("Operation not
         # permitted"). Healthcheck uses the bundled iggy CLI - the image

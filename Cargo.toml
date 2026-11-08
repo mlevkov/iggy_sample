@@ -27,11 +27,11 @@ tower-http = { version = "0.7", features = ["cors", "trace", "request-id", "prop
 tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
-# Message streaming (Apache Iggy Rust SDK; 0.10 pairs with the server-0.8 line)
-iggy = "0.11.0"
+# Message streaming (Apache Iggy Rust SDK; 0.12 pairs with the server-0.10 line)
+iggy = "0.12.0"
 # Same version as `iggy` (one upstream release). Named directly only for
 # `DiagnosticEvent`, which the `iggy` prelude does not re-export.
-iggy_common = "0.11.0"
+iggy_common = "0.12.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

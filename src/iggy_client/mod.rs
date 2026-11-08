@@ -198,6 +198,17 @@ pub struct IggyClientWrapper {
     circuit_breaker: Arc<CircuitBreaker>,
 }
 
+/// Options for every topic this service creates: `partitions` partitions,
+/// no message expiry and no size cap.
+fn topic_create_options(partitions: u32) -> TopicCreateOptions {
+    TopicCreateOptions {
+        partitions_count: Some(partitions),
+        message_expiry: Some(IggyExpiry::NeverExpire),
+        max_topic_size: Some(MaxTopicSize::Unlimited),
+        ..Default::default()
+    }
+}
+
 /// Clamp a requested per-request deadline to the configured global timeout:
 /// a client may SHORTEN the deadline, never extend it.
 fn clamp_deadline(requested: Duration, global: Duration) -> Duration {
@@ -244,15 +255,16 @@ impl IggyClientWrapper {
         tokio::time::timeout(timeout, wrapper.connect())
             .await
             .map_err(|_| {
-                // Against a 0.8 server, SDK 0.11 connects and then waits
-                // forever for a sign-in reply it cannot parse: no error, just
-                // this timeout. Say so, since it is the likeliest cause once
-                // the address is known to be right.
+                // A server from another release can also end here: SDK 0.11
+                // waited forever for a 0.8 server's sign-in reply. SDK 0.12
+                // fails fast against 0.9 instead ("Invalid format"), and a
+                // newer server refuses it with IncompatibleProtocolVersion,
+                // but say so here too, since a mismatch is the likeliest cause
+                // once the address is known to be right.
                 AppError::ConnectionFailed(format!(
                     "Initial connection timed out after {:?}. If the server is \
-                     reachable, check that it runs Iggy server 0.9.x: this build's \
-                     SDK (0.11) speaks only the 0.9 wire protocol, and against a \
-                     0.8 server sign-in hangs instead of failing",
+                     reachable, check that it runs Iggy server 0.10.x: this build's \
+                     SDK (0.12) speaks only the 0.10 wire protocol",
                     timeout
                 ))
             })??;
@@ -443,7 +455,7 @@ impl IggyClientWrapper {
                     // the old one. Without shutdown() the old client's detached
                     // heartbeat task keeps running and can re-establish a
                     // zombie connection to the server (observed on SDK 0.10;
-                    // 0.11 clients still run a heartbeat task).
+                    // 0.12 clients still run a keepalive task that redials).
                     let mut client_guard = self.client.write().await;
                     let old_client = std::mem::replace(&mut *client_guard, new_client);
                     drop(client_guard);
@@ -560,7 +572,8 @@ impl IggyClientWrapper {
                 }
                 Ok(None) => {
                     info!(stream = name, "Creating stream");
-                    match client.create_stream(name).await {
+                    let options = StreamCreateOptions::default();
+                    match client.create_stream(name, &options).await {
                         Ok(_) => Ok(()),
                         // Lost a creation race (e.g. two replicas starting
                         // simultaneously) - the stream exists, which is all
@@ -599,19 +612,8 @@ impl IggyClientWrapper {
                 }
                 Ok(None) => {
                     info!(stream, topic, partitions, "Creating topic");
-                    match client
-                        .create_topic(
-                            &stream_id,
-                            topic,
-                            &TopicCreateOptions {
-                                partitions_count: Some(partitions),
-                                message_expiry: Some(IggyExpiry::NeverExpire),
-                                max_topic_size: Some(MaxTopicSize::Unlimited),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                    {
+                    let options = topic_create_options(partitions);
+                    match client.create_topic(&stream_id, topic, &options).await {
                         Ok(_) => Ok(()),
                         // Lost a creation race - the topic exists, which is
                         // all this method guarantees.
@@ -840,15 +842,28 @@ impl IggyClientWrapper {
                 None => PollingStrategy::next(),
             };
 
+            // OnRead is 0.12's auto-commit: the server stores the offset of
+            // the last message as part of the read. The byte cap stays at the
+            // SDK default (1 MiB), so a large `count` can return fewer
+            // messages; `current_offset` tells the caller where to resume.
+            let options = PollOptions {
+                count: params.count,
+                commit: if params.auto_commit {
+                    CommitPolicy::OnRead
+                } else {
+                    CommitPolicy::Manual
+                },
+                ..PollOptions::default()
+            };
+
             let messages = client
                 .poll_messages(
                     &stream_id,
                     &topic_id,
-                    Some(params.partition_id),
+                    params.partition_id,
                     &consumer,
                     &strategy,
-                    params.count,
-                    params.auto_commit,
+                    options,
                 )
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::PollError))?;
@@ -950,8 +965,9 @@ impl IggyClientWrapper {
         self.with_reconnect(|| async {
             let client = self.client.read().await;
 
+            let options = StreamCreateOptions::default();
             client
-                .create_stream(name)
+                .create_stream(name, &options)
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::StreamError))?;
 
@@ -968,17 +984,9 @@ impl IggyClientWrapper {
             let client = self.client.read().await;
             let stream_id = to_identifier(stream, "stream")?;
 
+            let options = topic_create_options(partitions);
             client
-                .create_topic(
-                    &stream_id,
-                    topic,
-                    &TopicCreateOptions {
-                        partitions_count: Some(partitions),
-                        message_expiry: Some(IggyExpiry::NeverExpire),
-                        max_topic_size: Some(MaxTopicSize::Unlimited),
-                        ..Default::default()
-                    },
-                )
+                .create_topic(&stream_id, topic, &options)
                 .await
                 .map_err(|e| classify_iggy_error(e, AppError::TopicError))?;
 
