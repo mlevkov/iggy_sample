@@ -276,6 +276,12 @@ impl Config {
     ///
     /// Returns `AppError::ConfigError` if validation fails.
     fn validate(&self) -> AppResult<()> {
+        // Several comma-separated server addresses are seeds, tried in order
+        // (`iggy_client::seeds`). The reason never repeats the string, which
+        // holds credentials.
+        crate::iggy_client::seeds::expand(&self.iggy_connection_string)
+            .map_err(|reason| AppError::ConfigError(format!("IGGY_CONNECTION_STRING: {reason}")))?;
+
         // Validate delay ordering
         if self.reconnect_base_delay > self.reconnect_max_delay {
             return Err(AppError::ConfigError(format!(

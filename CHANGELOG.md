@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `replication_factor` topic option (1 to 32; the server refuses more
   than its node count) and `IGGY_TOPIC_REPLICATION_FACTOR`. Reads report the
   stored factor, which is the node count under the default `"all"`
+- `IGGY_CONNECTION_STRING` accepts several comma-separated server addresses
+  as seeds. Startup tries each in order with an equal share of
+  `OPERATION_TIMEOUT_SECS`, and reconnects start from the seed that worked
+  last. An SDK 0.12 connection string names one server; once signed in, the
+  SDK follows the cluster roster itself. Logs name seed addresses only,
+  never the connection string, which holds the credentials
 - PR Checks validates `.github/dependabot.yml` against Dependabot's schema
   (`check-jsonschema==0.38.2`, "Dependabot Config" job), and Dependabot now
   proposes the Dockerfile's base-image updates (TD-2026-09-02)
@@ -88,6 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A malformed `IGGY_CONNECTION_STRING` (no scheme or credentials, an empty
+  or repeated address) now fails configuration validation, without
+  repeating the string. A failed startup connection lists each seed's error
 - **Breaking:** `POST /streams/{stream}/topics` refuses unknown fields with
   `422`, at the top level and inside `options`. Unknown fields were ignored,
   so a misspelt or misplaced option would have left the topic on a server

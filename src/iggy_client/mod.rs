@@ -33,6 +33,8 @@
 //! - `helpers` - Utility functions for identifier conversion and jitter
 //! - `resilience` - Timeout/breaker/reconnect-retry composition (`run_resilient`)
 //! - `scopeguard` - RAII guard for cleanup on drop
+//! - `seeds` - Ordered server addresses from the connection string, tried in
+//!   turn when a client is built (startup and each reconnect)
 //!
 //! # Connection Resilience (two layers)
 //!
@@ -71,6 +73,7 @@ mod lanes;
 mod params;
 mod resilience;
 mod scopeguard;
+pub(crate) mod seeds;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -99,6 +102,7 @@ pub use params::PollParams;
 // NON-connection variant) is too easy to violate to expose publicly.
 use helpers::{classify_connect_error, classify_iggy_error};
 use lanes::{send_settled, settled};
+use seeds::SeedRing;
 
 // =============================================================================
 // Constants
@@ -202,6 +206,8 @@ pub struct IggyClientWrapper {
     state: Arc<ConnectionState>,
     /// Circuit breaker for fail-fast during outages
     circuit_breaker: Arc<CircuitBreaker>,
+    /// Servers to build a client against, in order (`seeds`)
+    seeds: Arc<SeedRing>,
 }
 
 /// Clamp a requested per-request deadline to the configured global timeout:
@@ -227,10 +233,15 @@ impl IggyClientWrapper {
     // Never record the connection string: it holds the credentials.
     #[instrument(skip(config))]
     pub async fn new(config: Config) -> AppResult<Self> {
-        info!("Initializing Iggy client");
+        let seeds = seeds::expand(&config.iggy_connection_string)
+            .ok()
+            .and_then(SeedRing::new)
+            .ok_or_else(|| {
+                AppError::ConfigError("IGGY_CONNECTION_STRING is not valid".to_string())
+            })?;
+        info!(seeds = %seeds.addresses(), "Initializing Iggy client");
 
-        let client = IggyClient::from_connection_string(&config.iggy_connection_string)
-            .map_err(|e| AppError::ConnectionFailed(e.to_string()))?;
+        let client = seeds::connect_first_reachable(&seeds, config.operation_timeout).await?;
 
         // Initialize circuit breaker from config
         let circuit_breaker_config = CircuitBreakerConfig::new(
@@ -245,25 +256,13 @@ impl IggyClientWrapper {
             config: Arc::new(config),
             state: Arc::new(ConnectionState::new()),
             circuit_breaker: Arc::new(CircuitBreaker::new(circuit_breaker_config)),
+            seeds: Arc::new(seeds),
         };
-
-        let timeout = wrapper.config.operation_timeout;
-        tokio::time::timeout(timeout, wrapper.connect())
-            .await
-            .map_err(|_| {
-                // A server from another release can also end here: SDK 0.11
-                // waited forever for a 0.8 server's sign-in reply. SDK 0.12
-                // fails fast against 0.9 instead ("Invalid format"), and a
-                // newer server refuses it with IncompatibleProtocolVersion,
-                // but say so here too, since a mismatch is the likeliest cause
-                // once the address is known to be right.
-                AppError::ConnectionFailed(format!(
-                    "Initial connection timed out after {:?}. If the server is \
-                     reachable, check that it runs Iggy server 0.10.x: this build's \
-                     SDK (0.12) speaks only the 0.10 wire protocol",
-                    timeout
-                ))
-            })??;
+        wrapper.state.set_connected(true);
+        info!(
+            seed = wrapper.seeds.current().address(),
+            "Successfully connected to Iggy server"
+        );
 
         Ok(wrapper)
     }
@@ -409,8 +408,10 @@ impl IggyClientWrapper {
 
             sleep(Duration::from_millis(final_delay)).await;
 
-            // Create a new client instance for reconnection
-            match IggyClient::from_connection_string(&self.config.iggy_connection_string) {
+            // Create a new client instance for reconnection, on the seed
+            // that worked last; each failed attempt moves to the next seed.
+            let seed = self.seeds.current();
+            match IggyClient::from_connection_string(seed.connection_string()) {
                 Ok(new_client) => {
                     // Bound the connect: the SDK's internal reconnection would
                     // otherwise retry inside connect() indefinitely. HALF the
@@ -433,7 +434,8 @@ impl IggyClientWrapper {
                             return Err(classify_connect_error(e));
                         }
                         Ok(Err(e)) => {
-                            warn!(attempt, error = %e, "Reconnection attempt failed");
+                            warn!(attempt, seed = seed.address(), error = %e, "Reconnection attempt failed");
+                            self.seeds.advance();
                             // Best-effort cleanup: connect() may already have
                             // spawned the SDK's detached heartbeat task, which
                             // Drop alone does not stop.
@@ -441,7 +443,12 @@ impl IggyClientWrapper {
                             continue;
                         }
                         Err(_) => {
-                            warn!(attempt, "Reconnection attempt timed out");
+                            warn!(
+                                attempt,
+                                seed = seed.address(),
+                                "Reconnection attempt timed out"
+                            );
+                            self.seeds.advance();
                             let _ = new_client.shutdown().await;
                             continue;
                         }
@@ -467,7 +474,11 @@ impl IggyClientWrapper {
                     }
 
                     self.state.set_connected(true);
-                    info!(attempt, "Successfully reconnected to Iggy server");
+                    info!(
+                        attempt,
+                        seed = seed.address(),
+                        "Successfully reconnected to Iggy server"
+                    );
                     return Ok(());
                 }
                 Err(e) => {
@@ -1117,7 +1128,11 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn unconnected_wrapper() -> IggyClientWrapper {
         let config = Config::default();
-        let client = IggyClient::from_connection_string(&config.iggy_connection_string)
+        let seeds = seeds::expand(&config.iggy_connection_string)
+            .ok()
+            .and_then(SeedRing::new)
+            .expect("default connection string expands");
+        let client = IggyClient::from_connection_string(seeds.current().connection_string())
             .expect("default connection string parses");
         IggyClientWrapper {
             client: Arc::new(RwLock::new(client)),
@@ -1125,6 +1140,7 @@ mod tests {
             config: Arc::new(config),
             state: Arc::new(ConnectionState::new()),
             circuit_breaker: Arc::new(CircuitBreaker::default()),
+            seeds: Arc::new(seeds),
         }
     }
 

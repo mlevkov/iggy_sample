@@ -391,7 +391,7 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server port |
-| `IGGY_CONNECTION_STRING` | `iggy://iggy:iggy@localhost:8090` | Iggy connection string |
+| `IGGY_CONNECTION_STRING` | `iggy://iggy:iggy@localhost:8090` | Iggy connection string; several comma-separated addresses are seeds, tried in order ([format](#connection-string-format)) |
 | `IGGY_STREAM` | `sample-stream` | Default stream name |
 | `IGGY_TOPIC` | `events` | Default topic name |
 | `IGGY_PARTITIONS` | `3` | Partitions for default topic |
@@ -433,6 +433,13 @@ iggy://username:password@host:port
 Example:
 ```
 iggy://iggy:iggy@localhost:8090
+```
+
+For a cluster, list several addresses. They are seeds: the gateway tries
+them in order whenever it builds a client (at startup and on reconnect), and
+once signed in the SDK follows the cluster's roster itself.
+```
+iggy://iggy:iggy@10.29.0.10:8090,10.29.0.11:8090,10.29.0.12:8090
 ```
 
 ## Project Structure
