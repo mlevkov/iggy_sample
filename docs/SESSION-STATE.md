@@ -27,11 +27,20 @@ them too.
 | #88 | `2ca3962` | `4fa5d35` | Integration fixture: the container's port below the ephemeral range ("Cannot bind" flake) |
 | #89 | `e4370c0` | `fcd4fa0` | Integration fixture: one image pull per run, with retries (pull flake) |
 | #90 | `635dca2` | `c58df12` | This block's kickoff, brought up to date after #88 and #89 |
+| #91 | `f965056` | `bd95e89` | ADR-0002's dated Corrections entry for the release blog post (open-work item 1) |
 
-#87 to #90 came after the tag, so none is in v0.5.0. The changelog's
-`[Unreleased]` holds the two fixes from #88 and #89; #87 and #90 changed
-only this file. The PR that carries this line adds ADR-0002's dated
-Corrections entry for the release blog post (open-work item 1).
+#87 to #91 came after the tag, so none is in v0.5.0. The changelog's
+`[Unreleased]` holds the two fixes from #88 and #89; #87, #90 and #91
+changed only docs. The PR that carries this line holds the optional
+follow-ups the user asked for on 2026-11-08 (open-work item 4), each its
+own commit and changelog entry:
+- `POST /sink/inbound` checks the content type in a layer
+  (`require_ndjson`), before the body is read;
+- `connectors/init.sh` hands the CLI its credentials by environment;
+- `connectors/Dockerfile` pins both base images by digest;
+- CI installs `cargo-llvm-cov@0.9.1`;
+- `docs/cluster-demo.md` says partition primaries move back after a
+  rejoin.
 
 **v0.5.0 is released.**
 - **Tag:** annotated `v0.5.0` on `d24a269`, with the message "v0.5.0: Iggy
@@ -97,6 +106,19 @@ user says the Iggy maintainer will comment on them later. Post nothing.
   is now 44 tests. It passed 44 of 44 locally after each fix, and in both
   Integration Tests and Code Coverage on #89 (CI run 42519561167), with no
   pull retried.
+- **The PR that carries this line changes code again:**
+  `src/handlers/sink.rs`, `src/routes.rs`, `connectors/init.sh`,
+  `connectors/Dockerfile` and two workflows. Measured locally on its tree:
+  - `cargo fmt --check`, clippy with `-D warnings` and rustdoc with
+    `-D warnings` are clean;
+  - 291 unit tests (2 new) and 44 of 44 integration tests pass;
+  - the connectors stack, built from the tree under the compose project
+    `iggy-sample-check` so the user's `iggy_sample_*` volumes stayed
+    untouched, passed the connectors suite (6 of 6) and
+    `scripts/connectors-demo.sh`. A second `connectors-init` then kept the
+    token, and the runtime restarted healthy with it.
+
+  The cluster suite was not run: nothing it exercises changed.
 - **The release binary:** Verify Release ran it on Linux (exit 78 under
   `OPERATION_TIMEOUT_SECS=0`, version logged). A local debug build of the
   `03d5eaa` tree did the same before the tag was pushed.
@@ -115,7 +137,10 @@ If the user asks for nothing, ask; do not invent work.
    the original 503 input holds for nodes without one), and the protocol
    label is 0.12.2. State 1 item 1 is closed with it.
 2. **Read the 2026-11-15 scheduled Extended Tests run,** as State 1 item 2
-   describes. `d24a269` is after `5b211e6`, so a run on it counts.
+   describes. `d24a269` is after `5b211e6`, so a run on it counts. If the
+   optional follow-ups are merged by then, its Connectors Tests job is
+   also their first CI run: it builds the digest-pinned image and runs
+   the new `init.sh`.
 3. **Upstream #4784 to #4787,** as State 1 item 3 describes. In addition,
    the Iggy maintainer said they will comment. Read their comments before
    anything else, and post, label or reply nothing without the user's OK.
@@ -124,8 +149,9 @@ If the user asks for nothing, ask; do not invent work.
    `grep -rln '478[4-7]' . --exclude-dir=target --exclude-dir=.git --exclude=Cargo.lock --exclude=SESSION-STATE.md`,
    which lists the eight files State 1 names. Without the exclusions it
    would also match a checksum in `Cargo.lock` and this file's history.
-4. **Optional, only on the user's request:** the #81 review notes in State
-   1's CARRIED.
+4. **Done, at the user's request:** the #81 review notes in State 1's
+   CARRIED, the cargo-llvm-cov pin and the cluster doc's rejoin note, in
+   the PR that carries this line ("What shipped" lists them).
 
 ### Deliberate calls (in addition to State 1's)
 
@@ -142,14 +168,24 @@ If the user asks for nothing, ask; do not invent work.
 
 ### CARRIED (tracked nowhere else)
 
-- State 1's list, unchanged.
+- State 1's list, except its first item: the three #81 review notes are
+  applied by the PR that carries this line.
+  - The token and the root password reach the CLI by environment.
+  - The content type is checked before the body is read.
+  - Both base images of the connectors image are pinned by digest.
 - State 1's kickoff is superseded by the one below.
 - **CI's cargo-llvm-cov is not pinned.** `tool: cargo-llvm-cov` in ci.yml
   and pr.yml installs the latest release; only the install action is
   pinned (v2.90.1). Both coverage steps read the `TOTAL` row's tenth field,
   so a release that changes that row's layout trips the "No line coverage
-  total" warning. Pinning it (`tool: cargo-llvm-cov@0.9.1`) is a possible
-  follow-up, not done and not asked for.
+  total" warning. **Status: done,** at the user's request, by the PR that
+  carries this line: both workflows install `cargo-llvm-cov@0.9.1`, which
+  v2.90.1's manifest lists.
+- **Other images are still pinned by tag only,** and nothing tracks it:
+  `apache/iggy:0.10.0` in the compose files and the fixture, the app's
+  `Dockerfile` (`rust:1.99.0-slim-bookworm`, `debian:bookworm-slim`), and
+  `prom/prometheus:latest` and `grafana/grafana:latest`, which are not
+  pinned at all. Only the connectors image was in #81's review notes.
 - **A second integration-fixture flake: "Cannot bind to socket".**
   - **What fails:** the Iggy container exits at startup, and the test
     panics with "Failed to start Iggy container"
@@ -199,6 +235,9 @@ If the user asks for nothing, ask; do not invent work.
 | The "Cannot bind to socket" flake is a replica/client port collision inside the container | `start_on_shard_zero` in `core/message_bus/src/replica/io.rs` at `91e02063`, which binds the replica listener (line 208) before the client listener (line 209). Then `apache/iggy:0.10.0` (local image ID `sha256:176125a0…`), run locally with the fixture's environment, `--privileged` and `--sysctl net.ipv4.ip_local_port_range="37621 37621"` | With `IGGY_TCP_ADDRESS=0.0.0.0:37621` the container exits with CI's exact line: "failed to start server listeners via replica_io replica_addr=0.0.0.0:0 client_addr=0.0.0.0:37621 error=Cannot bind to socket". With port 20000 and the same range it boots. The container's default range is 32768-60999 |
 | Concurrent pulls caused the pull flake, and the fix pulls once | testcontainers 0.28.0 `src/runners/async_runner.rs:343-361` (`start` pulls on a 404 from create, no retry). Then the suite with `ensure_iggy_image`, three ways, each a temporary edit restored afterwards: as written; with the `inspect_image` check skipped and an `eprintln` before the pull; with the pull's tag set to `0.10.0-does-not-exist`, filtered to `test_auth` | As written: 44 of 44, the cached image used. Check skipped: 44 of 44, and the pull ran **once** for the whole suite. Missing tag: 3 attempts in total (two "retrying" lines), and all 4 tests failed with the same "Failed to pull apache/iggy:0.10.0-does-not-exist after 3 attempts", in 18.8 s |
 | The release blog post adds two facts to ADR-0002, and changes no decision | the post's HTML, fetched 2026-11-08 (HTTP 200, 460641 bytes); ADR-0002 at `635dca2`; the guide and change summary as fetched for #83; `core/server/src/http/state.rs` and `forward.rs`, and `core/sdk/src/links/replicas.rs`, all at `91e02063` | The two facts are the relay key requirement and protocol 0.12.2; everything else it says about ADR-0002's subjects agrees. Primary spreading and rebalancing were already in the change summary (#4619). The post's "random 0 to 2 seconds before its first request to each primary on another node" is, in the SDK source, a random pause in `[0, reconnection_interval]` (1 s by default) before each background link dial: not recorded in the ADR, since no claim depends on it |
+| The iggy CLI takes credentials from its environment, and a bad token does not fall back | `iggy-cli 0.15.0` in `apache/iggy:0.10.0`, against a throwaway `apache/iggy:0.10.0` server on a private network (removed afterwards); `iggy --help` | `IGGY_USERNAME`/`IGGY_PASSWORD` with no flags sign in; a wrong password fails. A valid `IGGY_TOKEN` signs in. A bad `IGGY_TOKEN` fails even with a valid pair set, and an empty one counts as unset. `pat delete` exits 1 yet deletes, as `init.sh` already says. The edited `init.sh` created, kept and replaced the token, and failed on a wrong password |
+| The connectors base images' digests | `docker image inspect` (local `RepoDigests`) and `docker buildx imagetools inspect`, 2026-11-08 about 23:00 UTC | `apache/iggy-connect:0.6.0`: `0b5a4c53…` both locally (pulled 2026-11-07/08) and in the registry, so the tag has not moved since the release-code check. `rust:1.99.1-slim-trixie`: `7eab7ce1…` locally, `f6c4a35d…` in the registry, so the tag was re-pushed; the registry one is pinned. Both indexes hold amd64 and arm64 |
+| Partition primaries rebalance on their own in 0.10 | `core/shard/src/primary_rebalance.rs` and `core/metadata/src/impls/placement.rs` at `91e02063` | `PROBE_INTERVAL` 1 s, `STABLE_INTERVAL` 5 s, `GRANT_TIMEOUT` 1 s (the drain), and no move while the gap is at most 1 (`placement.rs`, the scan). Not observed in the demo: no API here reports a partition's primary |
 | The 0.5.0 binary passes the verifier's host check | a local debug build of the `03d5eaa` tree, run from an empty directory with `env -i OPERATION_TIMEOUT_SECS=0 RUST_LOG=info` | Exit 78, and "Starting Iggy Sample Application v0.5.0". Verify Release 42515088161 then passed on the release asset, with 0 skipped |
 
 ### Kickoff
@@ -211,12 +250,14 @@ block "CURRENT: State 2" first, then State 1's "THE OPEN WORK" items
 hold. Treat both probe tables as settled; do not re-derive those findings.
 
 State: v0.5.0 is released. The annotated tag is on d24a269, and Release
-(42514350003) and Verify Release (42515088161) are green. The last code
-change on main is e4370c0 (#89); every merge after it is docs-only.
-Since the tag, #87 added State 2, #88 and #89 fixed the integration
-fixture's two flakes, in test code only, #90 updated this kickoff, and
-the next merge added ADR-0002's Corrections entry for the release blog
-post. Iggy server
+(42514350003) and Verify Release (42515088161) are green. Since the tag:
+#87 added State 2; #88 and #89 fixed the integration fixture's two
+flakes, in test code only; #90 updated this kickoff; #91 added ADR-0002's
+Corrections entry for the release blog post. The merge after #91 holds
+the optional follow-ups, the first code change since the tag: the sink's
+content-type layer, init.sh's credentials by environment, digest-pinned
+connectors base images, cargo-llvm-cov 0.9.1, and a cluster doc note. All
+are in the changelog's [Unreleased]. Iggy server
 0.10.0, SDK 0.12.0, connectors 0.6.0. There is no feature work in flight,
 and no tech-debt record is bound to the next release. Nothing is due
 before 2026-11-15. If the user asked for nothing, ask; do not invent
@@ -236,14 +277,16 @@ Open work, in order:
    Read their comments first. Do not label them, post on them or reply
    without the user's OK: they were filed as the user. #4784 is fixed
    for us only by a connectors release that carries the fix, or the sinks'
-   at_least_once (#4734). Then bump IGGY_COMMIT and RUNTIME_IMAGE together
-   in connectors/Dockerfile, go back to one event in the demo script and the
+   at_least_once (#4734). Then bump IGGY_COMMIT and RUNTIME_IMAGE (tag
+   and digest) together in connectors/Dockerfile, go back to one event in
+   the demo script and the
    round-trip test, then run the connectors suite and an Extended Tests
    dispatch. Update the files that this lists (quoted, or zsh refuses it):
      grep -rln '478[4-7]' . --exclude-dir=target --exclude-dir=.git --exclude=Cargo.lock --exclude=SESSION-STATE.md
    Keep #4785's max_topic_size check and #4787's ca-certificates layer
    even once fixed. #4786 has no workaround: update the docs only.
-4. Only on request: the #81 review notes in State 1's CARRIED.
+4. Done: the #81 review notes, the cargo-llvm-cov pin and the cluster
+   doc's rejoin note (the merge after #91). Do not redo them.
 
 Do not re-litigate:
 - reconnection retries capped at 3 (ADR-0003). The override is
@@ -261,6 +304,10 @@ What will bite:
 - The classifier blocks your `gh pr merge --admin`. Give the user the
   exact command: ! gh pr merge <N> --merge --admin --match-head-commit <sha>
   Pushing a release tag after the user merges was not blocked.
+- The user's compose volumes (iggy_sample_*) hold their data. Run a local
+  stack check under its own project (docker compose -p iggy-sample-check
+  ...) and remove only that project's volumes (down -v); never run
+  down -v on the default project.
 - There is no .env. Before a cluster run:
     echo "IGGY_CLUSTER_SHARED_SECRET=$(openssl rand -hex 32)" >> .env
 - Both integration-fixture flakes are fixed (State 2's CARRIED): "bytes

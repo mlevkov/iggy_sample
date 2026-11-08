@@ -16,11 +16,17 @@
 #
 # Bumping connectors: change IGGY_COMMIT and the runtime tag together, and
 # keep the build stage on Debian trixie, the runtime image's glibc.
+#
+# Both base images are pinned by tag and by digest (the multi-arch index
+# digest, amd64 and arm64), so a re-pushed tag cannot change what is built.
+# The runtime's digest is the image checked above; Dependabot does not
+# cover this directory, so bump both digests by hand, with the tag:
+#   docker buildx imagetools inspect <image>:<tag>   (its "Digest:" line)
 
 ARG IGGY_COMMIT=91e0206367aad2d30259f7d45203832b08ae84e7
-ARG RUNTIME_IMAGE=apache/iggy-connect:0.6.0
+ARG RUNTIME_IMAGE=apache/iggy-connect:0.6.0@sha256:0b5a4c5356723f2c51d16002e9b75a9081a47c289b9e9d3c4b47e84710b5f9cc
 
-FROM rust:1.99.1-slim-trixie AS plugins
+FROM rust:1.99.1-slim-trixie@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS plugins
 ARG IGGY_COMMIT
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \

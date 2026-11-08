@@ -239,7 +239,9 @@ code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
 - **Plugins are built from source.** `connectors/Dockerfile` compiles them
   at the exact commit of the runtime image: they share a C ABI, so bump
   `IGGY_COMMIT` and the runtime tag together. The runtime image's revision
-  label names a later commit, but the binary is release code.
+  label names a later commit, but the binary is release code. Both base
+  images are pinned by tag and multi-arch digest; Dependabot does not
+  cover `connectors/`, so the digests move by hand, with their tags.
 - **The runtime image needs `ca-certificates`** (apache/iggy#4787).
   Without system roots, the HTTP sink's client fails to build. The
   connector SDK does not log a plugin's `open()` error (apache/iggy#4786),
@@ -252,9 +254,10 @@ code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
 - **The runtime API (8081) serves plugin secrets.** It stays unpublished and
   requires an `api-key` header, which Prometheus sends from a file.
 - **`POST /sink/inbound`** (`src/services/sink_inbox.rs`) exists only with
-  `SINK_INBOUND_TOKEN[_FILE]`. Its bearer token is checked in constant time
-  by a layer on the POST route (`post(..).layer(..)` in `routes.rs`), before
-  the body is read. A batch is kept whole or not
+  `SINK_INBOUND_TOKEN[_FILE]`. Two layers on the POST route
+  (`post(..).layer(..).layer(..)` in `routes.rs`) run before the body is
+  read: the bearer token, checked in constant time, then the `ndjson`
+  content type (`415`). A batch is kept whole or not
   at all. It keeps at most 100 deliveries and 1 MiB in memory.
 - **Delivery.** The sink is at most once per batch (offsets are stored when
   polled), and its HTTP retries can duplicate a batch. A source `200` means

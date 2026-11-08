@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `POST /sink/inbound` checks the content type before it reads the body,
+  in a layer after the bearer token check (`require_ndjson`). The
+  responses are unchanged, except for a body over `MAX_REQUEST_BODY_SIZE`
+  with the wrong content type: it answered `413` and now answers `415`. A
+  wrong content type without the token still answers `401`
+- The connectors image's base images are pinned by digest as well as tag:
+  `apache/iggy-connect:0.6.0` at the digest checked on 2026-11-08, and the
+  `rust:1.99.1-slim-trixie` plugin builder. A re-pushed tag no longer
+  changes what is built
+
 ### Fixed
 
 - An integration test could fail to start its Iggy container with
@@ -26,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream failed its test. Now the first test pulls the image, retrying up to
   three times with a backoff, and the others wait for the outcome. A cached
   image is not pulled at all
+
+### Security
+
+- `connectors/init.sh` passes the root password and the runtime's personal
+  access token to the `iggy` CLI through its environment (`IGGY_USERNAME`,
+  `IGGY_PASSWORD`, `IGGY_TOKEN`), not as arguments. Any user who can list
+  a process can read its arguments; its environment is readable only by
+  its own user and root
 
 ## [0.5.0] - 2026-11-08
 

@@ -137,13 +137,19 @@ pub fn build_router(state: AppState) -> Result<Router, RateLimitError> {
         );
 
     // Receiver for the connectors demo's HTTP sink. Only the POST takes the
-    // sink's bearer token, checked before its body is read; the GET is a
-    // read like the others.
-    if state.sink_inbox.is_some() {
-        let receive = post(handlers::receive_sink_batch).layer(middleware::from_fn_with_state(
-            state.clone(),
-            handlers::require_sink_token,
-        ));
+    // sink's bearer token; the GET is a read like the others. The last layer
+    // added runs first: the token, then the content type, then the handler,
+    // whose `Bytes` extractor is the first to read the body.
+    if let Some(inbox) = state.sink_inbox.as_ref() {
+        let receive = post(handlers::receive_sink_batch)
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(inbox),
+                handlers::require_ndjson,
+            ))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                handlers::require_sink_token,
+            ));
         router = router.route("/sink/inbound", receive.get(handlers::sink_deliveries));
         info!("Sink receiver enabled at /sink/inbound");
     }
