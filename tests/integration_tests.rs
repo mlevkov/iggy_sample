@@ -23,6 +23,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::net::TcpListener;
+use std::ops::Range;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use reqwest::Client;
@@ -52,8 +55,9 @@ impl IggyContainer {
         // free up front. With a fixed in-container 8090 the advertised
         // endpoint was the host's 127.0.0.1:8090, and a client whose
         // container stopped silently failed over to, and signed in at,
-        // whatever Iggy ran there (a local docker-compose stack).
-        let tcp_port = find_available_port();
+        // whatever Iggy ran there (a local docker-compose stack). The port
+        // comes from below the ephemeral range: see `find_container_port`.
+        let tcp_port = find_container_port();
 
         // Note: GenericImage methods (with_exposed_port, with_wait_for) must come before
         // ImageExt methods (with_env_var, with_privileged) due to type transformations
@@ -103,13 +107,64 @@ impl IggyContainer {
     }
 }
 
-/// Find an available port for the test server
+/// Find an available port for the test server, a listener on the host only.
 fn find_available_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .expect("Failed to bind to ephemeral port")
         .local_addr()
         .expect("Failed to get local address")
         .port()
+}
+
+/// Ports for the Iggy container's TCP listener: below the kernel's default
+/// ephemeral range, 32768-60999 on Linux and inside the container.
+const CONTAINER_PORTS: Range<u32> = 20_000..32_000;
+
+/// Pick the TCP port the Iggy container listens on and the host maps.
+///
+/// Inside the container, Iggy 0.10 binds its replica listener on port 0 and
+/// then its client listener on this port (`replica::io::start_on_shard_zero`
+/// in `message_bus`). A port from the ephemeral range can go to the replica
+/// listener first, and the server then exits with "Cannot bind to socket".
+/// That failed CI runs 42419060930 and 42515908933. Below the range, the
+/// kernel never assigns it.
+///
+/// A counter from a random start keeps tests in this process from sharing a
+/// port, and each candidate is checked free on the host, where Docker
+/// publishes it.
+fn find_container_port() -> u16 {
+    static NEXT_OFFSET: OnceLock<AtomicU32> = OnceLock::new();
+    let span: u32 = CONTAINER_PORTS.end - CONTAINER_PORTS.start;
+    let next_offset: &AtomicU32 =
+        NEXT_OFFSET.get_or_init(|| AtomicU32::new(rand::random_range(0..span)));
+    for _ in 0..span {
+        let offset: u32 = next_offset.fetch_add(1, Ordering::Relaxed) % span;
+        let port = u16::try_from(CONTAINER_PORTS.start + offset)
+            .expect("CONTAINER_PORTS lies within the u16 port range");
+        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free port in {CONTAINER_PORTS:?} for the Iggy container");
+}
+
+#[test]
+fn test_container_ports_are_distinct_and_below_the_ephemeral_range() {
+    let ports: Vec<u16> = (0..64).map(|_| find_container_port()).collect();
+    let distinct: std::collections::HashSet<u16> = ports.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        ports.len(),
+        "a port was handed out twice: {ports:?}"
+    );
+    for port in ports {
+        assert!(
+            port < 32_768,
+            "{port} lies in Linux's default ephemeral range, where the container's \
+             replica listener can take it first"
+        );
+        assert!(CONTAINER_PORTS.contains(&u32::from(port)));
+    }
 }
 
 /// Loopback TCP proxy in front of a container port that a test can cut.

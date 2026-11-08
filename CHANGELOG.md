@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An integration test could fail to start its Iggy container with
+  `Cannot bind to socket` (CI runs 42419060930 and 42515908933). The
+  fixture took the container's TCP port from the kernel's ephemeral range.
+  Inside the container, Iggy 0.10 binds its replica listener on port 0 just
+  before the client listener on that port, so the replica listener could
+  take the port first. Forcing that collision with the container's
+  `ip_local_port_range` reproduces the error every time. The fixture now
+  picks the port from 20000-31999, below the ephemeral range, with no port
+  shared between the tests of a run, and checks it is free on the host
+
 ## [0.5.0] - 2026-11-08
 
 Apache Iggy server 0.10.0 and Rust SDK 0.12.0 (ADR-0001, ADR-0002), with
