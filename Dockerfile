@@ -3,7 +3,7 @@
 # Dependency Policy job fails if it drops below Cargo.toml's `rust-version`,
 # which cargo refuses to build under. Keep the Debian release in step with
 # the runtime stage (glibc).
-FROM rust:1.99.0-slim-bookworm AS builder
+FROM rust:1.99.1-slim-bookworm AS builder
 
 WORKDIR /app
 
