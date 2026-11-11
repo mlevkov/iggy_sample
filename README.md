@@ -830,7 +830,7 @@ Key dependencies (see `Cargo.toml` for full list):
 |-------|---------|---------|
 | `iggy` | 0.12.0 | Iggy Rust SDK |
 | `axum` | 0.8 | Web framework |
-| `tokio` | 1.52 | Async runtime |
+| `tokio` | 1.54 | Async runtime |
 | `serde` | 1.0 | Serialization |
 | `tracing` | 0.1 | Structured logging |
 | `thiserror` | 2.0 | Error handling |
@@ -838,9 +838,9 @@ Key dependencies (see `Cargo.toml` for full list):
 | `subtle` | 2.6 | Constant-time comparison |
 | `tower-http` | 0.7 | HTTP middleware (CORS, tracing) |
 | `rust_decimal` | 1.43 | Exact decimal arithmetic for money |
-| `uuid` | 1.23 | UUID generation |
+| `uuid` | 1.29 | UUID generation |
 | `chrono` | 0.4 | Date/time handling |
-| `testcontainers` | 0.27 | Integration testing |
+| `testcontainers` | 0.28 | Integration testing |
 
 ## CI/CD
 
