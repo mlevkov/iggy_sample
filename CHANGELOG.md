@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rust:1.99.1-slim-trixie` plugin builder. A re-pushed tag no longer
   changes what is built
 
+- Every dependency is on its latest release. The direct ones already
+  were, except `uuid` (1.29.0 to 1.29.2); `Cargo.toml` now asks for at
+  least `tokio` 1.54 and `uuid` 1.29, the versions in use. The lockfile
+  takes the latest compatible release of 24 transitive crates (among
+  them `rustls-pki-types`, `webpki-roots`, `prost`, `jiff` and `rand`'s
+  0.8 and 0.9 lines), adds `itertools` 0.15 for `prost-derive` 0.14.5,
+  and drops `bitflags` 1 and the three `defmt` crates, which nothing needs
+  any more. No newer major version of a direct dependency exists;
+  `matchit` stays on 0.8.4, which `axum` pins exactly
+
 ### Fixed
 
 - An integration test could fail to start its Iggy container with

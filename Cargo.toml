@@ -24,7 +24,7 @@ tower = "0.5"
 tower-http = { version = "0.7", features = ["cors", "trace", "request-id", "propagate-header"] }
 
 # Async runtime
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Message streaming (Apache Iggy Rust SDK; 0.12 pairs with the server-0.10 line)
@@ -50,7 +50,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
-uuid = { version = "1.23", features = ["v4", "serde"] }
+uuid = { version = "1.29", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Decimal arithmetic for monetary values (avoids floating-point precision issues).
@@ -84,7 +84,7 @@ testcontainers = "0.28"
 # test-util unlocks tokio::time::pause()/advance() for the paused-clock
 # resilience matrix (TD-2026-07-01); dev-only so production builds are
 # unaffected.
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.54", features = ["full", "test-util"] }
 
 # =============================================================================
 # Lints Configuration
