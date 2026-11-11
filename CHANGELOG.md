@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three times with a backoff, and the others wait for the outcome. A cached
   image is not pulled at all
 
+- `pin-utils` is gone from the lockfile (RUSTSEC-2026-0441, unmaintained;
+  #94, opened by the weekly security audit). Only wasm32 builds pulled it
+  in, through the SDK's `reqwest-retry` and `wasmtimer`; `wasmtimer` 0.4.5
+  replaced it with `pin-project-lite`
+
 ### Security
 
 - `connectors/init.sh` passes the root password and the runtime's personal
