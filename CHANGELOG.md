@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in, through the SDK's `reqwest-retry` and `wasmtimer`; `wasmtimer` 0.4.5
   replaced it with `pin-project-lite`
 
+- The security audit job accepts RUSTSEC-2026-0440 (`astral-tokio-tar`,
+  unmaintained) as `deny.toml` already did, so the weekly run no longer
+  files it (#93). The crate is dev-only, pulled in by `testcontainers`,
+  whose latest release still uses it. The job runs cargo-audit, which does
+  not read `deny.toml`, so `ci.yml` now carries the same ignore
+
 ### Security
 
 - `connectors/init.sh` passes the root password and the runtime's personal
