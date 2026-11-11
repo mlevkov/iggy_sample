@@ -28,6 +28,10 @@ them too.
 | #89 | `e4370c0` | `fcd4fa0` | Integration fixture: one image pull per run, with retries (pull flake) |
 | #90 | `635dca2` | `c58df12` | This block's kickoff, brought up to date after #88 and #89 |
 | #91 | `f965056` | `bd95e89` | ADR-0002's dated Corrections entry for the release blog post (open-work item 1) |
+| #92 | `90cda2d` | `b978aec` | The optional follow-ups (open-work item 4) |
+| #95 | `b7ff918` | `555b818` | Dependabot: the github-actions group, 2 updates |
+| #96 | `226b28b` | `4f0e439` | Dependabot: the app Dockerfile's `rust` image, 1.99.0 to 1.99.1-slim-bookworm |
+| #97 | `fa34d97` | `4c95504` | Dependabot: the rust-minor group, 4 crates (lockfile only) |
 
 #87 to #91 came after the tag, so none is in v0.5.0. The changelog's
 `[Unreleased]` holds the two fixes from #88 and #89; #87, #90 and #91
@@ -41,6 +45,14 @@ own commit and changelog entry:
 - CI installs `cargo-llvm-cov@0.9.1`;
 - `docs/cluster-demo.md` says partition primaries move back after a
   rejoin.
+
+The PR after #97 closes the security audit's issues #93 and #94
+(2026-11-10, at the user's request):
+- `wasmtimer` 0.4.5 dropped `pin-utils` (RUSTSEC-2026-0441) from the
+  lockfile. It was wasm32-only, which is why cargo-deny, whose `[graph]`
+  targets leave wasm32 out, never reported it.
+- ci.yml's audit-check now ignores RUSTSEC-2026-0440 (`astral-tokio-tar`),
+  as `deny.toml` has since 5816f92. cargo-audit does not read `deny.toml`.
 
 **v0.5.0 is released.**
 - **Tag:** annotated `v0.5.0` on `d24a269`, with the message "v0.5.0: Iggy
@@ -183,7 +195,7 @@ If the user asks for nothing, ask; do not invent work.
   v2.90.1's manifest lists.
 - **Other images are still pinned by tag only,** and nothing tracks it:
   `apache/iggy:0.10.0` in the compose files and the fixture, the app's
-  `Dockerfile` (`rust:1.99.0-slim-bookworm`, `debian:bookworm-slim`), and
+  `Dockerfile` (`rust:1.99.1-slim-bookworm` since #96, `debian:bookworm-slim`), and
   `prom/prometheus:latest` and `grafana/grafana:latest`, which are not
   pinned at all. Only the connectors image was in #81's review notes.
 - **A second integration-fixture flake: "Cannot bind to socket".**
@@ -257,7 +269,11 @@ Corrections entry for the release blog post. The merge after #91 holds
 the optional follow-ups, the first code change since the tag: the sink's
 content-type layer, init.sh's credentials by environment, digest-pinned
 connectors base images, cargo-llvm-cov 0.9.1, and a cluster doc note. All
-are in the changelog's [Unreleased]. Iggy server
+are in the changelog's [Unreleased]. Then Dependabot merged #95-#97,
+and the merge after them closed the audit issues #93 and #94:
+wasmtimer 0.4.5 dropped pin-utils, and RUSTSEC-2026-0440 is ignored in
+both deny.toml and ci.yml's audit-check. Drop it from both once
+testcontainers moves off astral-tokio-tar. Iggy server
 0.10.0, SDK 0.12.0, connectors 0.6.0. There is no feature work in flight,
 and no tech-debt record is bound to the next release. Nothing is due
 before 2026-11-15. If the user asked for nothing, ask; do not invent
