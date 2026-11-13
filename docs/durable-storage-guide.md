@@ -263,6 +263,13 @@ Past it, the oldest sealed segments are deleted.
   partition, as the cap divided by the partition count. The active segment is
   never trimmed, and a lagging committed consumer pins the sealed segments
   behind it.
+- **Each partition keeps at least its newest sealed segment.** A
+  partition's share is raised to the size one sealed segment can reach (the
+  segment size plus the configured maximum bus frame), so a cap that divides into
+  less than a segment per partition retains more than it says: a 1 GiB cap on
+  6 partitions with 1 GiB segments keeps about 6 GiB of sealed data. A topic
+  read still reports the configured cap. (Server 0.10,
+  `per_partition_size_budget` in `core/server/src/segment_cleaner.rs`.)
 - **A finite cap must be at least the topic's segment size.** With the default
   1 GiB segments, a cap below 1 GiB is refused. Set a smaller `segment_size`
   for a smaller cap. The server refuses such a topic too, but the error the

@@ -335,7 +335,8 @@ impl AppState {
         // Signal all tasks to stop
         self.cancellation_token.cancel();
 
-        // Close the tracker - no new tasks can be spawned
+        // Close the tracker so wait() can complete once it is empty (closing
+        // does not stop further spawns; nothing spawns after cancel)
         self.task_tracker.close();
 
         // Wait for all tasks to complete

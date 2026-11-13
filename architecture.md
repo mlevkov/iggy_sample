@@ -233,7 +233,7 @@ state.spawn_connection_events_task();
 
 // Shutdown (AppState::shutdown), in this order
 self.cancellation_token.cancel(); // Signal all tasks
-self.task_tracker.close();        // Prevent new spawns
+self.task_tracker.close();        // Let wait() complete once empty
 self.task_tracker.wait().await;   // Wait for completion
 ```
 

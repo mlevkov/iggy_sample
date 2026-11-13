@@ -108,9 +108,13 @@ tracker.spawn(async {
 });
 
 // Wait for all tasks to complete
-tracker.close();  // Prevent new spawns
+tracker.close();  // Lets wait() complete once the tracker is empty
 tracker.wait().await;  // Wait for completion
 ```
+
+`close()` does not stop further spawns: it only allows `wait()` to finish.
+`wait()` completes once the tracker is both closed and empty, so a tracker
+that is never closed is never waited out.
 
 ### 2. Cancellation Tokens
 
@@ -167,7 +171,9 @@ delay cancellation response in high-load scenarios.
 
 ### Complete Example from This Codebase
 
-From `src/state.rs`:
+From `src/state.rs`, shortened. `AppState::new` spawns three tracked tasks:
+the stats refresh, the connection health check (a live ping), and a follower
+of the SDK's connection events.
 
 ```rust
 use tokio_util::sync::CancellationToken;
@@ -180,93 +186,92 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(iggy_client: IggyClientWrapper, config: Config) -> Self {
-        let task_tracker = TaskTracker::new();
-        let cancellation_token = CancellationToken::new();
-
-        let state = Self {
-            iggy_client,
-            config,
-            task_tracker,
-            cancellation_token,
-            // ...
-        };
+    pub fn new(iggy_client: IggyClientWrapper, config: Arc<Config>) -> Self {
+        // ... builds the state, including a fresh tracker and token ...
 
         // Spawn tracked background tasks
         state.spawn_stats_refresh_task();
         state.spawn_health_check_task();
+        state.spawn_connection_events_task();
 
         state
     }
 
     fn spawn_stats_refresh_task(&self) {
-        let state = self.clone();
+        // Clone only what the task uses, not the whole state
+        let iggy_client = self.iggy_client.clone();
+        let stats_cache = self.stats_cache.clone();
         let ttl = self.config.stats_cache_ttl;
         let cancel = self.cancellation_token.clone();
 
         self.task_tracker.spawn(async move {
+            // Initial refresh
+            if let Err(e) = refresh_stats_impl(&iggy_client, &stats_cache).await {
+                warn!(error = %e, "Initial stats refresh failed");
+            }
+
             let mut ticker = interval(ttl);
-            ticker.tick().await;  // Skip immediate first tick
+            ticker.tick().await; // Skip the first immediate tick
 
             loop {
                 tokio::select! {
-                    biased;  // Check cancellation first
+                    biased; // Check cancellation first
 
                     _ = cancel.cancelled() => {
-                        debug!("Stats refresh task: cancelled");
+                        debug!("Stats refresh task received cancellation signal");
                         break;
                     }
                     _ = ticker.tick() => {
-                        state.refresh_stats().await;
+                        if let Err(e) = refresh_stats_impl(&iggy_client, &stats_cache).await {
+                            warn!(error = %e, "Stats refresh failed");
+                        }
                     }
                 }
             }
-            debug!("Stats refresh task: shutdown complete");
+
+            debug!("Stats refresh task shutting down");
         });
     }
 
     pub async fn shutdown(&self) {
-        info!("Initiating graceful shutdown");
+        info!("Initiating graceful shutdown of background tasks");
 
         // 1. Signal all tasks to stop
         self.cancellation_token.cancel();
 
-        // 2. Prevent new tasks from being spawned
+        // 2. Close the tracker, so wait() can complete once it is empty
         self.task_tracker.close();
 
         // 3. Wait for all tasks to finish
         self.task_tracker.wait().await;
 
-        info!("All background tasks completed");
+        info!("All background tasks have completed");
     }
 }
 ```
 
 ### Wiring Up Shutdown in main.rs
 
+From `src/main.rs`, shortened. `run()` returns a sysexits code on failure, and
+the background tasks are shut down on both exit paths of the server, so a serve
+error cannot leave them running un-awaited:
+
 ```rust
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let state = AppState::new(iggy_client, config);
-    let app = build_router(state.clone());  // Clone to keep reference
+let serve_result = axum::serve(
+    listener,
+    // The peer address feeds TRUSTED_PROXIES enforcement
+    app.into_make_service_with_connect_info::<SocketAddr>(),
+)
+.with_graceful_shutdown(utils::shutdown_signal()) // Ctrl+C or SIGTERM
+.await;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+// After the HTTP server stops, on success or error alike
+state.shutdown().await;
 
-    // After HTTP server stops, clean up background tasks
-    state.shutdown().await;
-
-    info!("Shutdown complete");
-    Ok(())
-}
-
-async fn shutdown_signal() {
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = sigterm_signal() => {}
-    }
-}
+serve_result.map_err(|e| {
+    error!("Server error: {e}");
+    exitcode::SOFTWARE
+})?;
 ```
 
 ---
@@ -349,25 +354,43 @@ async fn fetch_with_timeout(
 }
 ```
 
+**A caveat with the Iggy SDK 0.12.** Dropping an SDK call this way, by a
+timeout or a `select!` branch, after its request has left the client leaves
+the operation *retained* in its lane, and every later call on that lane then
+fails with `LaneBlocked` (or `PartitionLaneBlocked`). The gateway's
+per-request timeout cancels calls exactly like this, so every lane-taking call
+goes through `lanes::settled` / `send_settled` (`src/iggy_client/lanes.rs`),
+which abandons a retained operation and runs a lane-refused call once more.
+
 ### Pattern 4: Cleanup Guards
 
 Ensure cleanup runs even on panic or early return:
 
 ```rust
-// Using scopeguard pattern
-fn start_reconnecting(&self) -> bool {
-    self.reconnecting.swap(true, Ordering::SeqCst)
+// src/iggy_client/connection.rs
+pub fn start_reconnecting(&self) -> bool {
+    // true if this call started the reconnect (none was in progress)
+    !self.reconnecting.swap(true, Ordering::SeqCst)
 }
 
-async fn reconnect(&self) -> Result<()> {
+// src/iggy_client/mod.rs, shortened
+async fn reconnect(&self) -> AppResult<()> {
     if !self.state.start_reconnecting() {
-        // Another task is already reconnecting
+        // Another task is already reconnecting: wait, then report its outcome
         self.state.wait_for_reconnection().await;
-        return Ok(());
+        return if self.state.is_connected() {
+            Ok(())
+        } else {
+            Err(AppError::ConnectionFailed(
+                "Reconnection failed (attempted by another task)".to_string(),
+            ))
+        };
     }
 
-    // Guard ensures stop_reconnecting() is always called
-    let _guard = scopeguard::guard((), |_| {
+    // Guard ensures stop_reconnecting() is always called. scopeguard here is
+    // the crate's own small module (src/iggy_client/scopeguard.rs), not the
+    // scopeguard crate.
+    let _guard = scopeguard::guard(|| {
         self.state.stop_reconnecting();
     });
 
@@ -403,8 +426,8 @@ async fn wait_for_reconnection(&self) {
 ### Pitfall 2: Forgetting to Close TaskTracker
 
 ```rust
-// WRONG: wait() returns immediately if not closed
-tracker.wait().await;  // Returns immediately!
+// WRONG: never completes - wait() waits for a tracker that is closed AND empty
+tracker.wait().await;  // Hangs forever
 
 // CORRECT: Close first, then wait
 tracker.close();
@@ -468,6 +491,12 @@ tokio::select! {
 ---
 
 ## Testing Concurrent Code
+
+These tests are illustrative: they show how to test the patterns above, and
+`AppState::new` needs a connected `IggyClientWrapper`. The tests this
+repository has for them are in `src/iggy_client/connection.rs` (the reconnect
+flag and `wait_for_reconnection`) and `src/iggy_client/circuit_breaker.rs`
+(for example, a probe cancelled mid-flight returns its token).
 
 ### Test Task Completion
 
