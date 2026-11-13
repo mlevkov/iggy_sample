@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose latest release still uses it. The job runs cargo-audit, which does
   not read `deny.toml`, so `ci.yml` now carries the same ignore
 
+- `cargo audit` could not fetch its advisory database once `cargo deny` had
+  run: `deny.toml` set cargo-deny's `db-path` to `~/.cargo/advisory-db`,
+  cargo-audit's own default, and the two lay it out differently ("failed to
+  prepare clone"). `deny.toml` now leaves `db-path` at cargo-deny's default,
+  `~/.cargo/advisory-dbs`. CI was unaffected, since its jobs start without
+  a cache; a local `~/.cargo/advisory-db` left by cargo-deny needs deleting
+  once
+
 ### Security
 
 - `connectors/init.sh` passes the root password and the runtime's personal
