@@ -68,6 +68,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a cache; a local `~/.cargo/advisory-db` left by cargo-deny needs deleting
   once
 
+- The documentation describes 0.5.0 and the work since. Four read-only
+  audits checked about 665 claims against the code, and each fix was
+  re-checked before it went in:
+  - `architecture.md` predated the Iggy 0.10 upgrade (modules that no
+    longer exist, half the errors and settings, connection pooling and
+    zero-copy claims that never held) and is rewritten;
+  - every Rust example in `docs/guide.md` and `docs/partitioning-guide.md`
+    used the pre-0.12 SDK API and now compiles against SDK 0.12. The
+    partitioning guide had the key hash wrong: it is XxHash32, not
+    MurmurHash3;
+  - the README's quick start ran `cargo run` beside the compose stack's own
+    gateway, which collides on ports 8000 and 9090. The README also called
+    `auto_commit` at-least-once when it is at most once, and its
+    configuration tables missed six variables;
+  - `docs/structured-concurrency.md` had `TaskTracker::close` backwards;
+  - CLAUDE.md, CONTRIBUTING.md, SECURITY.md, `.env.example`, the demo
+    docs and the docs index are corrected too, as are two rustdoc
+    diagrams and two code comments
+
 ### Security
 
 - `connectors/init.sh` passes the root password and the runtime's personal
