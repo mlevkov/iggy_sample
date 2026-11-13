@@ -6,7 +6,7 @@ A comprehensive demonstration of Apache Iggy message streaming with Axum.
 
 This application showcases how to build a production-ready message streaming service using:
 - **Apache Iggy server 0.10.0**: High-performance message streaming with io_uring shared-nothing architecture and optional VSR clustering
-- **Iggy Rust SDK 0.12.0**: Paired with the server 0.10 release line (server image pinned in `docker-compose.yaml` and the integration fixture). SDK and server always move together, and 0.10 refuses to boot on 0.9 data directories, so the compose data volume is versioned. The SDK needs Rust 1.95, the declared MSRV (`rust-version = "1.95.0"`); cargo's MSRV-aware resolver keeps Dependabot from proposing any SDK that needs a newer Rust, so those upgrades raise the MSRV by hand. Plan and constraints: [ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md), amended by [ADR-0002](docs/adr/0002-iggy-0.10-before-topic-options.md)
+- **Iggy Rust SDK 0.12.0**: Paired with the server 0.10 release line (server image pinned in every `docker-compose*.yaml` — `iggy`, `iggy-pat-init`, the cluster nodes, `connectors-init` — and in the integration fixture's `IggyContainer::TAG`). SDK and server always move together, and 0.10 refuses to boot on 0.9 data directories, so the compose data volume is versioned. The SDK needs Rust 1.95, the declared MSRV (`rust-version = "1.95.0"`); cargo's MSRV-aware resolver keeps Dependabot from proposing any SDK that needs a newer Rust, so those upgrades raise the MSRV by hand. Plan and constraints: [ADR-0001](docs/adr/0001-iggy-0.9-upgrade-and-demos.md), amended by [ADR-0002](docs/adr/0002-iggy-0.10-before-topic-options.md)
 - **Axum 0.8**: Ergonomic and modular Rust web framework
 - **Tokio**: Async runtime for Rust
 
@@ -22,6 +22,9 @@ PR sequence and scope, as amended by
 before the per-topic options PR).
 [ADR-0003](docs/adr/0003-cap-sdk-reconnection-retries.md) caps the SDK's
 reconnection retries by default.
+
+Deferred review findings, each with the trigger that forces it, are in
+[docs/tech-debt/](docs/tech-debt/README.md).
 
 What was in flight at the end of the last session, and the findings not to
 re-derive, are in [docs/SESSION-STATE.md](docs/SESSION-STATE.md) (newest
@@ -99,7 +102,7 @@ Background task logs use tiered log levels to reduce noise:
 |-------|---------------|
 | `info` | Startup, shutdown, significant events |
 | `debug` | Task lifecycle (cancellation, shutdown) |
-| `trace` | Routine success ("Stats cache refreshed", "Health check OK") |
+| `trace` | Routine success ("Stats cache refreshed successfully", "Health check: Iggy connection OK") |
 
 **Recommended settings:**
 ```bash
@@ -137,9 +140,10 @@ The fuzz tests verify that validation functions never panic on any input.
 
 ## Error Handling
 
-- `build_router()` returns `Result<Router, RateLimitError>` so invalid
-  rate-limiting configuration (zero RPS, unparseable `TRUSTED_PROXIES` CIDR)
-  fails at startup instead of panicking.
+- `build_router()` returns `Result<Router, RateLimitError>` so an
+  unparseable `TRUSTED_PROXIES` entry fails startup instead of panicking.
+  (`RATE_LIMIT_RPS=0` disables rate limiting; `RateLimitError::ZeroRps`
+  comes only from building `RateLimitLayer` directly with 0.)
 - Connection errors are detected by matching explicit `AppError` enum variants
   (`ConnectionFailed`/`Disconnected`/`ConnectionReset`), never by string
   matching on error text — the reconnection logic depends on this.
@@ -154,7 +158,8 @@ The fuzz tests verify that validation functions never panic on any input.
   for metadata, one per partition, plus a progress lane per partition for
   auto-commit and `Next` polls) and keeps a mutation whose outcome it cannot
   prove *retained* there. Every later call on that lane then fails with
-  `LaneBlocked` until the application abandons or resolves it. A call
+  `LaneBlocked` (`PartitionLaneBlocked` on a partition lane) until the
+  application abandons or resolves it. A call
   cancelled after its request left the client is retained too, and the
   wrapper's per-request timeout cancels calls exactly that way. So every
   lane-taking SDK call goes through `lanes::settled` / `send_settled`
@@ -250,10 +255,14 @@ code and the image depend on (runtime 0.6.0, plugins at `91e02063`):
   env overrides reach top-level plugin fields only. `connectors/init.sh`
   generates the secrets into the `connectors_secrets` and `iggy_secrets`
   volumes, and `connectors/entrypoint.sh` substitutes them after checking
-  each is hex of the expected length.
+  each is hex of the expected length. `init.sh` hands the `iggy` CLI the
+  root password and the runtime's token through its environment
+  (`IGGY_USERNAME`/`IGGY_PASSWORD`, `IGGY_TOKEN`), never as arguments, which
+  any user who can list processes can read.
 - **The runtime API (8081) serves plugin secrets.** It stays unpublished and
   requires an `api-key` header, which Prometheus sends from a file.
-- **`POST /sink/inbound`** (`src/services/sink_inbox.rs`) exists only with
+- **`POST /sink/inbound`** (`src/handlers/sink.rs`: `require_sink_token`,
+  `require_ndjson`, `receive_sink_batch`; `src/services/sink_inbox.rs`) exists only with
   `SINK_INBOUND_TOKEN[_FILE]`. Two layers on the POST route
   (`post(..).layer(..).layer(..)` in `routes.rs`) run before the body is
   read: the bearer token, checked in constant time, then the `ndjson`
@@ -336,7 +345,8 @@ listener could otherwise take that port first.
 
 ## Structured Concurrency
 
-Background tasks (stats refresh, health checks) are owned by a
+Background tasks (stats refresh, health checks, the SDK connection-event
+follower) are owned by a
 `tokio_util::task::TaskTracker` + `CancellationToken` pair held on `AppState`.
 `AppState::shutdown()` cancels, then closes, then awaits the tracker — in that
 order — so shutdown drains in-flight work instead of dropping it.
@@ -352,7 +362,7 @@ full task-lifecycle and shutdown-ordering details.
 
 Request flow (applied in order):
 ```
-Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS → Handler
+Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS → Body Limit (413) → Handler
 ```
 
 - Client IP extraction (`src/middleware/ip.rs`) is shared by rate limiting and
@@ -393,15 +403,21 @@ Request → Rate Limit → Auth → Request ID → Timeout → Tracing → CORS 
 
 ### Reverse Proxy Configuration (Required)
 
-Both rate limiting and authentication brute force protection use client IP addresses
-extracted from `X-Forwarded-For` or `X-Real-IP` headers. **These headers can be
-spoofed by clients if the service is directly accessible.**
+Both rate limiting and authentication brute force protection key on the
+client IP. Without `TRUSTED_PROXIES` it comes from `X-Forwarded-For` (the
+leftmost entry) or `X-Real-IP`, which **any client that reaches the service
+directly can spoof**, so the proxy must overwrite those headers. With
+`TRUSTED_PROXIES`, the headers count only from peers inside those ranges and
+appended chains resolve rightmost-untrusted, so a proxy that appends is safe
+too. `API_KEY` requires `TRUSTED_PROXIES` (`Config::validate`) unless
+`ALLOW_UNVERIFIED_CLIENT_IPS=true`.
 
 #### Required Configuration
 
 1. **Deploy behind a trusted reverse proxy** (nginx, HAProxy, cloud LB, Kubernetes ingress)
 2. **Block direct access** to this service from the internet
-3. **Configure proxy to overwrite (not append)** client IP headers:
+3. **Set `TRUSTED_PROXIES`** to the proxy's ranges, or, without it,
+   **configure the proxy to overwrite (not append)** client IP headers:
 
 ```nginx
 # nginx example - overwrites any client-provided header
