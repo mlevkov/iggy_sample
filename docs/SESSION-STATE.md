@@ -32,6 +32,8 @@ them too.
 | #95 | `b7ff918` | `555b818` | Dependabot: the github-actions group, 2 updates |
 | #96 | `226b28b` | `4f0e439` | Dependabot: the app Dockerfile's `rust` image, 1.99.0 to 1.99.1-slim-bookworm |
 | #97 | `fa34d97` | `4c95504` | Dependabot: the rust-minor group, 4 crates (lockfile only) |
+| #98 | `ae6355e` | `2acaad9` | Security audit issues #93 and #94: wasmtimer 0.4.5, audit-check ignore |
+| #99 | `23e0e62` | `c35e648` | Every dependency on its latest release (lockfile, tokio 1.54 and uuid 1.29 floors) |
 
 #87 to #91 came after the tag, so none is in v0.5.0. The changelog's
 `[Unreleased]` holds the two fixes from #88 and #89; #87, #90 and #91
@@ -53,6 +55,30 @@ The PR after #97 closes the security audit's issues #93 and #94
   targets leave wasm32 out, never reported it.
 - ci.yml's audit-check now ignores RUSTSEC-2026-0440 (`astral-tokio-tar`),
   as `deny.toml` has since 5816f92. cargo-audit does not read `deny.toml`.
+- A scheduled audit run skips any advisory ID already named in an issue or
+  PR title, open or closed (audit-check `src/reporter.ts:239-240`), so the
+  closed #93 and #94 would not be filed again either way. The checks that
+  showed the fix were #98's audit run and a local
+  `cargo audit --ignore RUSTSEC-2026-0440 --deny warnings`.
+
+#99 (2026-11-11) found every direct dependency already on its latest
+release except uuid; `cargo outdated` (0.19.0) and `cargo upgrade` (cargo-edit
+0.13.14), installed on this Mac at the user's request, agree.
+
+The PR after #99 (2026-11-12, at the user's request) brings the
+documentation up to the code. Four read-only audits (about 665 claims) found
+the problems; each fix was re-checked in src/ or by running it:
+- `architecture.md` rewritten; README, CLAUDE.md, CONTRIBUTING.md,
+  SECURITY.md, `.env.example`, the demo docs, the docs index and two
+  rustdoc diagrams corrected.
+- `docs/guide.md` and `docs/partitioning-guide.md`: every Rust example
+  ported to SDK 0.12; 16 and 21 blocks compile verbatim in scratch crates
+  under `/private/tmp/guide-snippets/guide-md` and
+  `/private/tmp/partitioning-snippets` (session-local).
+- `deny.toml` no longer sets `db-path` to cargo-audit's `~/.cargo/advisory-db`,
+  which broke `cargo audit` after a cargo-deny run.
+- Every relative link and anchor in the 48 tracked Markdown files resolves
+  (a checker run before the PR).
 
 **v0.5.0 is released.**
 - **Tag:** annotated `v0.5.0` on `d24a269`, with the message "v0.5.0: Iggy
@@ -193,6 +219,15 @@ If the user asks for nothing, ask; do not invent work.
   total" warning. **Status: done,** at the user's request, by the PR that
   carries this line: both workflows install `cargo-llvm-cov@0.9.1`, which
   v2.90.1's manifest lists.
+- **`partition_key` errors answer 500, not 400.** An empty key, or one over
+  255 bytes, fails in `Partitioning::messages_key_str`, which
+  `src/iggy_client/mod.rs` maps to `AppError::SendError`, a `500
+  send_error`, although it is the client's mistake. Found by the
+  partitioning-guide rewrite; the guide documents the current behaviour.
+  Not fixed: it is a code change, and the docs PR stayed docs-only.
+- **This Mac's `~/.cargo/advisory-db` still holds cargo-deny's old layout,**
+  so `cargo audit` fails there until it is deleted once (a cache;
+  CONTRIBUTING.md explains). Left for the user.
 - **Other images are still pinned by tag only,** and nothing tracks it:
   `apache/iggy:0.10.0` in the compose files and the fixture, the app's
   `Dockerfile` (`rust:1.99.1-slim-bookworm` since #96, `debian:bookworm-slim`), and
@@ -273,7 +308,9 @@ are in the changelog's [Unreleased]. Then Dependabot merged #95-#97,
 and the merge after them closed the audit issues #93 and #94:
 wasmtimer 0.4.5 dropped pin-utils, and RUSTSEC-2026-0440 is ignored in
 both deny.toml and ci.yml's audit-check. Drop it from both once
-testcontainers moves off astral-tokio-tar. Iggy server
+testcontainers moves off astral-tokio-tar. #99 updated every dependency,
+and the next merge brought the documentation up to the code; one bug it
+found, partition_key errors answering 500, is in State 2's CARRIED. Iggy server
 0.10.0, SDK 0.12.0, connectors 0.6.0. There is no feature work in flight,
 and no tech-debt record is bound to the next release. Nothing is due
 before 2026-11-15. If the user asked for nothing, ask; do not invent
