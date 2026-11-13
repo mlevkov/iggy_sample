@@ -60,6 +60,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose latest release still uses it. The job runs cargo-audit, which does
   not read `deny.toml`, so `ci.yml` now carries the same ignore
 
+- `cargo audit` could not fetch its advisory database once `cargo deny` had
+  run: `deny.toml` set cargo-deny's `db-path` to `~/.cargo/advisory-db`,
+  cargo-audit's own default, and the two lay it out differently ("failed to
+  prepare clone"). `deny.toml` now leaves `db-path` at cargo-deny's default,
+  `~/.cargo/advisory-dbs`. CI was unaffected, since its jobs start without
+  a cache; a local `~/.cargo/advisory-db` left by cargo-deny needs deleting
+  once
+
+- The documentation describes 0.5.0 and the work since. Four read-only
+  audits checked about 665 claims against the code, and each fix was
+  re-checked before it went in:
+  - `architecture.md` predated the Iggy 0.10 upgrade (modules that no
+    longer exist, half the errors and settings, connection pooling and
+    zero-copy claims that never held) and is rewritten;
+  - every Rust example in `docs/guide.md` and `docs/partitioning-guide.md`
+    used the pre-0.12 SDK API and now compiles against SDK 0.12. The
+    partitioning guide had the key hash wrong: it is XxHash32, not
+    MurmurHash3;
+  - the README's quick start ran `cargo run` beside the compose stack's own
+    gateway, which collides on ports 8000 and 9090. The README also called
+    `auto_commit` at-least-once when it is at most once, and its
+    configuration tables missed six variables;
+  - `docs/structured-concurrency.md` had `TaskTracker::close` backwards;
+  - CLAUDE.md, CONTRIBUTING.md, SECURITY.md, `.env.example`, the demo
+    docs and the docs index are corrected too, as are two rustdoc
+    diagrams and two code comments
+
 ### Security
 
 - `connectors/init.sh` passes the root password and the runtime's personal

@@ -72,8 +72,14 @@ Keep the subject line at 72 characters or fewer (`.commitlintrc.json`).
 ### Prerequisites
 
 - Rust 1.95+ (edition 2024; the MSRV in `Cargo.toml`)
-- Docker & Docker Compose
-- cargo-deny (for license/security checks)
+- Docker with the Compose plugin (`docker compose`)
+- cargo-deny and cargo-audit (dependency policy and advisories)
+- Optional: cargo-outdated and cargo-edit (checking for newer releases),
+  nightly Rust and cargo-fuzz (fuzzing)
+
+```bash
+cargo install --locked cargo-deny cargo-audit cargo-outdated cargo-edit
+```
 
 ### Getting Started
 
@@ -83,7 +89,7 @@ git clone https://github.com/YOUR_USERNAME/iggy_sample.git
 cd iggy_sample
 
 # Start Iggy server
-docker-compose up -d iggy
+docker compose up -d iggy
 
 # Run tests
 cargo test
@@ -98,8 +104,13 @@ cargo run
 # Unit tests
 cargo test --lib
 
-# Integration tests (requires Docker)
+# Integration tests (requires Docker; each test starts apache/iggy:0.10.0)
 cargo test --test integration_tests
+
+# Cluster and connectors suites: #[ignore]d, they need their compose stack
+# up first (docs/cluster-demo.md#tests, docs/connectors-demo.md#tests)
+cargo test --test cluster_tests -- --ignored --test-threads=1
+cargo test --test connectors_tests -- --ignored --test-threads=1
 
 # All tests with verbose output
 cargo test -- --nocapture
@@ -119,12 +130,23 @@ cargo fmt
 # Run lints (must pass with no warnings)
 cargo clippy -- -D warnings
 
-# Check for security vulnerabilities
-cargo audit
+# Check for security vulnerabilities (CI passes the same --ignore list
+# as deny.toml's [advisories] ignore)
+cargo audit --ignore RUSTSEC-2026-0440
 
 # Check dependency policy (advisories, bans, licenses, sources)
 cargo deny --locked check
+
+# Look for newer releases, major versions included
+cargo outdated --root-deps-only
+cargo upgrade --incompatible allow --dry-run
 ```
+
+cargo-deny and cargo-audit keep separate advisory databases
+(`~/.cargo/advisory-dbs` and `~/.cargo/advisory-db`). Until 2026-11, `deny.toml`
+pointed cargo-deny at cargo-audit's directory, after which `cargo audit`
+fails with "failed to prepare clone". If it does, delete
+`~/.cargo/advisory-db` once; it is a cache and is fetched again.
 
 ### Fuzz Testing
 
@@ -179,13 +201,23 @@ fn test_parse() { }  // Too vague
 src/
 ├── main.rs           # Entry point
 ├── lib.rs            # Library exports
-├── config.rs         # Configuration
-├── error.rs          # Error types
+├── config.rs         # Configuration from environment variables
+├── error.rs          # Error types and their HTTP status codes
+├── routes.rs         # Routes and the middleware stack
+├── state.rs          # Shared state, background tasks, shutdown
+├── metrics.rs        # Prometheus metrics
+├── validation.rs     # Input validation
+├── utils.rs          # Shutdown-signal helpers
+├── iggy_client/      # Iggy SDK wrapper: connection, seeds, lanes, events,
+│                     # circuit breaker
 ├── handlers/         # HTTP handlers
-├── middleware/       # Axum middleware
-├── models/           # Domain models
-└── services/         # Business logic
+├── middleware/       # Rate limit, auth, client IP, request ID, timeout
+├── models/           # Request/response types, events, topic options
+└── services/         # Producer, consumer, HTTP sink receiver
 ```
+
+README.md's Project Structure lists every file, including the compose
+files, `connectors/`, `scripts/` and the test suites.
 
 ## Releasing
 
@@ -241,7 +273,7 @@ way. Two things outlive the exercise:
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/mlevkov/iggy_sample/discussions) for questions
+- Open an [issue](https://github.com/mlevkov/iggy_sample/issues) for questions
 - Check existing issues for similar problems
 - Review the [README](README.md) and [architecture.md](architecture.md)
 

@@ -120,13 +120,13 @@ impl ConnectionState {
     ///
     /// # Implementation Note
     ///
-    /// Creating `Notified` does NOT register the waiter — registration
-    /// happens on first poll (or an explicit `enable()`), and
-    /// `notify_waiters()` stores no permit for late registrants. So we must
-    /// `enable()` BEFORE checking `is_reconnecting()`: otherwise the leader
-    /// can call `stop_reconnecting()` between our check and our first poll,
-    /// and the wakeup is lost (the waiter then stalls until its own caller's
-    /// deadline instead of waking immediately).
+    /// The `Notified` future must exist BEFORE `is_reconnecting()` is checked:
+    /// otherwise the leader can call `stop_reconnecting()` between the check
+    /// and the future's creation, and the wakeup is lost (the waiter then
+    /// stalls until its own caller's deadline). tokio guarantees that a
+    /// `Notified` receives `notify_waiters()` wakeups from the moment it is
+    /// created, even before it is polled; the explicit `enable()` below also
+    /// registers it, which would matter for `notify_one()` (not used here).
     pub async fn wait_for_reconnection(&self) {
         let notified = self.reconnect_complete.notified();
         tokio::pin!(notified);

@@ -30,10 +30,17 @@ You can expect:
 
 This project implements several security measures:
 
-- **Constant-time comparison** for API key authentication (timing attack resistant)
+- **Constant-time comparison** for the API key and for the HTTP sink
+  receiver's bearer token (timing attack resistant)
 - **Input validation** on all user-provided data
 - **Rate limiting** to prevent abuse
-- **No secrets in code** - all credentials via environment variables
+- **Brute-force blocking** of verified client IPs after repeated
+  authentication failures. `API_KEY` therefore requires `TRUSTED_PROXIES`
+  (startup refuses it otherwise, unless `ALLOW_UNVERIFIED_CLIENT_IPS=true`
+  for local development)
+- **No secrets in code** - credentials come from environment variables,
+  or a file (`SINK_INBOUND_TOKEN_FILE`); the connectors demo generates its
+  secrets into Docker volumes on first start
 - **Dependency auditing** via `cargo-deny` and `cargo-audit` in CI
 - **License compliance** via `cargo-deny`
 
@@ -48,17 +55,29 @@ Dependencies are monitored via:
   `rust-version` (TD-2026-07-02); the checks below still flag it
 - `cargo deny --locked check` in CI, gating every pull request through the
   required `CI Success` check and also run weekly: vulnerability,
-  unmaintained and unsound advisories in any crate fail it, and so does a
-  yanked crate. The job starts from an empty cargo cache so the yank
+  unmaintained and unsound advisories in any crate it builds fail it, and so
+  does a yanked crate. The job starts from an empty cargo cache so the yank
   status comes from a fresh index, and an index entry it cannot read
-  fails the check too
+  fails the check too. Two limits:
+  - an advisory in `deny.toml`'s `ignore` list is accepted, each with its
+    reason and when to drop it (now only RUSTSEC-2026-0440,
+    `astral-tokio-tar`, unmaintained and dev-only);
+  - its `[graph]` targets are the four native release targets, so a crate
+    that only wasm32 builds use is not checked (RUSTSEC-2026-0441 came in
+    that way, #94).
 - `cargo-audit` (`rustsec/audit-check`) on every CI run. On pushes and pull
   requests a vulnerability advisory fails the job, and with it `CI
   Success`, including one in a crate that sits in `Cargo.lock` without being
   built, which the `cargo-deny` gate never sees; unsound, unmaintained and
-  yanked findings only warn there. The weekly scheduled run does not fail
-  on advisories: it opens a GitHub issue per new advisory instead, skipping
-  any advisory ID already named in an issue or PR title, open or closed
+  yanked findings only warn there. It skips the IDs in its `ignore` input
+  (`ci.yml`), which is kept equal to `deny.toml`'s list. The weekly
+  scheduled run does not fail on advisories: it opens a GitHub issue per new
+  advisory instead, skipping any advisory ID already named in an issue or PR
+  title, open or closed
+- A manual check for newer releases, major versions included, with
+  `cargo outdated --root-deps-only` and
+  `cargo upgrade --incompatible allow --dry-run` (`cargo-outdated` and
+  `cargo-edit`; see CONTRIBUTING.md)
 - Manual review of security advisories
 
 Dependabot alerts and security updates are not relied on for Rust crates:

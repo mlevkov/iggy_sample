@@ -72,8 +72,10 @@ skip = []
 # direct dependencies only, yanked a warning). Enforced in CI by the
 # "Dependency Policy" job (cargo deny --locked check).
 [advisories]
-# Path to the advisory database
-db-path = "~/.cargo/advisory-db"
+# No db-path: cargo-deny's default, $CARGO_HOME/advisory-dbs, keeps its
+# clones apart from cargo-audit's ~/.cargo/advisory-db. This file used to
+# set db-path to that same directory, and after a cargo-deny run there
+# `cargo audit` failed with "failed to prepare clone".
 
 # URL to the advisory database
 db-urls = ["https://github.com/rustsec/advisory-db"]

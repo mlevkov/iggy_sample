@@ -43,7 +43,7 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 
 ### Development & Testing
 - Docker Compose setup for local development
-- Comprehensive test suite (285 unit tests, 42 integration tests, 18 model tests, a metrics exporter smoke test, plus cluster and connectors tests that run weekly against their compose stacks)
+- Comprehensive test suite (291 unit tests, 44 integration tests, 18 model tests, a metrics exporter smoke test, plus cluster and connectors tests that run weekly against their compose stacks)
 - Integration tests with testcontainers (auto-spins Iggy server)
 - Fuzz testing for input validation functions
 
@@ -56,16 +56,20 @@ Apache Iggy is capable of processing millions of messages per second with ultra-
 ├─────────────────────────────────────────────────────────────┤
 │  Middleware Stack                                           │
 │  Rate Limit → Auth → Request ID → Timeout → Tracing → CORS  │
+│  → Body Limit                                               │
 ├─────────────────────────────────────────────────────────────┤
 │  Handlers                                                   │
 │  ├── health.rs    - Health/readiness checks, stats          │
+│  ├── cluster.rs   - Cluster nodes and roles                 │
 │  ├── messages.rs  - Send/poll messages                      │
 │  ├── streams.rs   - Stream CRUD operations                  │
-│  └── topics.rs    - Topic CRUD operations                   │
+│  ├── topics.rs    - Topic CRUD with per-topic options       │
+│  └── sink.rs      - HTTP sink receiver (connectors demo)    │
 ├─────────────────────────────────────────────────────────────┤
 │  Services                                                   │
 │  ├── producer.rs  - Message publishing logic                │
-│  └── consumer.rs  - Message consumption logic               │
+│  ├── consumer.rs  - Message consumption logic               │
+│  └── sink_inbox.rs - Sink batches: parsing, retention       │
 ├─────────────────────────────────────────────────────────────┤
 │  IggyClientWrapper (with auto-reconnection)                 │
 │  High-level wrapper around Iggy SDK                         │
@@ -96,11 +100,12 @@ cp .env.example .env
 ### 2. Start the Full Stack
 
 ```bash
-# Start Iggy server with observability stack
-docker-compose up -d
+# Start Iggy server, the gateway and the observability stack
+docker compose up -d
 ```
 
 This starts:
+- **Sample App** - This gateway, built from the checkout (port 8000, metrics on 9091)
 - **Iggy Server** - Message streaming (ports 8090, 8080, 3000)
 - **Iggy Web UI** - Served by the server itself at `/ui` (port 3000)
 - **iggy-pat-init** - One-shot: creates the token Prometheus scrapes Iggy's `/metrics` with
@@ -117,11 +122,17 @@ This starts:
 
 ### 3. Run the Application
 
+The gateway is already running in the `app` container, on
+`http://localhost:8000`. To run it from source instead, stop that container
+first, and move the metrics port off 9090, which Prometheus holds:
+
 ```bash
-cargo run
+docker compose stop app
+METRICS_PORT=9092 cargo run
 ```
 
-The server will start on `http://localhost:8000` (or the port specified in `.env`).
+Run that way, the gateway reads `.env` and connects to `localhost:8090`
+(the server's published port).
 
 ### 4. Verify It's Working
 
@@ -158,7 +169,7 @@ Expected response:
 | `/health` | GET | Health check with Iggy connection status |
 | `/ready` | GET | Kubernetes readiness probe (200 if ready) |
 | `/stats` | GET | Service statistics (streams, messages, uptime) |
-| `/cluster` | GET | Cluster nodes with their roles and health (`single-node` when clustering is off) |
+| `/cluster` | GET | Cluster nodes with their roles and reported status (`single-node` when clustering is off). Server 0.10 reports `healthy` even for a node that is down; a topic read's `in_sync_members` is the live signal |
 
 ### HTTP Sink Receiver (connectors demo)
 
@@ -166,7 +177,7 @@ Routed only when `SINK_INBOUND_TOKEN` (or `SINK_INBOUND_TOKEN_FILE`) is set; see
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/sink/inbound` | POST | Receive an `ndjson` batch from the HTTP sink connector (`Authorization: Bearer <token>`) |
+| `/sink/inbound` | POST | Receive an `ndjson` batch from the HTTP sink connector (`Authorization: Bearer <token>`, `Content-Type: application/x-ndjson`; checked in that order, before the body is read: 401, then 415) |
 | `/sink/inbound` | GET | What the sink delivered: counters and the newest deliveries |
 
 ### Messages (Default Stream/Topic)
@@ -420,18 +431,22 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 | `RECONNECT_BASE_DELAY_MS` | `1000` | Base delay for exponential backoff |
 | `RECONNECT_MAX_DELAY_MS` | `30000` | Max delay between reconnection attempts |
 | `HEALTH_CHECK_INTERVAL_SECS` | `30` | Connection health check interval |
+| `OPERATION_TIMEOUT_SECS` | `30` | Bound on each Iggy operation; `X-Request-Timeout` can only shorten it |
+| `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive failures that open the circuit breaker |
+| `CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | `2` | Half-open successes that close it again |
+| `CIRCUIT_BREAKER_OPEN_DURATION_SECS` | `30` | Time open before half-open (must be greater than 0) |
 
 ### Rate Limiting & Security
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RATE_LIMIT_RPS` | `100` | Requests per second (0 = disabled) |
 | `RATE_LIMIT_BURST` | `50` | Instantaneous bucket capacity (replaces, not adds to, the default) |
-| `API_KEY` | (none) | API key for authentication (disabled if not set) |
+| `API_KEY` | (none) | API key for authentication (disabled if not set). Clients send it as `X-API-Key: <key>`; the `api_key` query parameter still works but is deprecated and logs a warning |
 | `AUTH_BYPASS_PATHS` | `/health,/ready` | Comma-separated paths that bypass auth |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
 | `TRUSTED_PROXIES` | (none) | Comma-separated CIDR ranges of your reverse proxies; client IPs are taken from forwarded headers only when the peer is inside one. **Required when `API_KEY` is set** |
 | `ALLOW_UNVERIFIED_CLIENT_IPS` | `false` | Start with `API_KEY` but no `TRUSTED_PROXIES`, for local development only: brute-force protection then throttles but never blocks |
-| `SINK_INBOUND_TOKEN` | (none) | Bearer token of the HTTP sink receiver; 32 to 1024 printable characters. Unset, `/sink/inbound` does not exist |
+| `SINK_INBOUND_TOKEN` | (none) | Bearer token of the HTTP sink receiver; 32 to 1024 printable ASCII characters, without spaces. Unset, `/sink/inbound` does not exist |
 | `SINK_INBOUND_TOKEN_FILE` | (none) | A file holding that token instead (trailing newline ignored); set one or the other |
 
 ### Message Limits & Observability
@@ -440,11 +455,13 @@ Configuration is loaded from environment variables. See `.env.example` for the c
 | `BATCH_MAX_SIZE` | `1000` | Max messages per batch send |
 | `POLL_MAX_COUNT` | `100` | Max messages per poll |
 | `STATS_CACHE_TTL_SECS` | `5` | Stats cache refresh interval |
+| `MAX_REQUEST_BODY_SIZE` | `10485760` | Request body limit in bytes (10 MiB); larger bodies get 413 |
+| `METRICS_PORT` | `9090` | Prometheus exporter port; `0` disables it. Under docker-compose the gateway's is published on 9091, since Prometheus holds 9090 |
 
 ### Connection String Format
 
 ```
-iggy://username:password@host:port
+iggy://username:password@host:port[,host:port...][?options]
 ```
 
 Example:
@@ -460,7 +477,8 @@ iggy://iggy:iggy@10.29.0.10:8090,10.29.0.11:8090,10.29.0.12:8090
 ```
 
 Options after `?` go to the SDK. The gateway caps the SDK's reconnection
-retries at 3 unless you set the option yourself
+retries at 3 unless you set the option yourself (`reconnection_retries`, or
+`reconnection_max_retries` for `iggy+quic://`)
 ([ADR-0003](docs/adr/0003-cap-sdk-reconnection-retries.md)). It rides out a
 server restart of a few seconds. After that, requests get an immediate 503
 while the server is down, instead of each waiting up to 30 s. To keep retrying
@@ -493,10 +511,19 @@ iggy_sample/
 │   ├── entrypoint.sh       # Renders the runtime config from the templates
 │   ├── healthcheck.sh      # Healthy once both connectors run
 │   └── templates/          # Runtime and connector TOML templates
+├── observability/          # Prometheus and Grafana configuration (see Observability)
+├── docs/                   # Guides, demos, ADRs, tech debt, review records
+├── Cargo.lock              # Locked dependency versions
 ├── deny.toml               # License/security policy (cargo-deny)
 ├── .env.example            # Environment variable template
+├── .commitlintrc.json      # Commit message rules
 ├── CLAUDE.md               # Project documentation for AI assistants
 ├── README.md               # This file
+├── architecture.md         # Architecture overview
+├── CHANGELOG.md            # Release notes
+├── CONTRIBUTING.md         # Development setup and conventions
+├── SECURITY.md             # Security policy, dependency monitoring
+├── LICENSE                 # MIT
 ├── src/
 │   ├── main.rs             # Application entry point
 │   ├── lib.rs              # Library exports
@@ -556,8 +583,10 @@ iggy_sample/
 ### Run Unit Tests
 
 ```bash
-cargo test
+cargo test --lib --test model_tests
 ```
+
+`cargo test` alone also runs the integration tests, which need Docker.
 
 ### Run Integration Tests
 
@@ -570,9 +599,11 @@ cargo test --test integration_tests
 
 ### Run with Coverage
 
+CI measures coverage with cargo-llvm-cov 0.9.1:
+
 ```bash
-cargo install cargo-tarpaulin
-cargo tarpaulin --out Html
+cargo install --locked cargo-llvm-cov@0.9.1
+cargo llvm-cov --all-features --workspace --html
 ```
 
 ## Docker
@@ -680,7 +711,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/metrics
 curl http://localhost:9091/metrics
 
 # Query via Prometheus
-curl 'http://localhost:9090/api/v1/query?query=up{job="iggy"}'
+curl -G http://localhost:9090/api/v1/query --data-urlencode 'query=up{job="iggy"}'
 ```
 
 ### Configuration Files
@@ -753,15 +784,19 @@ Events follow a structured format with type-safe payloads:
 
 ## Error Handling
 
-All errors return structured JSON responses:
+The gateway's own errors are JSON:
 
 ```json
 {
   "error": "error_type",
-  "message": "Human-readable message",
-  "details": "Optional additional context"
+  "message": "Human-readable message"
 }
 ```
+
+A few responses come from layers below the handlers and have a plain-text
+body: the rate limiter's 429 (with `Retry-After`), the body limit's 413, and
+request-format rejections from axum (400 for malformed JSON, 415 for a
+missing `Content-Type: application/json`, 422 for an unknown field).
 
 | Error Type | HTTP Status | Description |
 |------------|-------------|-------------|
@@ -777,8 +812,14 @@ All errors return structured JSON responses:
 | `topic_error` | 500 | Topic operation failed |
 | `send_error` | 500 | Message send failed |
 | `poll_error` | 500 | Message poll failed |
+| `internal_error` | 500 | Internal error |
+| `config_error` | 500 | Configuration error |
 | `not_found` | 404 | Resource not found |
-| `bad_request` | 400 | Invalid request data |
+| `bad_request` | 400 | Invalid request data, or topic options the server refused |
+| `serialization_error` | 400 | Payload could not be (de)serialized |
+| `unauthorized` | 401 | Missing or wrong API key, or sink token |
+| `too_many_requests` | 429 | Too many failed authentication attempts from a verified IP |
+| `unsupported_media_type` | 415 | `/sink/inbound` without `Content-Type: application/x-ndjson` |
 
 One Iggy outcome is not an error: when the server reports that a write was
 already applied but its reply is gone (`RequestAlreadyApplied`), the
@@ -797,7 +838,7 @@ This application implements multiple security layers suitable for production dep
 | CORS | `src/routes.rs` | Configurable origin whitelist via `CORS_ALLOWED_ORIGINS` using `tower-http` |
 | API Key Authentication | `src/middleware/auth.rs` | Constant-time comparison to prevent timing attacks |
 | Rate Limiting | `src/middleware/rate_limit.rs` | Token bucket algorithm via Governor, configurable RPS and burst |
-| Brute Force Protection | `src/middleware/auth.rs` | Per-IP tracking of failed authentication attempts |
+| Brute Force Protection | `src/middleware/auth.rs` | Per-IP tracking of failed authentication attempts: a verified IP is blocked once over budget, an unverified one only throttled |
 | Input Validation | `src/validation.rs` | Sanitization of stream names, topic names, and event types |
 | Trusted Proxy Support | `src/middleware/ip.rs` | X-Forwarded-For validation against configurable CIDR ranges |
 | Request ID Propagation | `src/middleware/request_id.rs` | UUIDv4 generation for distributed tracing |
@@ -819,8 +860,8 @@ For deployment guidelines (reverse proxy configuration, trusted proxies), see [C
 - **Batch Operations**: Use `/messages/batch` for high-throughput scenarios
 - **Partitioning**: Configure appropriate partition count for parallelism
 - **Partition Keys**: Use consistent keys for ordered processing within a partition
-- **Auto-Commit**: Enable for at-least-once delivery semantics
-- **Connection Pooling**: The client maintains persistent connections
+- **Auto-Commit**: `auto_commit=true` stores the offset as part of the poll: at most once, so a lost response skips those messages
+- **One shared client**: one persistent SDK client serves every request; on a cluster it keeps a link to every node
 
 ## Dependencies
 
@@ -849,14 +890,14 @@ This project uses GitHub Actions for continuous integration and deployment:
 | Workflow | Trigger | Description |
 |----------|---------|-------------|
 | `ci.yml` | Push, PR, weekly | Tests, linting, coverage, dependency policy, security audit |
-| `pr.yml` | PR | Size checks, conventional commits, semver |
+| `pr.yml` | PR | Size, conventional commits, documentation, semver, complexity, coverage diff, Dependabot config, checklist |
 | `release.yml` | Tag `vX.Y.Z` or `vX.Y.Z-<suffix>` | Multi-platform builds, GitHub release, docs deploy |
 | `verify-release.yml` | Green Release run, or by hand | Checks the run with `scripts/verify-release.sh` |
-| `extended-tests.yml` | Weekly | Benchmarks, three-node cluster tests and failover demo, memory checks |
+| `extended-tests.yml` | Weekly, or by hand | Benchmarks, cluster tests and failover demo, connectors tests and demo, Valgrind, Miri, feature matrix, documentation coverage |
 
 ### Automated Checks
 - **Formatting**: `cargo fmt --check`
-- **Linting**: `cargo clippy -- -D warnings`, and `shellcheck` for `scripts/`
+- **Linting**: `cargo clippy --locked --all-targets --all-features -- -D warnings`, and `shellcheck` for `scripts/`, `observability/` and `connectors/`
 - **Tests**: stable and beta on Linux, macOS and Windows, plus the MSRV on Linux
 - **Coverage**: `cargo llvm-cov`. CI's Code Coverage job writes the line
   total to its job summary, and on pull requests PR Checks' Coverage Diff
@@ -865,13 +906,17 @@ This project uses GitHub Actions for continuous integration and deployment:
 - **Dependency policy**: `cargo deny --locked check` (advisories, bans,
   licenses, sources)
 - **Security**: `cargo-audit` vulnerability scanning; blocking on pushes and
-  PRs, and the weekly run files an issue per new advisory
+  PRs, and the weekly run files an issue per new advisory. It accepts the
+  advisories `deny.toml` accepts (now RUSTSEC-2026-0440)
 
 ### Dependabot
 Automatically creates PRs for:
 - Cargo dependency updates, direct and transitive (weekly), except a
   version that needs a newer Rust than the MSRV (TD-2026-07-02)
 - GitHub Actions updates (weekly)
+- Base images of the root `Dockerfile` (weekly). Not the compose files'
+  `apache/iggy` tag, which moves with the SDK, and not `connectors/Dockerfile`,
+  whose digests move by hand
 
 ## Documentation
 

@@ -47,7 +47,8 @@ Producer → Event → Message Broker → Consumer(s) (asynchronous, decoupled)
 Apache Iggy is a persistent message streaming platform written in Rust, designed for:
 - **High throughput**: Millions of messages/second
 - **Low latency**: Sub-millisecond tail latencies
-- **Durability**: Persistent append-only log with configurable retention
+- **Durability**: Persistent append-only log with per-topic retention and durability
+- **Replication**: Optional clustering (VSR consensus) with a per-topic replication factor
 - **Multiple protocols**: TCP, QUIC, HTTP, WebSocket
 
 ---
@@ -72,8 +73,8 @@ A **stream** is a top-level container for related topics. Use streams for:
 - Domain boundaries (ecommerce, analytics, notifications)
 
 ```rust
-// Creating a stream
-client.create_stream("ecommerce", Some(1)).await?;
+// Creating a stream (the server assigns its numeric ID)
+client.create_stream("ecommerce", &StreamCreateOptions::default()).await?;
 ```
 
 ### Topics
@@ -85,15 +86,21 @@ A **topic** is a named channel for a specific category of events. Think of it as
 
 ```rust
 // Creating a topic with 3 partitions, 7-day retention
-client.create_topic(
-    "ecommerce",           // stream
-    "orders",              // topic name
-    3,                     // partitions
-    None,                  // compression (None = default)
-    None,                  // replication (future)
-    Some(IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?)),
-    None,                  // max topic size
-).await?;
+client
+    .create_topic(
+        &Identifier::named("ecommerce")?, // stream, by name or numeric ID
+        "orders",                         // topic name
+        &TopicCreateOptions {
+            partitions_count: Some(3),
+            message_expiry: Some(IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?)),
+            // Nodes that store each partition; None takes the server's
+            // default: every node of a cluster, so 1 on a single node
+            replication_factor: None,
+            // Options left out take the server's defaults
+            ..Default::default()
+        },
+    )
+    .await?;
 ```
 
 **Topic Design Guidelines:**
@@ -121,12 +128,12 @@ Topic: "orders" (3 partitions)
 **Critical Understanding:**
 
 ```
-❌ WRONG: Partitions as categories
+WRONG: Partitions as categories
    Partition 0 = "pending orders"
    Partition 1 = "shipped orders"
    Partition 2 = "cancelled orders"
 
-✅ CORRECT: Partitions as parallel lanes
+CORRECT: Partitions as parallel lanes
    Partition 0 = orders hashing to 0 (any status)
    Partition 1 = orders hashing to 1 (any status)
    Partition 2 = orders hashing to 2 (any status)
@@ -170,7 +177,9 @@ Producer → Topic (3 partitions) → Consumer Group "workers"
                                   └── Worker C (partition 2)
 ```
 
-Each message is processed by exactly one consumer in the group.
+Each message is delivered to one consumer in the group. After a rebalance or a
+failover, messages that were read but not yet committed can be delivered again,
+so processing must be idempotent (see [Idempotency](#idempotency)).
 
 ### Pattern 3: Event Sourcing
 
@@ -213,19 +222,29 @@ A partition key ensures related messages go to the same partition:
 ```rust
 // All events for order-123 go to same partition
 let partition_key = format!("order-{}", order_id);
-producer.send_with_key(partition_key, message).await?;
+let partitioning = Partitioning::messages_key_str(&partition_key)?;
+producer
+    .send_with_partitioning(vec![message], Some(Arc::new(partitioning)))
+    .await?;
 ```
+
+Through this gateway, the optional `partition_key` field of a send request does
+the same; without it, sends are balanced across partitions.
 
 **How it works:**
 
 ```
-partition_key = "order-123"
-partition_index = hash("order-123") % num_partitions
-                = 2847623847 % 3
-                = 1
+partition_key   = "order-123"
+partition_index = xxh32("order-123") % partitions_count
+                = 3483354390 % 3
+                = 0
 
-All "order-123" events → Partition 1 → Processed in order
+All "order-123" events → Partition 0 → Processed in order
 ```
+
+A binary client (TCP, QUIC, WebSocket) computes the partition before sending;
+over HTTP the server computes it. Adding partitions changes `partitions_count`,
+which can move a key to another partition.
 
 ### Choosing Partition Keys
 
@@ -240,31 +259,38 @@ All "order-123" events → Partition 1 → Processed in order
 ### Code Example
 
 ```rust
+use std::sync::Arc;
+
 use iggy::prelude::*;
+use uuid::Uuid;
 
 // Publishing with partition key
 async fn publish_order_event(
     producer: &IggyProducer,
     order_id: Uuid,
-    event: OrderEvent,
-) -> Result<(), Error> {
-    let message = serde_json::to_vec(&event)?;
-    
+    event: &OrderEvent,
+) -> anyhow::Result<()> {
+    let payload = serde_json::to_vec(event)?;
+    let message = IggyMessage::builder().payload(payload.into()).build()?;
+
     // Use order_id as partition key - ensures ordering
-    let partition_key = order_id.to_string();
-    
+    let partitioning = Partitioning::messages_key_str(&order_id.to_string())?;
+
     producer
-        .send_with_key(partition_key, message)
+        .send_with_partitioning(vec![message], Some(Arc::new(partitioning)))
         .await?;
-    
+
     Ok(())
 }
 
-// All these events for order-123 will be processed in order:
-publish_order_event(&producer, order_123, OrderEvent::Created { .. }).await?;
-publish_order_event(&producer, order_123, OrderEvent::Paid { .. }).await?;
-publish_order_event(&producer, order_123, OrderEvent::Shipped { .. }).await?;
+// Events of order 123, sent one after another from one task, keep this order:
+for event in [&created, &paid, &shipped] {
+    publish_order_event(&producer, order_123, event).await?;
+}
 ```
+
+The key puts the events in one partition; awaiting each send before the next
+keeps their order there. Concurrent sends can reach the partition in any order.
 
 ---
 
@@ -291,35 +317,44 @@ Partition 5 ─┴─→ Consumer C
 
 | Guarantee | Description |
 |-----------|-------------|
-| **Each message processed once** | Within a group, no duplicates |
+| **At-least-once delivery** | Each message goes to one member; a rebalance or failover can deliver messages read but not yet committed again, so consumers must be idempotent |
 | **Partition exclusivity** | One consumer owns a partition at a time |
-| **Automatic rebalancing** | If consumer dies, partitions reassigned |
-| **Offset tracking** | Server tracks progress per consumer |
+| **Automatic rebalancing** | If a consumer leaves or its session ends, its partitions are reassigned |
+| **Offset tracking** | Server stores the group's offset for each partition |
 
 ### Creating a Consumer Group
 
 ```rust
+use futures::StreamExt;
 use iggy::prelude::*;
 
 let mut consumer = client
-    .consumer_group("ecommerce", "orders", "order-processors")?
-    .auto_commit(AutoCommit::IntervalOrWhen(
-        IggyDuration::from_str("5s")?,
-        AutoCommitWhen::ConsumingAllMessages,
-    ))
-    .create_consumer_group_if_not_exists()
-    .auto_join_consumer_group()
+    .consumer_group("order-processors", "ecommerce", "orders")? // group, stream, topic
+    .poll_options(PollOptions {
+        count: 100,
+        // Store the position of processed messages every 5 s or 10,000 messages
+        commit: CommitPolicy::Auto(AutoCommit::default()),
+        ..PollOptions::wait(IggyDuration::ONE_SECOND)
+    })
     .polling_strategy(PollingStrategy::next())
-    .batch_size(100)
     .build();
 
+// Creates the group if it does not exist (the default) and joins it
 consumer.init().await?;
 
-while let Some(message) = consumer.next().await {
-    process_message(message)?;
-    // Offset auto-committed every 5s or when batch complete
+while let Some(received) = consumer.next().await {
+    let received = received?;
+    process_message(&received.message).await?;
+    // The message counts as processed once the loop asks for the next one
 }
+
+// Stores the last position and leaves the group
+consumer.shutdown().await?;
 ```
+
+`shutdown()` also counts the message the loop received last as processed. Where
+a failed message must come back, commit manually
+([At-Least-Once Delivery](#at-least-once-delivery)).
 
 ### Scaling with Consumer Groups
 
@@ -350,21 +385,26 @@ Over-scaled: 4 consumers, 3 partitions (one idle)
 
 ### Retention Policies
 
-Iggy supports time-based message expiry:
+Iggy supports time-based message expiry, set per topic:
 
 ```rust
 // Topic with 7-day retention
-IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?)
+let transient = IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?);
 
 // Topic with 1-year retention (audit logs)
-IggyExpiry::ExpireDuration(IggyDuration::from_str("365days")?)
+let audit = IggyExpiry::ExpireDuration(IggyDuration::from_str("365days")?);
 
 // Never expire (permanent event store)
-IggyExpiry::NeverExpire
+let permanent = IggyExpiry::NeverExpire;
 
 // Use server default
-IggyExpiry::ServerDefault
+let default = IggyExpiry::ServerDefault;
 ```
+
+A topic can also cap its size (`max_topic_size`). Both delete whole sealed
+segments and never touch the active one: expiry deletes a segment once its
+newest message has expired, so a message can outlive its expiry. See the
+[Durable Storage Guide](durable-storage-guide.md#data-retention-policies).
 
 ### Retention Strategy by Use Case
 
@@ -378,26 +418,34 @@ IggyExpiry::ServerDefault
 ### Example: Multi-Topic Retention
 
 ```rust
+let myapp = Identifier::named("myapp")?;
+
 // Transient processing queue - 7 days
-client.create_topic(
-    "myapp", "task-queue", 3, None, None,
-    Some(IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?)),
-    None,
-).await?;
+let task_queue = TopicCreateOptions {
+    partitions_count: Some(3),
+    message_expiry: Some(IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?)),
+    ..Default::default()
+};
+client.create_topic(&myapp, "task-queue", &task_queue).await?;
 
 // Audit log - 1 year
-client.create_topic(
-    "myapp", "audit-log", 1, None, None,
-    Some(IggyExpiry::ExpireDuration(IggyDuration::from_str("365days")?)),
-    None,
-).await?;
+let audit_log = TopicCreateOptions {
+    partitions_count: Some(1),
+    message_expiry: Some(IggyExpiry::ExpireDuration(IggyDuration::from_str("365days")?)),
+    ..Default::default()
+};
+client.create_topic(&myapp, "audit-log", &audit_log).await?;
 
 // Event store - never expire
-client.create_topic(
-    "myapp", "event-store", 10, None, None,
-    Some(IggyExpiry::NeverExpire),
-    None,
-).await?;
+let event_store = TopicCreateOptions {
+    partitions_count: Some(10),
+    message_expiry: Some(IggyExpiry::NeverExpire),
+    // Acknowledge a write only once it is on stable storage;
+    // Replicated, the default, can acknowledge it before it reaches disk
+    durability: Durability::Persisted,
+    ..Default::default()
+};
+client.create_topic(&myapp, "event-store", &event_store).await?;
 ```
 
 ---
@@ -406,15 +454,32 @@ client.create_topic(
 
 ### At-Most-Once Delivery
 
-Process before committing offset. May lose messages on failure.
+Commit the offset before processing. May lose messages on failure.
 
 ```rust
-while let Some(message) = consumer.next().await {
-    // Offset committed immediately (auto-commit)
-    // If process_message fails, message is lost
-    process_message(message)?;
+let mut consumer = client
+    .consumer_group("metrics-readers", "stream", "topic")?
+    .poll_options(PollOptions {
+        // The server stores the offset as part of each read
+        commit: CommitPolicy::OnRead,
+        ..PollOptions::wait(IggyDuration::ONE_SECOND)
+    })
+    .build();
+consumer.init().await?;
+
+while let Some(received) = consumer.next().await {
+    let received = received?;
+    // Offset already stored: if processing fails, the message is not delivered again
+    if let Err(e) = process_message(&received.message).await {
+        log::warn!("Dropped a message: {}", e);
+    }
 }
+
+consumer.shutdown().await?;
 ```
+
+On a cluster this is at most once only while the partition's primary stays up:
+a failover before the stored offset replicates can deliver the last batch again.
 
 **Use when**: Losing occasional messages is acceptable (metrics, logs).
 
@@ -424,22 +489,34 @@ Commit offset only after successful processing. May reprocess on failure.
 
 ```rust
 let mut consumer = client
-    .consumer_group("stream", "topic", "group")?
-    .auto_commit(AutoCommit::Disabled)  // Manual commit
+    .consumer_group("group", "stream", "topic")?
+    .poll_options(PollOptions {
+        commit: CommitPolicy::Manual, // the default: the application commits
+        ..PollOptions::wait(IggyDuration::ONE_SECOND)
+    })
     .build();
+consumer.init().await?;
 
-while let Some(message) = consumer.next().await {
-    match process_message(&message) {
-        Ok(_) => {
-            consumer.commit_offset().await?;  // Commit after success
+while let Some(received) = consumer.next().await {
+    let received = received?;
+    match process_message(&received.message).await {
+        Ok(()) => {
+            consumer.commit(received.checkpoint()).await?; // Commit after success
         }
         Err(e) => {
             log::error!("Processing failed: {}, will retry", e);
-            // Don't commit - message will be redelivered
+            // Don't commit, and stop: a commit covers every earlier message of
+            // its partition, so committing a later one would skip this one
+            break;
         }
     }
 }
+
+consumer.shutdown().await?;
 ```
+
+After `shutdown()` the next member to read the partition, or this consumer once
+restarted, starts after the last commit, so the failed message comes back.
 
 **Use when**: Every message must be processed (orders, payments).
 
@@ -451,22 +528,26 @@ Move poison messages aside after retry exhaustion.
 const MAX_RETRIES: u32 = 3;
 
 async fn process_with_dlq(
-    message: &Message,
+    message: &IggyMessage,
     dlq_producer: &IggyProducer,
-) -> Result<(), Error> {
+) -> anyhow::Result<()> {
+    // e.g. from a `retry-count` user header
     let retry_count = get_retry_count(message);
-    
+
     match process_message(message).await {
-        Ok(_) => Ok(()),
-        Err(e) if retry_count < MAX_RETRIES => {
+        Ok(()) => Ok(()),
+        Err(_) if retry_count < MAX_RETRIES => {
             // Requeue with incremented retry count
             requeue_with_retry(message, retry_count + 1).await
         }
         Err(e) => {
             // Max retries exceeded - send to DLQ
             log::error!("Moving to DLQ after {} retries: {}", retry_count, e);
-            dlq_producer.send(message.to_dlq_format()).await?;
-            Ok(())  // Commit original message
+            let dead_letter = IggyMessage::builder()
+                .payload(message.payload.clone())
+                .build()?;
+            dlq_producer.send(vec![dead_letter]).await?;
+            Ok(()) // Commit original message
         }
     }
 }
@@ -476,49 +557,35 @@ async fn process_with_dlq(
 
 Design consumers to handle duplicate messages safely.
 
-**Why idempotency matters:** In at-least-once delivery, the same message may be processed multiple times (network retries, consumer restarts). Your processing logic must handle this gracefully.
+**Why idempotency matters:** In at-least-once delivery, the same message may be processed multiple times (network retries, consumer restarts, consumer group rebalances, failovers). Your processing logic must handle this gracefully.
 
 **The Pattern:** Store processed event IDs in a database. Before processing, check if the event was already handled.
 
 ```rust
 /// Database represents your application's persistent storage.
 /// This could be PostgreSQL, MySQL, MongoDB, Redis, or any database.
-/// 
+///
 /// The key requirement: it must support atomic transactions so we can
 /// record the event ID and apply changes together.
-/// 
+///
 /// Example implementations:
-/// - PostgreSQL with sqlx: `sqlx::PgPool`
+/// - PostgreSQL with sqlx: `sqlx::PgPool` (used here)
 /// - MongoDB: `mongodb::Client`
 /// - Redis: `redis::Client` (for simple cases)
 struct Database {
-    pool: sqlx::PgPool,  // Example: PostgreSQL connection pool
+    pool: sqlx::PgPool, // Example: PostgreSQL connection pool
 }
 
 impl Database {
     /// Check if we've already processed this event.
     /// This prevents duplicate processing in at-least-once delivery.
-    async fn event_exists(&self, event_id: Uuid) -> Result<bool, Error> {
-        let result = sqlx::query!(
-            "SELECT 1 FROM processed_events WHERE event_id = $1",
-            event_id
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        
-        Ok(result.is_some())
-    }
-    
-    /// Execute multiple operations atomically.
-    /// Either all succeed or all fail - no partial updates.
-    async fn transaction<F, T>(&self, f: F) -> Result<T, Error>
-    where
-        F: FnOnce(&mut Transaction) -> Future<Output = Result<T, Error>>,
-    {
-        let mut tx = self.pool.begin().await?;
-        let result = f(&mut tx).await?;
-        tx.commit().await?;
-        Ok(result)
+    async fn event_exists(&self, event_id: Uuid) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query("SELECT 1 FROM processed_events WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.is_some())
     }
 }
 
@@ -526,45 +593,59 @@ impl Database {
 async fn process_order_idempotently(
     event: &OrderEvent,
     db: &Database,
-) -> Result<(), Error> {
+) -> Result<(), sqlx::Error> {
     // Step 1: Check if already processed using event ID
     // This is the idempotency check - critical for at-least-once delivery
     if db.event_exists(event.id).await? {
         log::info!("Event {} already processed, skipping", event.id);
-        return Ok(());  // Safe to return - we already handled this
+        return Ok(()); // Safe to return - we already handled this
     }
-    
+
     // Step 2: Process and record the event ID atomically
     // The transaction ensures: either BOTH happen or NEITHER happens
     // This prevents the bug where we process but don't record (causing reprocess)
-    db.transaction(|tx| async {
-        // Apply the business logic (update order status, send email, etc.)
-        apply_order_event(tx, event).await?;
-        
-        // Record that we processed this event ID
-        tx.record_event_id(event.id).await?;
-        
-        Ok(())
-    }).await
+    let mut tx = db.pool.begin().await?;
+
+    // Apply the business logic (update order status, send email, etc.)
+    apply_order_event(&mut tx, event).await?;
+
+    // Record that we processed this event ID. If another consumer processed
+    // the same event since step 1, the primary key fails this insert and the
+    // whole transaction rolls back.
+    sqlx::query("INSERT INTO processed_events (event_id, event_type) VALUES ($1, $2)")
+        .bind(event.id)
+        .bind(&event.event_type)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await
 }
 
 /// Apply the actual business logic for an order event.
 /// This is where you update your domain models.
-async fn apply_order_event(tx: &mut Transaction, event: &OrderEvent) -> Result<(), Error> {
+async fn apply_order_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event: &OrderEvent,
+) -> Result<(), sqlx::Error> {
     match &event.data {
         OrderData::Created { items, total } => {
             // Insert new order into database
-            sqlx::query!(
+            sqlx::query(
                 "INSERT INTO orders (id, items, total, status) VALUES ($1, $2, $3, 'pending')",
-                event.order_id, items, total
-            ).execute(tx).await?;
+            )
+            .bind(event.order_id)
+            .bind(sqlx::types::Json(items))
+            .bind(total)
+            .execute(&mut **tx)
+            .await?;
         }
         OrderData::Paid { amount } => {
             // Update order status to paid
-            sqlx::query!(
-                "UPDATE orders SET status = 'paid', paid_amount = $1 WHERE id = $2",
-                amount, event.order_id
-            ).execute(tx).await?;
+            sqlx::query("UPDATE orders SET status = 'paid', paid_amount = $1 WHERE id = $2")
+                .bind(amount)
+                .bind(event.order_id)
+                .execute(&mut **tx)
+                .await?;
         }
         // ... handle other event types
     }
@@ -583,8 +664,7 @@ CREATE TABLE processed_events (
     event_type VARCHAR(100)
 );
 
--- Index for fast lookups
-CREATE INDEX idx_processed_events_id ON processed_events(event_id);
+-- The primary key already indexes event_id for the lookup
 
 -- Optional: clean up old records (events older than retention period)
 -- Run periodically via cron or scheduled job
@@ -602,19 +682,24 @@ DELETE FROM processed_events WHERE processed_at < NOW() - INTERVAL '30 days';
 ```rust
 // THE PROBLEM: Two separate operations that can partially fail
 
-async fn create_order_naive(order: &Order, producer: &IggyProducer) -> Result<(), Error> {
+async fn create_order_naive(
+    db: &Database,
+    producer: &IggyProducer,
+    order: &Order,
+) -> anyhow::Result<()> {
     // Step 1: Save to database
-    db.save_order(&order).await?;
-    
+    db.save_order(order).await?;
+
     // Step 2: Publish event
-    producer.send(order_created_event).await?;  // What if this fails?
-    
+    let message = order_created_message(order)?;
+    producer.send(vec![message]).await?; // What if this fails?
+
     // If Step 1 succeeds but Step 2 fails:
     // - Order exists in database
     // - But no event was published
     // - Other services never learn about the order
     // - System is now INCONSISTENT
-    
+
     Ok(())
 }
 ```
@@ -625,66 +710,78 @@ Instead of publishing directly, write the event to an "outbox" table in the SAME
 
 ```rust
 /// The Outbox Pattern: Atomic database + event publishing
-/// 
+///
 /// How it works:
 /// 1. Business operation + event insert in ONE transaction
 /// 2. Separate "publisher" process reads outbox table
 /// 3. Publisher sends events to message broker
 /// 4. Publisher marks events as published
-/// 
+///
 /// Benefits:
 /// - Atomicity: If transaction fails, neither data nor event is saved
 /// - Reliability: Events are persisted; can retry publishing
 /// - Ordering: Events published in order they were created
 
 // Step 1: Write business data AND event in same transaction
-async fn create_order_with_outbox(
-    db: &Database,
-    order: &Order,
-) -> Result<(), Error> {
-    db.transaction(|tx| async {
-        // Save the order (your business data)
-        tx.save_order(&order).await?;
-        
-        // Insert event into outbox table (same transaction!)
-        let event = OrderCreatedEvent {
-            order_id: order.id,
-            user_id: order.user_id,
-            total: order.total,
-            created_at: Utc::now(),
-        };
-        tx.insert_outbox_event("order.created", &event).await?;
-        
-        // Both succeed or both fail - atomic!
-        Ok(())
-    }).await
+async fn create_order_with_outbox(db: &Database, order: &Order) -> Result<(), sqlx::Error> {
+    let mut tx = db.pool.begin().await?;
+
+    // Save the order (your business data)
+    save_order(&mut tx, order).await?;
+
+    // Insert event into outbox table (same transaction!)
+    let event = OrderCreatedEvent {
+        order_id: order.id,
+        user_id: order.user_id,
+        total: order.total,
+        created_at: Utc::now(),
+    };
+    insert_outbox_event(&mut tx, "order.created", &event).await?;
+
+    // Both succeed or both fail - atomic!
+    tx.commit().await
 }
 
 // Step 2: Separate background process that publishes events
-async fn outbox_publisher(db: &Database, producer: &IggyProducer) {
+async fn outbox_publisher(db: &Database, producer: &IggyProducer) -> anyhow::Result<()> {
     loop {
-        // Fetch unpublished events from outbox table
+        // Fetch unpublished events from outbox table, oldest first
         let events = db.fetch_unpublished_events(100).await?;
-        
+
         for event in events {
+            // The outbox ID doubles as the message ID, so a consumer can
+            // recognise a message it has already processed
+            let message = IggyMessage::builder()
+                .id(event.id.as_u128())
+                .payload(event.payload.into())
+                .build()?;
+            // Keep each order's events in one partition, in order
+            let key = Partitioning::messages_key(event.aggregate_id.as_bytes())?;
+
             // Publish to Iggy
-            match producer.send(event.payload.clone()).await {
+            match producer.send_with_partitioning(vec![message], Some(Arc::new(key))).await {
                 Ok(_) => {
                     // Mark as published so we don't send again
                     db.mark_event_published(event.id).await?;
                 }
                 Err(e) => {
-                    // Log error, will retry on next iteration
+                    // Stop here, so the next iteration retries this event
+                    // before any later one
                     log::error!("Failed to publish event {}: {}", event.id, e);
+                    break;
                 }
             }
         }
-        
+
         // Small delay to avoid busy-looping
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 ```
+
+A crash between the send and `mark_event_published` sends that event again
+after a restart, so the outbox publishes at least once: consumers drop
+duplicates by message ID or event ID ([Idempotency](#idempotency)).
 
 **Outbox Database Schema:**
 
@@ -743,28 +840,30 @@ enum OrderCreatedEvent {
     V1 {
         order_id: Uuid,
         user_id: Uuid,
-        total: f64,  // Old: floating point
+        total: f64, // Old: floating point
     },
     #[serde(rename = "2")]
     V2 {
         order_id: Uuid,
         user_id: Uuid,
-        total: Decimal,  // New: exact decimal
-        currency: String,  // New field
+        total: Decimal,   // New: exact decimal
+        currency: String, // New field
     },
 }
 
-fn process_order_created(event: OrderCreatedEvent) {
+fn process_order_created(event: OrderCreatedEvent) -> anyhow::Result<()> {
     match event {
         OrderCreatedEvent::V1 { order_id, user_id, total } => {
             // Handle legacy format
-            let total = Decimal::from_f64_retain(total).unwrap();
-            process_order(order_id, user_id, total, "USD")
+            let total = Decimal::from_f64_retain(total)
+                .ok_or_else(|| anyhow::anyhow!("order {order_id}: total {total} is not finite"))?;
+            process_order(order_id, user_id, total, "USD");
         }
         OrderCreatedEvent::V2 { order_id, user_id, total, currency } => {
-            process_order(order_id, user_id, total, &currency)
+            process_order(order_id, user_id, total, &currency);
         }
     }
+    Ok(())
 }
 ```
 
@@ -775,6 +874,9 @@ fn process_order_created(event: OrderCreatedEvent) {
 ### Complete Producer Example
 
 ```rust
+use std::str::FromStr;
+use std::sync::Arc;
+
 use iggy::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -788,37 +890,28 @@ struct OrderEvent {
     data: serde_json::Value,
 }
 
-async fn run_producer() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to Iggy
-    let client = IggyClient::builder()
-        .with_tcp()
-        .with_server_address("127.0.0.1:8090")
-        .build()?;
-    
+async fn run_producer() -> anyhow::Result<()> {
+    // Connect to Iggy. A binary client signs in with the credentials in the
+    // connection string when it connects.
+    let client = IggyClient::from_connection_string("iggy://iggy:iggy@127.0.0.1:8090")?;
     client.connect().await?;
-    client.login_user("iggy", "iggy").await?;
-    
-    // Ensure stream and topic exist
-    let _ = client.create_stream("ecommerce", Some(1)).await;
-    let _ = client.create_topic(
-        "ecommerce",
-        "orders",
-        3,  // partitions
-        None,
-        None,
-        Some(IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?)),
-        None,
-    ).await;
-    
-    // Create producer
+
+    // Create producer. init() creates the stream and the topic if they do
+    // not exist.
     let producer = client
         .producer("ecommerce", "orders")?
-        .batch_size(100)
-        .send_interval(IggyDuration::from_str("100ms")?)
+        .create_topic_if_not_exists(
+            3, // partitions
+            IggyExpiry::ExpireDuration(IggyDuration::from_str("7days")?),
+            MaxTopicSize::ServerDefault,
+        )
+        // Direct mode, the default: send() returns once the server has
+        // answered. `.background(BackgroundConfig)` batches in a background
+        // task instead, and then Ok from send() means only that it queued.
         .build();
-    
+
     producer.init().await?;
-    
+
     // Send events
     let order_id = Uuid::new_v4();
     let event = OrderEvent {
@@ -831,16 +924,20 @@ async fn run_producer() -> Result<(), Box<dyn std::error::Error>> {
             "total": "59.98"
         }),
     };
-    
+
     let payload = serde_json::to_vec(&event)?;
-    
+    let message = IggyMessage::builder().payload(payload.into()).build()?;
+
     // Use order_id as partition key for ordering
+    let partitioning = Partitioning::messages_key_str(&order_id.to_string())?;
     producer
-        .send_with_key(order_id.to_string(), payload)
+        .send_with_partitioning(vec![message], Some(Arc::new(partitioning)))
         .await?;
-    
+
     println!("Sent event: {:?}", event.id);
-    
+
+    producer.shutdown().await;
+    client.shutdown().await?;
     Ok(())
 }
 ```
@@ -848,56 +945,57 @@ async fn run_producer() -> Result<(), Box<dyn std::error::Error>> {
 ### Complete Consumer Example
 
 ```rust
+use futures::StreamExt;
 use iggy::prelude::*;
 
-async fn run_consumer() -> Result<(), Box<dyn std::error::Error>> {
-    let client = IggyClient::builder()
-        .with_tcp()
-        .with_server_address("127.0.0.1:8090")
-        .build()?;
-    
+async fn run_consumer() -> anyhow::Result<()> {
+    let client = IggyClient::from_connection_string("iggy://iggy:iggy@127.0.0.1:8090")?;
     client.connect().await?;
-    client.login_user("iggy", "iggy").await?;
-    
-    // Create consumer with consumer group
+
+    // Create consumer with consumer group (group, stream, topic). init()
+    // creates the group if it does not exist and joins it.
     let mut consumer = client
-        .consumer_group("ecommerce", "orders", "order-processors")?
-        .auto_commit(AutoCommit::IntervalOrWhen(
-            IggyDuration::from_str("5s")?,
-            AutoCommitWhen::ConsumingAllMessages,
-        ))
-        .create_consumer_group_if_not_exists()
-        .auto_join_consumer_group()
+        .consumer_group("order-processors", "ecommerce", "orders")?
+        .poll_options(PollOptions {
+            count: 100,
+            // Manual commit, the default: the loop commits each processed message
+            commit: CommitPolicy::Manual,
+            ..PollOptions::wait(IggyDuration::ONE_SECOND)
+        })
         .polling_strategy(PollingStrategy::next())
-        .poll_interval(IggyDuration::from_str("100ms")?)
-        .batch_size(100)
         .build();
-    
+
     consumer.init().await?;
-    
+
     println!("Consumer started, waiting for messages...");
-    
-    while let Some(message) = consumer.next().await {
-        let event: OrderEvent = serde_json::from_slice(&message.payload)?;
-        
+
+    while let Some(received) = consumer.next().await {
+        let received = received?;
+        let event: OrderEvent = serde_json::from_slice(&received.message.payload)?;
+
         println!(
             "Received: {} - {} (partition {})",
-            event.event_type,
-            event.order_id,
-            message.partition_id
+            event.event_type, event.order_id, received.partition_id
         );
-        
-        // Process the event
+
+        // Process the event, and commit it only once processed
         match process_order_event(&event).await {
-            Ok(_) => println!("Processed successfully"),
-            Err(e) => eprintln!("Processing error: {}", e),
+            Ok(()) => consumer.commit(received.checkpoint()).await?,
+            Err(e) => {
+                // Left uncommitted, it is delivered again after a restart or a rebalance
+                eprintln!("Processing error: {}", e);
+                break;
+            }
         }
     }
-    
+
+    // Leave the group before the client goes
+    consumer.shutdown().await?;
+    client.shutdown().await?;
     Ok(())
 }
 
-async fn process_order_event(event: &OrderEvent) -> Result<(), Box<dyn std::error::Error>> {
+async fn process_order_event(event: &OrderEvent) -> anyhow::Result<()> {
     match event.event_type.as_str() {
         "order.created" => handle_order_created(event).await,
         "order.paid" => handle_order_paid(event).await,
@@ -917,11 +1015,11 @@ async fn process_order_event(event: &OrderEvent) -> Result<(), Box<dyn std::erro
 ### CLI Commands
 
 ```bash
-# View messages in a topic
-iggy -u iggy -p iggy message poll --offset 0 --message-count 100 stream topic 1
+# View messages in a topic (partition 0; partitions are 0-indexed)
+iggy -u iggy -p iggy message poll --offset 0 --message-count 100 stream topic 0
 
 # Send a message
-iggy -u iggy -p iggy message send --partition-id 1 stream topic "hello world"
+iggy -u iggy -p iggy message send --partition-id 0 stream topic "hello world"
 
 # List streams
 iggy -u iggy -p iggy stream list
@@ -937,7 +1035,7 @@ iggy -u iggy -p iggy topic get stream topic
 
 ```bash
 # Health check
-curl http://localhost:8000/
+curl http://localhost:8000/health
 
 # Create stream
 curl -X POST http://localhost:8000/streams \
@@ -949,19 +1047,30 @@ curl -X POST http://localhost:8000/streams/my-stream/topics \
   -H "Content-Type: application/json" \
   -d '{"name": "events", "partitions": 3, "options": {"durability": "persisted"}}'
 
-# Send message
+# Send message: an event, and an optional partition key (without one,
+# sends are balanced across partitions)
 curl -X POST http://localhost:8000/streams/my-stream/topics/events/messages \
   -H "Content-Type: application/json" \
-  -d '{"partitioning": {"kind": "partition_id", "value": 1}, "messages": [{"payload": "aGVsbG8="}]}'
+  -d '{
+    "event": {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "event_type": "order.created",
+      "timestamp": "2024-01-15T10:30:00Z",
+      "payload": {"type": "Generic", "data": {"order_id": "123"}}
+    },
+    "partition_key": "order-123"
+  }'
 
-# Poll messages
-curl "http://localhost:8000/streams/my-stream/topics/events/messages?consumer_id=1&partition_id=1&count=10"
+# Poll messages (partitions are 0-indexed; "order-123" lands in partition 0)
+curl "http://localhost:8000/streams/my-stream/topics/events/messages?consumer_id=1&partition_id=0&count=10"
 ```
 
 ### Environment Variables (iggy_sample)
 
 ```bash
-# Connection
+# Connection: one address, or comma-separated seeds tried in order, e.g.
+# iggy://user:pass@node1:8090,node2:8090,node3:8090. The gateway caps the
+# SDK's reconnection retries at 3 unless the string sets reconnection_retries.
 IGGY_CONNECTION_STRING=iggy://user:pass@host:8090
 
 # Defaults
@@ -986,10 +1095,11 @@ POLL_MAX_COUNT=100
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Iggy HTTP API | http://localhost:3000 | iggy/iggy |
-| Iggy Web UI | http://localhost:3050 | iggy/iggy |
+| Iggy Web UI | http://localhost:3000/ui | iggy/iggy |
 | Prometheus | http://localhost:9090 | - |
 | Grafana | http://localhost:3001 | admin/admin |
 | Sample App | http://localhost:8000 | - |
+| Sample App metrics | http://localhost:9091/metrics | - |
 
 ---
 
@@ -999,7 +1109,3 @@ POLL_MAX_COUNT=100
 - [Event-Driven Architecture Patterns](https://martinfowler.com/articles/201701-event-driven.html)
 - [Designing Data-Intensive Applications](https://dataintensive.net/) - Martin Kleppmann
 - [Enterprise Integration Patterns](https://www.enterpriseintegrationpatterns.com/)
-
----
-
-*Last updated: December 2025*

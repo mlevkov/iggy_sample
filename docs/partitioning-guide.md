@@ -72,7 +72,7 @@ Partition 0: [msg1] → [msg4] → ... → Consumer A
 Partition 1: [msg2] → [msg5] → ... → Consumer B  
 Partition 2: [msg3] → [msg6] → ... → Consumer C
 
-Throughput: 3x improvement
+Throughput: up to 3x (three consumers in parallel)
 ```
 
 ### Problem 2: Locality
@@ -126,18 +126,19 @@ let events = vec![
 ### What Happens Without Partition Keys?
 
 ```
-Producer sends events (no partition key):
+Producer sends events (no partition key, so balanced: each send
+goes to the next partition):
 
-Event 1: Created    → hash(random) % 3 = 0 → Partition 0
-Event 2: Paid       → hash(random) % 3 = 2 → Partition 2
-Event 3: Shipped    → hash(random) % 3 = 1 → Partition 1
-Event 4: Delivered  → hash(random) % 3 = 0 → Partition 0
+Event 1: Created    → Partition 0
+Event 2: Paid       → Partition 1
+Event 3: Shipped    → Partition 2
+Event 4: Delivered  → Partition 0
 
 Consumer processing order (parallel consumption):
 
 Consumer A (P0): Created → Delivered
-Consumer B (P1): Shipped
-Consumer C (P2): Paid
+Consumer B (P1): Paid
+Consumer C (P2): Shipped
 
 Actual processing order: Created → Shipped → Paid → Delivered
                                    ^^^^^^^^^^^^^^^^
@@ -148,9 +149,9 @@ Actual processing order: Created → Shipped → Paid → Delivered
 
 ```rust
 // Consumer processes "Shipped" before "Paid"
-fn process_order_shipped(order_id: &str) {
+fn process_order_shipped(db: &Database, order_id: &str) {
     let order = db.get_order(order_id);
-    
+
     if order.status != OrderStatus::Paid {
         // ERROR: "Cannot ship unpaid order!"
         // But the payment DID happen - we just processed out of order
@@ -182,19 +183,22 @@ Single consumer processes them in exact order.
 partition_index = hash(partition_key) % number_of_partitions
 ```
 
+In Iggy, `hash` is XxHash32 with seed 0 (see
+[Understanding the Key Hash](#understanding-the-key-hash-xxhash32)).
+
 Step by step:
 
 ```
 partition_key = "order-123"
 
 Step 1: Hash the key
-        hash("order-123") = 2847623847 (example hash value)
+        XxHash32("order-123") = 3483354390
 
 Step 2: Modulo by partition count
-        2847623847 % 3 = 1
+        3483354390 % 3 = 0
 
 Step 3: Route to partition
-        Message → Partition 1
+        Message → Partition 0
 ```
 
 ### Consistent Hashing Guarantee
@@ -202,13 +206,17 @@ Step 3: Route to partition
 The same key ALWAYS maps to the same partition (given fixed partition count):
 
 ```
-hash("order-123") % 3 = 1  ← Always 1
-hash("order-123") % 3 = 1  ← Always 1
-hash("order-123") % 3 = 1  ← Always 1
+hash("order-123") % 3 = 0  ← Always 0
+hash("order-123") % 3 = 0  ← Always 0
+hash("order-123") % 3 = 0  ← Always 0
 
 hash("order-456") % 3 = 2  ← Always 2
 hash("order-456") % 3 = 2  ← Always 2
 ```
+
+This is plain modulo hashing, not a consistent-hashing ring: changing the
+partition count moves most keys (see
+[Mistake 5](#mistake-5-changing-partition-count)).
 
 ### What Makes a Good Partition Key?
 
@@ -225,16 +233,29 @@ hash("order-456") % 3 = 2  ← Always 2
 
 Apache Iggy provides three built-in partitioning strategies through the `Partitioning` struct and `PartitioningKind` enum.
 
+The strategy picks one partition per send request: every message of a
+request goes to the same partition. (`IggyProducer` splits a large send into
+requests of up to 1000 messages, and with `balanced` each request can go to
+a different partition.) Over the binary transports (TCP, QUIC, WebSocket)
+the SDK resolves `balanced` and `messages_key` itself and sends an explicit
+partition ID. Over HTTP it sends the strategy, and the server resolves it at
+admission with the same rules.
+
 ### Strategy 1: Balanced (Round-Robin)
 
-The server automatically distributes messages across partitions using round-robin:
+Each send goes to the next partition in turn:
 
 ```rust
 use iggy::prelude::*;
 
-// Messages distributed: P0 → P1 → P2 → P0 → P1 → P2 → ...
+// Each send goes to the next partition: P0 → P1 → P2 → P0 → ...
 let partitioning = Partitioning::balanced();
 ```
+
+Over the binary transports the round-robin cursor belongs to the client,
+one per topic, starting at partition 0: several producers each cycle on
+their own, and many short-lived clients that send once each all hit
+partition 0. Over HTTP the server keeps one counter per topic.
 
 **When to use:**
 - Order of events doesn't matter
@@ -254,6 +275,9 @@ use iggy::prelude::*;
 let partitioning = Partitioning::partition_id(2);
 ```
 
+Partition IDs start at 0. An ID past the last partition fails the send
+with `PartitionNotFound`.
+
 **When to use:**
 - Priority queues (partition 0 = high priority)
 - Manual load balancing
@@ -264,13 +288,13 @@ let partitioning = Partitioning::partition_id(2);
 
 ### Strategy 3: Messages Key (Hash-Based)
 
-The server calculates partition using **MurmurHash3** of your key:
+The partition is the **XxHash32** of your key modulo the partition count:
 
 ```rust
 use iggy::prelude::*;
 
 // All messages with same key go to same partition
-// partition = murmur3(key) % partition_count
+// partition = XxHash32(key) % partition_count
 
 // String keys
 let partitioning = Partitioning::messages_key_str("order-123")?;
@@ -284,8 +308,11 @@ let partitioning = Partitioning::messages_key_u128(uuid_as_u128);
 ```
 
 **Key constraints:**
-- Maximum key length: **255 bytes**
+- Key length: **1 to 255 bytes** (`messages_key` and `messages_key_str` refuse an empty or longer key)
 - Supports: `&[u8]`, `&str`, `u32`, `u64`, `u128`
+- Numeric keys hash their little-endian bytes, so `messages_key_u64(123)` and
+  `messages_key_str("123")` can land on different partitions. Every producer
+  of a topic must use the same key form.
 
 **When to use:**
 - Ordering required for related events
@@ -296,28 +323,72 @@ let partitioning = Partitioning::messages_key_u128(uuid_as_u128);
 
 | Strategy | Ordering | Distribution | Use Case |
 |----------|----------|--------------|----------|
-| `balanced()` | None | Even (round-robin) | Logs, metrics, stateless |
+| `balanced()` | None | Even per client (round-robin of sends) | Logs, metrics, stateless |
 | `partition_id(n)` | Per-partition | Manual | Priority queues, testing |
 | `messages_key(k)` | Per-key | Hash-based | Entity workflows, sessions |
 
-### Understanding MurmurHash3
+### Partition Keys Through This Gateway
 
-Iggy uses MurmurHash3 for key-based partitioning:
+`POST /messages`, `POST /messages/batch` and
+`POST /streams/{stream}/topics/{topic}/messages` take an optional
+`partition_key` string. With it, the gateway sends
+`Partitioning::messages_key_str(key)`; without it, `Partitioning::balanced()`
+(`send_event` and `send_events_batch` in `src/iggy_client/mod.rs`).
+
+- One key covers a whole `/messages/batch` request, and a batch without a
+  key goes to one partition too.
+- The key lands where `messages_key_str` with the same string lands from any
+  binary client, so other producers stay consistent with the gateway if they
+  key by the same string.
+- The gateway passes the key through unchecked: an empty key, or one longer
+  than 255 bytes, fails the send with `500` (`send_error`).
+- A poll (`GET /messages`, `GET /streams/{stream}/topics/{topic}/messages`)
+  reads one partition, `partition_id`, which is 0-based and defaults to `0`.
+
+```bash
+# The default topic has 3 partitions (IGGY_PARTITIONS)
+curl -X POST http://localhost:8000/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event": {
+      "id": "550e8400-e29b-41d4-a716-446655440010",
+      "event_type": "order.created",
+      "timestamp": "2024-01-15T10:30:00Z",
+      "payload": {"type": "Generic", "data": {"order_id": "order-123"}}
+    },
+    "partition_key": "order-123"
+  }'
+
+# XxHash32("order-123") % 3 = 0, so the event is in partition 0
+curl "http://localhost:8000/messages?partition_id=0&offset=0&count=10"
+```
+
+### Understanding the Key Hash (XxHash32)
+
+Iggy hashes keys with XxHash32, seed 0 (`calculate_32` in `iggy_common`):
 
 ```
-partition_id = murmur3_hash(key_bytes) % partition_count
+partition_id = XxHash32(key_bytes, seed = 0) % partition_count
 ```
 
-**Properties of MurmurHash3:**
+Over TCP, QUIC and WebSocket the SDK computes this before sending, with the
+partition count it has cached for the topic. Over HTTP the server computes
+the same hash. To predict where a key lands:
+
+```rust
+// What the SDK computes for a messages key over TCP, QUIC and WebSocket
+let partition_id = iggy_common::calculate_32(b"order-123") % partitions_count;
+```
+
+**Properties of XxHash32:**
 - Non-cryptographic (fast, not secure)
-- Excellent distribution (minimal collisions)
+- Good distribution for well-spread keys
 - Deterministic (same key = same hash)
-- Used by Kafka, Cassandra, and other distributed systems
 
 **Why it matters:**
 ```
-murmur3("order-123") = 0x8A3F2B1C  (example)
-murmur3("order-124") = 0x2D7E9F8A  (completely different)
+XxHash32("order-123") = 0xCF9FC516  → % 3 = 0
+XxHash32("order-124") = 0xD9F3B84E  → % 3 = 2  (completely different)
 
 Even sequential keys distribute evenly across partitions.
 ```
@@ -435,14 +506,14 @@ Topic: "system-events" (3 partitions)
 
 Topic: "transactions" (1 partition)
   → Max 1 consumer
-  → Bottleneck at ~10K msg/sec
+  → Throughput capped by what that one consumer processes
   → Cannot scale horizontally
 
 ✅ CORRECT: Plan for growth
 
 Topic: "transactions" (10 partitions)
   → Up to 10 consumers
-  → Can handle 100K+ msg/sec
+  → Up to 10x the processing parallelism
   → Room to grow
 ```
 
@@ -451,9 +522,10 @@ Topic: "transactions" (10 partitions)
 ```
 ❌ WRONG: 1000 partitions "just in case"
 
-Topic: "notifications" (1000 partitions)
-  → Memory overhead for each partition
-  → Increased leader election time
+Topic: "notifications" (1000 partitions, the most one create accepts)
+  → Memory and file handles for each partition (its own WAL budget,
+    consensus pipeline and segment read state)
+  → On a cluster, one more consensus group per partition to fail over
   → Most partitions sit idle
   → Harder to rebalance
 
@@ -461,7 +533,7 @@ Topic: "notifications" (1000 partitions)
 
 Topic: "notifications" (10 partitions)
   → Monitor throughput
-  → Add partitions when needed
+  → Add partitions when needed (for a keyed topic, by migrating: see Mistake 5)
 ```
 
 ### Mistake 4: Low-Cardinality Partition Keys
@@ -493,14 +565,17 @@ Distribution:
 ❌ DANGEROUS: Adding partitions to existing topic
 
 Before: 3 partitions
-  hash("order-123") % 3 = 1 → Partition 1
+  hash("order-122") % 3 = 1 → Partition 1
 
 After: 5 partitions
-  hash("order-123") % 5 = 2 → Partition 2  ← DIFFERENT!
+  hash("order-122") % 5 = 3 → Partition 3  ← DIFFERENT!
 
-Old events for "order-123" in Partition 1
-New events for "order-123" in Partition 2
+Old events for "order-122" in Partition 1
+New events for "order-122" in Partition 3
 Ordering broken!
+
+From 3 to 5 partitions, a key keeps its partition only when
+hash % 15 is 0, 1 or 2: about 1 key in 5 stays, 4 in 5 move.
 
 ✅ SAFE APPROACH:
 1. Create new topic with desired partition count
@@ -509,21 +584,27 @@ Ordering broken!
 4. Deprecate old topic
 ```
 
+Iggy can also fix a topic's partition count at creation
+(`partition_resize_policy: fixed`). This gateway does not offer that option,
+and it has no endpoint that adds partitions.
+
 ### Mistake 6: No Partition Key at All
 
 ```
-❌ WRONG: Random distribution (no key)
+❌ WRONG: Round-robin distribution (no key)
 
-producer.send(message);  // No partition key
+producer.send(vec![message]).await?;  // Partitioning::balanced() by default
 
-Events randomly distributed:
+Events spread over partitions, one partition per send:
   Order 123 Created   → Partition 0
-  Order 123 Paid      → Partition 2  ← Out of order risk!
-  Order 123 Shipped   → Partition 1  ← Out of order risk!
+  Order 123 Paid      → Partition 1  ← Out of order risk!
+  Order 123 Shipped   → Partition 2  ← Out of order risk!
 
 ✅ CORRECT: Always use meaningful partition key
 
-producer.send_with_key(order_id, message);
+let key = Arc::new(Partitioning::messages_key_str(&order_id)?);
+producer.send_with_partitioning(vec![message], Some(key)).await?;
+// Through this gateway: "partition_key": "<order_id>" in the request body
 
 Events consistently routed:
   Order 123 Created   → Partition 1
@@ -547,6 +628,10 @@ Partition Count = max(
 
 ### Rules of Thumb
 
+The throughput bands below are illustrative, not Iggy measurements. What one
+partition sustains depends on message size, the topic's durability policy
+and, usually first, how fast its consumer processes. Measure it.
+
 | Throughput | Partitions | Notes |
 |------------|------------|-------|
 | < 1K msg/sec | 1-3 | Development, low-volume |
@@ -559,13 +644,25 @@ Partition Count = max(
 ```
 Required Partitions = Peak Messages Per Second / Messages Per Partition Per Second
 
-Example:
+Example (illustrative figures):
   Peak throughput: 50,000 msg/sec
-  Per-partition throughput: 5,000 msg/sec (conservative estimate)
+  Per-partition throughput: 5,000 msg/sec (an assumed figure; measure yours)
   Required: 50,000 / 5,000 = 10 partitions
 
   Add buffer: 10 * 1.5 = 15 partitions
 ```
+
+### Hard Limits
+
+| Limit | Value | Source |
+|-------|-------|--------|
+| Partitions in one create request | 1000 | Server (`TooManyPartitions`), `MAX_PARTITIONS_COUNT` in `iggy_common`. This gateway refuses more with `400` (`MAX_PARTITIONS`, `src/validation.rs`) |
+| Partitions with `preallocate_segments` | `segment_size` × partitions ≤ 64 GiB, so at most 64 partitions with the default 1 GiB segments | `MAX_PREALLOCATED_TOPIC_BYTES` in `iggy_common`; the gateway checks it before creating the topic |
+| Partitions on a node, all topics | `[metadata] partitions_max`, default `0` (no cap) | Server config; past it, creates fail with `PartitionsLimitReached` |
+
+This gateway creates a topic with 1 partition when `partitions` is left out
+of `POST /streams/{stream}/topics`, and the default topic with
+`IGGY_PARTITIONS` (3).
 
 ### Starting Recommendations
 
@@ -586,28 +683,33 @@ Understanding how Iggy stores partition data helps you make better configuration
 ### Physical Storage Layout
 
 ```
-data/                           # Base data directory
+local_data/                     # Base data directory (`path`, env IGGY_PATH)
 └── streams/
     └── {stream_id}/
         └── topics/
             └── {topic_id}/
                 └── partitions/
-                    ├── 0/                    # Partition 0
-                    │   ├── 00000000000000000001/  # Segment 1
-                    │   │   ├── .log              # Message data
-                    │   │   ├── .index            # Offset index
-                    │   │   └── .timeindex        # Timestamp index
-                    │   └── 00000000000000001001/  # Segment 2
-                    │       ├── .log
-                    │       ├── .index
-                    │       └── .timeindex
-                    ├── 1/                    # Partition 1
-                    └── 2/                    # Partition 2
+                    ├── 0/                              # Partition 0
+                    │   ├── 00000000000000000000.log    # Segment 1: message batches
+                    │   ├── 00000000000000000000.index  # Segment 1: sparse index
+                    │   ├── 00000000000001000000.log    # Segment 2, from offset 1000000
+                    │   ├── 00000000000001000000.index
+                    │   ├── offsets/                    # Stored consumer and group offsets
+                    │   └── prepares-{revision}/        # Partition write-ahead log
+                    ├── 1/                              # Partition 1
+                    └── 2/                              # Partition 2
 ```
+
+Segments are files in the partition directory, not directories: each is a
+`.log` and an `.index` named after the segment's first offset, padded to 20
+digits. Stream, topic and partition directories are numbered from 0. The
+[durable-storage guide](durable-storage-guide.md#on-disk-layout) lists the
+remaining files, observed in a running 0.10.0 container.
 
 ### Segments
 
-Each partition is divided into **segments** - fixed-size files that make up the append-only log:
+Each partition is divided into **segments**, files of about `segment_size`
+(a per-topic option, 1 GiB by default) that make up the append-only log:
 
 ```
 Partition 0:
@@ -620,42 +722,41 @@ Partition 0:
     0-999K          1M-1.99M          2M-current
 ```
 
+`segment_size` is a soft limit: a segment closes after the batch that
+crosses it, so a sealed segment can run one batch past it.
+
 **Segment benefits:**
-- Efficient deletion (drop entire segment files)
-- Parallel reads from different segments
-- Memory-mapped I/O for performance
-- Archival/backup at segment granularity
+- Efficient deletion (retention drops whole sealed segments)
+- Bounded memory for old data: at most 12 sealed segments per partition keep
+  an open read handle, and a sealed segment's index is reloaded from its
+  `.index` file when needed
+- Asynchronous file I/O (compio over io_uring), not memory-mapped files
+- No built-in archiver: back up the data directory, or stream data out
+  through a client (see the
+  [durable-storage guide](durable-storage-guide.md#backup-and-archiving))
 
 ### Indexes
 
-Each segment has two indexes for fast lookups:
+Each segment has one sparse index, its `.index` file. There is no separate
+time index: each entry carries both an offset and a timestamp.
 
-**Offset Index (`.index`):**
+**Sparse index (`.index`):**
 ```
-Maps message offset → file position
-┌────────────┬───────────────┐
-│ Offset     │ File Position │
-├────────────┼───────────────┤
-│ 1000000    │ 0             │
-│ 1000100    │ 52480         │  ← Sparse index (every N messages)
-│ 1000200    │ 104960        │
-└────────────┴───────────────┘
+One 24-byte entry per chunk of batches written to the segment:
+offset u64 (absolute), timestamp u64 (microseconds), position u64,
+all little-endian
+┌────────────┬──────────────────┬───────────────┐
+│ Offset     │ Timestamp        │ File Position │
+├────────────┼──────────────────┼───────────────┤
+│ 1000000    │ 1705312800000000 │ 0             │  ← 2024-01-15T10:00:00Z
+│ 1001024    │ 1705312860000000 │ 1052672       │  ← 10:01:00, sparse
+│ 1002048    │ 1705312920000000 │ 2105344       │  ← 10:02:00
+└────────────┴──────────────────┴───────────────┘
 
-Lookup: offset 1000150 → scan from 52480
-```
-
-**Time Index (`.timeindex`):**
-```
-Maps timestamp → offset
-┌─────────────────────┬────────────┐
-│ Timestamp           │ Offset     │
-├─────────────────────┼────────────┤
-│ 2024-01-15T10:00:00 │ 1000000    │
-│ 2024-01-15T10:01:00 │ 1000500    │
-│ 2024-01-15T10:02:00 │ 1001000    │
-└─────────────────────┴────────────┘
-
-Lookup: "messages after 10:01:30" → start at offset 1000500
+Lookup by offset: offset 1001500 → nearest entry at or below
+                  (1001024) → scan from position 1052672
+Lookup by time:   "messages after 10:01:30" → nearest entry at or
+                  below (10:01:00) → scan from position 1052672
 ```
 
 ---
@@ -686,6 +787,11 @@ What matters for partitioning:
   partition count: 60 GiB across 6 partitions retains about 10 GiB in each.
   A hot partition (a skewed key) reaches its share first and loses its
   oldest data first.
+- **Each partition's share is floored at one sealed segment** (`segment_size`
+  plus the maximum bus frame), so a small cap still keeps about partitions ×
+  `segment_size`: a 1 GiB cap across 6 partitions with 1 GiB segments keeps
+  about 6 GiB of sealed data, while a topic read still reports 1 GiB
+  (`per_partition_size_budget` in the server's `segment_cleaner.rs`).
 - **A finite cap must be at least one segment** (`segment_size`, 1 GiB by
   default), counted for the whole topic, not per partition.
 - **`preallocate_segments` reserves `segment_size` per partition** when the
@@ -740,11 +846,11 @@ Scenario 1: 2 consumers
 │ Consumer B: P3, P4, P5                  │
 └─────────────────────────────────────────┘
 
-Scenario 2: 3 consumers (rebalance)
+Scenario 2: 3 consumers (rebalance after C joins)
 ┌─────────────────────────────────────────┐
 │ Consumer A: P0, P1                      │
-│ Consumer B: P2, P3                      │
-│ Consumer C: P4, P5                      │
+│ Consumer B: P3, P4                      │
+│ Consumer C: P2, P5    ← only these move │
 └─────────────────────────────────────────┘
 
 Scenario 3: 6 consumers (perfect distribution)
@@ -770,43 +876,78 @@ Scenario 4: 8 consumers (2 idle)
 └─────────────────────────────────────────┘
 ```
 
+The server keeps each member's partitions where it can and moves only those
+above a member's fair share, as in Scenario 2. After several joins, which
+member holds which partition depends on the order they joined, so read the
+assignment rather than assume it.
+
 ### Rebalancing Triggers
 
 | Event | What Happens |
 |-------|--------------|
-| Consumer joins | Partitions redistributed |
-| Consumer leaves/crashes | Partitions reassigned to remaining consumers |
-| Consumer heartbeat timeout | Treated as crash, partitions reassigned |
+| Consumer joins | Partitions above each member's fair share move to it |
+| Consumer leaves (`shutdown()` leaves the group) | Its partitions go to the remaining members at once |
+| Consumer crashes or loses its connection | Its partitions are reassigned when its session ends: 1.2 × `[heartbeat] interval` (36 s at the default 30 s) after the server last heard from it |
+| Partitions added or removed | The group rebalances over the new set; members pick it up on their next heartbeat |
 
 ### Rebalancing Impact
 
 ```
-During rebalance:
-1. All consumers stop processing (brief pause)
-2. Coordinator recalculates assignments
-3. Consumers receive new assignments
-4. Processing resumes
+During rebalance (server 0.10):
+1. Coordinator recalculates assignments, moving as few partitions
+   as it can
+2. A partition that moves enters pending revocation: its current
+   owner stops reading it, so it can commit what it was served
+3. The handoff completes once that owner has committed, or after
+   [consumer_group] rebalancing_timeout (30 s by default)
+4. The new owner reads on from the last committed offset
 
-Duration: Typically 1-30 seconds depending on group size
+Partitions that do not move keep being consumed throughout.
+A handoff forced by the timeout can deliver the uncommitted
+messages again, to the new owner.
 ```
 
 ### Minimizing Rebalance Impact
 
 ```rust
-// Use longer session timeout to prevent spurious rebalances
-let consumer = client
-    .consumer_group("stream", "topic", "group")?
-    .session_timeout(Duration::from_secs(30))  // Default is often 10s
-    .heartbeat_interval(Duration::from_secs(10))
-    .build();
+use futures::StreamExt;
+use iggy::prelude::*;
 
-// Process batches, not single messages (reduces commit frequency)
-let batch = consumer.poll(100).await?;
-for message in batch {
-    process(message)?;
+// No session timeout or heartbeat setting here: the server ends a
+// member's session 1.2 x [heartbeat] interval (36 s by default) after
+// it last heard from it, and the SDK pings every 5 s on its own.
+let mut consumer = client
+    .consumer_group("order-processors", "ecommerce", "orders")?
+    .poll_options(PollOptions {
+        count: 100,
+        // Store the processed position once per batch, not per message.
+        // The consumer also stores it before a rebalance takes a
+        // partition away.
+        commit: CommitPolicy::Auto(AutoCommit {
+            every: Some(CommitEvery::Batch),
+            ..AutoCommit::default()
+        }),
+        ..PollOptions::wait(IggyDuration::ONE_SECOND)
+    })
+    .build();
+consumer.init().await?;
+
+while let Some(received) = consumer.next().await {
+    match received {
+        Ok(received) => process(&received.message)?,
+        // The reader stays usable after a read error and retries
+        Err(error) => eprintln!("Read failed: {error}"),
+    }
 }
-consumer.commit().await?;  // One commit per batch
+
+// Leave the group: its partitions move to the other members at once,
+// not after the session timeout
+consumer.shutdown().await?;
 ```
+
+A longer session timeout (a larger `[heartbeat] interval`, set the same on
+every node) rides out longer network outages without a reassignment, but
+delays the reassignment after a real crash by the same amount.
 
 ---
 
@@ -816,8 +957,11 @@ Iggy supports custom partitioning logic through the `Partitioner` trait. This is
 
 ### The Partitioner Trait
 
+The trait lives in `iggy_common` and is re-exported by `iggy::prelude`:
+
 ```rust
 use iggy::prelude::*;
+use std::fmt::Debug;
 
 /// Custom partitioner must implement this trait
 pub trait Partitioner: Send + Sync + Debug {
@@ -831,6 +975,12 @@ pub trait Partitioner: Send + Sync + Debug {
 }
 ```
 
+Only `IggyProducer` calls it: once per batch it writes (one `send` call, or
+adjacent sends that a background producer merged), with all messages of the
+batch, and its result replaces any `Partitioning` the call or the producer
+names. Plain `send_messages` calls on the client ignore it. With a
+client-side encryptor, it sees the encrypted payloads.
+
 ### Example: Weighted Partitioner
 
 Route more traffic to specific partitions (e.g., for heterogeneous hardware):
@@ -839,7 +989,7 @@ Route more traffic to specific partitions (e.g., for heterogeneous hardware):
 use iggy::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Routes 70% to partitions 0-1, 30% to partitions 2-4
+/// Routes 70% of sends to partitions 0-1, 30% to partitions 2-4
 #[derive(Debug)]
 struct WeightedPartitioner {
     counter: AtomicU64,
@@ -904,6 +1054,7 @@ Route based on message content:
 ```rust
 use iggy::prelude::*;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Deserialize)]
 struct EventEnvelope {
@@ -948,6 +1099,7 @@ impl Partitioner for PriorityPartitioner {
 ```rust
 use iggy::prelude::*;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 // Create your custom partitioner
 let partitioner = Arc::new(WeightedPartitioner {
@@ -957,13 +1109,28 @@ let partitioner = Arc::new(WeightedPartitioner {
     high_capacity_weight: 70,
 });
 
-// Use with IggyClient
+// Set it on the client builder, before choosing the transport
 let client = IggyClient::builder()
+    .with_partitioner(partitioner)
     .with_tcp()
-    .with_server_address("127.0.0.1:8090")
-    .with_partitioner(partitioner)  // Inject custom partitioner
+    .with_server_address("127.0.0.1:8090".to_string())
     .build()?;
 ```
+
+Every producer built from that client (`client.producer(..)`) then uses it.
+To give it to one producer only, set it on the producer builder:
+
+```rust
+let producer = client
+    .producer("ecommerce", "orders")?
+    .partitioner(partitioner)
+    .build();
+producer.init().await?;
+```
+
+This gateway sends through the `Client` trait, not `IggyProducer`, so it
+uses no partitioner: its routing is the `partition_key` described in
+[Partition Keys Through This Gateway](#partition-keys-through-this-gateway).
 
 ### When to Use Custom Partitioners
 
@@ -1016,7 +1183,8 @@ Solution:
 - Consumer group: "session-analyzers"
 
 Why 20 partitions?
-- 280 msg/sec ÷ ~50 msg/sec per consumer = 6 consumers minimum
+- 280 msg/sec ÷ ~50 msg/sec per consumer (an assumed processing
+  rate) = 6 consumers minimum
 - 20 partitions allows scaling to 20 consumers
 - High cardinality of session_id ensures even distribution
 ```
@@ -1035,7 +1203,11 @@ Solution:
 - Partition key: account_id
 - Consumer group: "transaction-processors"
 - Replication factor: 3 (the `replication_factor` topic option since server 0.10; see the [cluster demo](cluster-demo.md#replication-factor))
-- acks: all (wait for all replicas)
+- Durability: "persisted". Iggy has no acks setting to raise: a
+  successful send has already waited for the replication quorum
+  to commit it, and "persisted" also requires stable-storage
+  copies at that quorum
+  (see the [durable-storage guide](durable-storage-guide.md#the-two-policies))
 
 Why account_id as key?
 - Balance calculations require strict ordering
@@ -1058,9 +1230,12 @@ Solution:
 - Consumer group per processing type
 
 Why tenant_id?
-- Natural isolation boundary
+- Natural ordering boundary (not physical isolation: about
+  10 tenants share each partition here)
 - Events for a tenant stay together
-- Hot tenants spread across partitions via hashing
+- Tenants spread across partitions via hashing, but each tenant,
+  however hot, stays on one partition (see salting under
+  Troubleshooting)
 ```
 
 ---
@@ -1071,8 +1246,12 @@ Why tenant_id?
 
 ```rust
 use iggy::prelude::*;
+use serde::Serialize;
+use serde_json::json;
+use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Serialize)]
 struct OrderEvent {
     order_id: Uuid,
     event_type: String,
@@ -1082,22 +1261,24 @@ struct OrderEvent {
 async fn publish_order_event(
     producer: &IggyProducer,
     event: &OrderEvent,
-) -> Result<(), Error> {
+) -> anyhow::Result<()> {
     let payload = serde_json::to_vec(event)?;
-    
+    let message = IggyMessage::builder().payload(payload.into()).build()?;
+
     // Use order_id as partition key
     // All events for this order go to the same partition
-    let partition_key = event.order_id.to_string();
-    
+    let partitioning = Partitioning::messages_key_str(&event.order_id.to_string())?;
+
     producer
-        .send_with_key(partition_key, payload)
+        .send_with_partitioning(vec![message], Some(Arc::new(partitioning)))
         .await?;
-    
+
     Ok(())
 }
 
-// Usage: All these events will be in the same partition, in order
-async fn process_order(producer: &IggyProducer, order_id: Uuid) {
+// Usage: All these events will be in the same partition, in order,
+// because one task awaits each send before the next
+async fn process_order(producer: &IggyProducer, order_id: Uuid) -> anyhow::Result<()> {
     let events = vec![
         OrderEvent {
             order_id,
@@ -1115,115 +1296,147 @@ async fn process_order(producer: &IggyProducer, order_id: Uuid) {
             data: json!({"carrier": "UPS", "tracking": "1Z999"}),
         },
     ];
-    
+
     for event in events {
-        publish_order_event(producer, &event).await.unwrap();
+        publish_order_event(producer, &event).await?;
     }
+    Ok(())
 }
 ```
 
 ### Consumer with Partition Awareness
 
 ```rust
-async fn run_consumer() -> Result<(), Error> {
+use futures::StreamExt;
+use iggy::prelude::*;
+
+async fn run_consumer(client: &IggyClient) -> anyhow::Result<()> {
     let mut consumer = client
-        .consumer_group("ecommerce", "order-events", "processors")?
-        .auto_commit(AutoCommit::IntervalOrWhen(
-            IggyDuration::from_str("5s")?,
-            AutoCommitWhen::ConsumingAllMessages,
-        ))
+        .consumer_group("processors", "ecommerce", "order-events")?
+        .poll_options(PollOptions {
+            // Store processed offsets every 10,000 messages or 5 s
+            commit: CommitPolicy::Auto(AutoCommit::default()),
+            ..PollOptions::wait(IggyDuration::ONE_SECOND)
+        })
         .create_consumer_group_if_not_exists()
-        .auto_join_consumer_group()
         .build();
-    
+
+    // Creates the group if needed and joins it
     consumer.init().await?;
-    
-    while let Some(message) = consumer.next().await {
-        // message.partition_id tells you which partition this came from
+
+    while let Some(received) = consumer.next().await {
+        let received = match received {
+            Ok(received) => received,
+            Err(error) => {
+                eprintln!("Read failed: {error}");
+                continue;
+            }
+        };
+        // received.partition_id tells you which partition this came from
         println!(
             "Processing message from partition {}: offset {}",
-            message.partition_id,
-            message.offset
+            received.partition_id, received.message.header.offset
         );
-        
-        let event: OrderEvent = serde_json::from_slice(&message.payload)?;
-        
+
+        let event: OrderEvent = serde_json::from_slice(&received.message.payload)?;
+
         // All events for the same order_id come from the same partition
         // So they arrive in order
         process_order_event(&event).await?;
     }
-    
+
+    consumer.shutdown().await?;
     Ok(())
 }
 ```
 
+`consumer_group(name, stream, topic)` takes the group name first. The
+consumer's default commit policy is `Manual`: without `CommitPolicy::Auto`
+(or `commit(received.checkpoint())` after processing), nothing is stored and
+the next run reads the same messages again.
+
 ### Manual Partition Selection (Advanced)
 
 ```rust
+use iggy::prelude::*;
+use std::sync::Arc;
+
 // Sometimes you need explicit control over partition assignment
 
 async fn send_to_specific_partition(
     producer: &IggyProducer,
     partition_id: u32,
-    message: &[u8],
-) -> Result<(), Error> {
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    let message = IggyMessage::builder().payload(payload.to_vec().into()).build()?;
+
     // Use partition ID directly instead of key-based routing
+    let partitioning = Partitioning::partition_id(partition_id);
     producer
-        .send_to_partition(partition_id, message.to_vec())
-        .await
+        .send_with_partitioning(vec![message], Some(Arc::new(partitioning)))
+        .await?;
+    Ok(())
 }
 
 // Use case: Priority processing
 // High-priority orders go to partition 0 (dedicated fast consumer)
-// Normal orders distributed across partitions 1-5
+// Normal orders distributed across partitions 1-5 (6 partitions in all)
 
-async fn send_order_by_priority(
-    producer: &IggyProducer,
-    order: &Order,
-) -> Result<(), Error> {
+async fn send_order_by_priority(producer: &IggyProducer, order: &Order) -> anyhow::Result<()> {
     let payload = serde_json::to_vec(order)?;
-    
-    if order.priority == Priority::High {
-        producer.send_to_partition(0, payload).await
+    let message = IggyMessage::builder().payload(payload.into()).build()?;
+
+    let partition_id = if order.priority == Priority::High {
+        0
     } else {
-        // Normal priority: use order_id as key for distribution
-        producer.send_with_key(order.id.to_string(), payload).await
-    }
+        // Hash the order ID over partitions 1-5 only. A messages key would
+        // hash over all six partitions, partition 0 included.
+        1 + iggy_common::calculate_32(order.id.to_string().as_bytes()) % 5
+    };
+
+    let partitioning = Partitioning::partition_id(partition_id);
+    producer
+        .send_with_partitioning(vec![message], Some(Arc::new(partitioning)))
+        .await?;
+    Ok(())
 }
 ```
 
 ### Partition-Aware Batch Processing
 
 ```rust
+use iggy::prelude::*;
 use std::collections::HashMap;
 
-async fn process_batch_by_partition(
-    messages: Vec<Message>,
-) -> Result<(), Error> {
+async fn process_batch_by_partition(messages: Vec<ReceivedMessage>) -> anyhow::Result<()> {
     // Group messages by partition for efficient processing
-    let mut by_partition: HashMap<u32, Vec<Message>> = HashMap::new();
-    
+    let mut by_partition: HashMap<u32, Vec<ReceivedMessage>> = HashMap::new();
+
     for msg in messages {
-        by_partition
-            .entry(msg.partition_id)
-            .or_default()
-            .push(msg);
+        by_partition.entry(msg.partition_id).or_default().push(msg);
     }
-    
+
     // Process each partition's messages (they're already ordered within partition)
     for (partition_id, partition_messages) in by_partition {
-        println!("Processing {} messages from partition {}", 
-            partition_messages.len(), partition_id);
-        
+        println!(
+            "Processing {} messages from partition {}",
+            partition_messages.len(),
+            partition_id
+        );
+
         for msg in partition_messages {
             // Messages within a partition are in order
             process_message(&msg).await?;
         }
     }
-    
+
     Ok(())
 }
 ```
+
+`ReceivedMessage` is what `IggyConsumer` yields: the message
+(`msg.message.header.offset`, `msg.message.payload`) plus the
+`partition_id` it came from.
 
 ---
 
@@ -1237,11 +1450,19 @@ async fn process_batch_by_partition(
 
 **Diagnosis:**
 ```bash
-# Check partition sizes via Iggy CLI
+# Check partition sizes via Iggy CLI (size and message count per partition)
 iggy topic get stream-name topic-name
+
+# Or through this gateway: "partitions" lists each partition's
+# messages_count, members and in_sync_members
+curl http://localhost:8000/streams/stream-name/topics/topic-name
 
 # Look for skew in message counts per partition
 ```
+
+On a cluster, a partition whose `in_sync_members` is shorter than its
+`members` has a replica behind or down; node `status` in `GET /cluster` is
+not a liveness signal on 0.10.
 
 **Solutions:**
 
@@ -1259,10 +1480,12 @@ iggy topic get stream-name topic-name
 
 3. **Add salting** for hot keys:
    ```rust
+   use rand::random;
+
    // Instead of just user_id for power users
    let salt = random::<u8>() % 10;
    let partition_key = format!("{}-{}", user_id, salt);
-   // Spreads hot user across 10 partitions
+   // Spreads a hot user over up to 10 partitions
    // Trade-off: events for same user may be out of order
    ```
 
@@ -1289,15 +1512,27 @@ iggy topic get stream-name topic-name
 
 3. **Optimize consumer**
    ```rust
-   // Process larger batches
-   .batch_size(1000)  // Instead of 100
-   
-   // Reduce commit frequency
-   .auto_commit(AutoCommit::IntervalOrWhen(
-       IggyDuration::from_str("10s")?,  // Less frequent
-       AutoCommitWhen::ConsumingAllMessages,
-   ))
+   use iggy::prelude::*;
+   use std::time::Duration;
+
+   let consumer = client
+       .consumer_group("processors", "ecommerce", "order-events")?
+       .poll_options(PollOptions {
+           // Messages per read, over all partitions of a fetch (1000 is
+           // also the default)
+           count: 1000,
+           // Store offsets less often: every 10 s instead of every 5 s
+           commit: CommitPolicy::Auto(AutoCommit {
+               interval: Some(NonZeroIggyDuration::new(Duration::from_secs(10))?),
+               ..AutoCommit::default()
+           }),
+           ..PollOptions::wait(IggyDuration::ONE_SECOND)
+       })
+       .build();
    ```
+
+   Through this gateway, a poll returns at most `POLL_MAX_COUNT` messages
+   (default 100) whatever `count` asks for; raise it for larger reads.
 
 ### Problem: Out-of-Order Processing
 
@@ -1313,8 +1548,8 @@ println!(
     "Processing event {} for order {} (partition {}, offset {})",
     event.event_type,
     event.order_id,
-    message.partition_id,
-    message.offset
+    received.partition_id,
+    received.message.header.offset
 );
 ```
 
@@ -1322,18 +1557,27 @@ println!(
 
 1. **Add partition key** if missing
    ```rust
-   // Before: no key, random partition
-   producer.send(message).await;
-   
+   use iggy::prelude::*;
+   use std::sync::Arc;
+
+   // Before: no key, so each send goes to the next partition
+   // producer.send(messages).await?;
+
    // After: consistent partitioning
-   producer.send_with_key(order_id, message).await;
+   let key = Arc::new(Partitioning::messages_key_str(&order_id)?);
+   producer.send_with_partitioning(messages, Some(key)).await?;
    ```
+
+   Through this gateway, add `"partition_key"` to the request body.
 
 2. **Check for multiple producers** using different keys
    ```
    Producer A: partition_key = order.id
    Producer B: partition_key = order.user_id  ← Inconsistent!
-   
+
+   Producer A: messages_key_str("123")
+   Producer B: messages_key_u64(123)          ← Same ID, different bytes!
+
    Fix: All producers must use same key strategy
    ```
 
@@ -1363,9 +1607,9 @@ println!(
 ```
 Do I need ordering for related events?
 ├── Yes → Use partition key (entity ID)
-└── No  → Random distribution is fine
+└── No  → Round-robin (balanced) is fine
 
-How many partitions?
+How many partitions? (illustrative; measure your own throughput)
 ├── Low volume (<1K/sec)  → 3-6
 ├── Medium (<100K/sec)    → 6-20
 └── High (>100K/sec)      → 20-100+
@@ -1383,7 +1627,7 @@ What should my partition key be?
 - [Apache Iggy Documentation](https://iggy.apache.org/docs/) - Official documentation
 - [Iggy Getting Started Guide](https://iggy.apache.org/docs/introduction/getting-started) - Partitioning strategies explained
 - [Iggy Server Configuration](https://iggy.apache.org/docs/server/configuration) - Partition and segment settings
-- [Iggy Rust SDK](https://docs.rs/iggy/latest/iggy/) - API reference for `Partitioning`, `Partitioner` trait
+- [Iggy Rust SDK 0.12.0](https://docs.rs/iggy/0.12.0/iggy/) - API reference for `Partitioning`, `Partitioner` trait
 
 ### Distributed Systems Fundamentals
 - [Designing Data-Intensive Applications](https://dataintensive.net/) - Chapter 6: Partitioning (Martin Kleppmann)
@@ -1392,8 +1636,7 @@ What should my partition key be?
 
 ### Related Technologies
 - [Kafka Partitioning](https://kafka.apache.org/documentation/#intro_concepts_and_terms) - Similar concepts (Iggy inspired by Kafka)
-- [MurmurHash](https://en.wikipedia.org/wiki/MurmurHash) - Hash algorithm used for partition key routing
-- [Cassandra Murmur3Partitioner](https://docs.datastax.com/en/cassandra-oss/3.x/cassandra/architecture/archPartitionerM3P.html) - Another system using murmur3
+- [xxHash](https://github.com/Cyan4973/xxHash) - Hash family of XxHash32, which Iggy uses (seed 0, through the `twox-hash` crate) for partition key routing
 
 ### Performance and Benchmarking
 - [Iggy Benchmarks](https://benchmarks.iggy.apache.org) - Official performance metrics
@@ -1401,4 +1644,4 @@ What should my partition key be?
 
 ---
 
-*Last updated: December 2025*
+*Last updated: November 2026 (Iggy server 0.10.0, Rust SDK 0.12.0)*

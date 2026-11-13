@@ -11,10 +11,13 @@
 //! # Architecture
 //!
 //! ```text
-//! Request → Rate Limiter → Auth → Timeout → Request ID → Handler → Response
-//!              ↓              ↓       ↓           ↓
-//!          429 Too Many   401 Unauth  ext    X-Request-Id header
+//! Request → Rate Limiter → Auth → Request ID → Timeout → Trace → CORS → Body Limit → Handler
+//!              ↓             ↓         ↓            ↓                      ↓
+//!          429 Too Many   401/429   X-Request-Id   ext                413 Too Large
 //! ```
+//!
+//! The order is set in `routes.rs` (the last layer added runs first). Rate
+//! limiting and auth share client IP extraction ([`ip`]).
 //!
 //! # Security Considerations
 //!

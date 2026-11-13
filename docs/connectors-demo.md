@@ -50,9 +50,17 @@ the two plugins, which takes about two minutes.
 Without the overlay, the main stack runs as before: no connectors, and the
 gateway's `/sink/inbound` routes do not exist.
 
+The script fails when a flow does not complete within `BUDGET` seconds (30
+by default). It also reads `GATEWAY_URL` (`http://localhost:8000`),
+`WEBHOOK_URL` (`http://localhost:8085`) and `API_KEY` (sent as `X-API-Key`);
+the top of `scripts/connectors-demo.sh` lists them.
+
 A run of the demo script:
 
 ```
+== Preflight
+gateway ready, webhook endpoint http://localhost:8085/e/<secret id>
+
 == Inbound: a signed webhook into sample-stream/webhooks
 forged signature:  HTTP 401
 signed webhook:    HTTP 200 {"status":"queued"}
@@ -67,6 +75,7 @@ delivered to POST /sink/inbound, reported by GET /sink/inbound:
   {"partition_id":0,"offset":3,"id":"6ce22808cd362896954d39d160bb4ddc",...}
   {"partition_id":2,"offset":2,"id":"4dbf73a7d5c91483f24c03c06a484994",...}
   {"partition_id":1,"offset":2,"id":"c4f3622ca54915a1a34c7c0058d198b1",...}
+receiver totals:   {"messages_received":...,"batches_accepted":...,"batches_rejected":0,"unauthorized_requests":...}
 
 == Summary
 inbound:   webhook readable through the gateway 1s after it was sent
@@ -163,7 +172,7 @@ The receiver (`src/handlers/sink.rs`, `src/services/sink_inbox.rs`):
 
 - **It exists only when `SINK_INBOUND_TOKEN` or `SINK_INBOUND_TOKEN_FILE` is
   set.** Otherwise both routes answer `404`. The token must be 32 to 1024
-  printable characters.
+  printable ASCII characters, without spaces.
 - **`POST` needs `Authorization: Bearer <token>`.** The token is checked in
   constant time, before the body is read. A missing or wrong token answers
   `401` and is counted.
@@ -197,7 +206,11 @@ The receiver (`src/handlers/sink.rs`, `src/services/sink_inbox.rs`):
 
 If you set `API_KEY` on the gateway, the sink must send `X-API-Key` as well:
 add it to `[plugin_config.headers]` in
-`connectors/templates/connectors/gateway_sink.toml`.
+`connectors/templates/connectors/gateway_sink.toml`. The gateway also needs
+`TRUSTED_PROXIES` (the compose network's CIDR) or, locally,
+`ALLOW_UNVERIFIED_CLIENT_IPS=true`: it refuses to start with `API_KEY` alone.
+Both demo scripts send `API_KEY` as `X-API-Key` when it is set in their
+environment.
 
 ## Delivery Semantics
 
@@ -246,6 +259,10 @@ How they are handled:
   the result where only uid 10001 can read it.
 - **No password is stored.** The runtime signs in to Iggy with the
   `connectors` personal access token, which it reads from the file.
+- **Credentials reach the `iggy` CLI through its environment.**
+  `connectors-init` passes the root password and the token as
+  `IGGY_USERNAME`/`IGGY_PASSWORD` and `IGGY_TOKEN`, never as arguments,
+  which any user who can list processes can read.
 - **Restarts keep the secrets.** `connectors-init` keeps a token that still
   signs in, so a runtime holding it can reconnect.
 - **`down -v` starts over**, with new secrets.
@@ -303,8 +320,12 @@ plugin builds. `connectors/Dockerfile` therefore:
 
 Runtime and plugins exchange configuration and messages across a C ABI
 defined by the connector SDK, so both must come from the same commit.
-**Bumping connectors means changing `IGGY_COMMIT` and the runtime tag
-together.**
+**Bumping connectors means changing `IGGY_COMMIT`, the runtime tag and its
+digest together.** Both base images (`apache/iggy-connect:0.6.0` and
+`rust:1.99.1-slim-trixie`) are pinned by tag and multi-arch index digest, and
+with a digest present Docker ignores the tag, so a tag-only change keeps the
+old runtime under new plugins. Dependabot does not cover `connectors/`; take
+each new digest from `docker buildx imagetools inspect <image>:<tag>`.
 
 The image's `org.opencontainers.image.revision` label reads `1fb58a67`, the
 branch head when upstream's release workflow ran, not `91e02063`. The binary
