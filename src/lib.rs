@@ -3,8 +3,9 @@
 //! A comprehensive, production-ready demonstration of Apache Iggy message
 //! streaming with Axum, featuring:
 //!
-//! - **High Performance**: True batch sending, connection pooling
-//! - **Resilience**: Automatic reconnection with exponential backoff
+//! - **High Performance**: True batch sending, one shared SDK client
+//! - **Resilience**: Reconnection with exponential backoff, a circuit
+//!   breaker, and SDK 0.12 lane settling
 //! - **Security**: API key authentication, rate limiting, input validation
 //! - **Observability**: Request IDs, structured logging, health endpoints
 //!
@@ -14,15 +15,16 @@
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                      Axum HTTP Server                       │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  Middleware (Rate Limit → Auth → Request ID → Trace)        │
+//! │  Middleware (Rate Limit → Auth → Request ID → Timeout →     │
+//! │              Trace → CORS → Body Limit)                     │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  Handlers (health, messages, streams, topics)               │
+//! │  Handlers (health, cluster, messages, streams, topics, sink)│
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  Services (ProducerService, ConsumerService)                │
+//! │  Services (ProducerService, ConsumerService, SinkInbox)     │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  IggyClientWrapper (with auto-reconnect)                    │
+//! │  IggyClientWrapper (seeds, lanes, breaker, reconnect)       │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  Apache Iggy Server (TCP/QUIC/HTTP)                         │
+//! │  Apache Iggy 0.10, one node or a cluster (TCP/QUIC/HTTP)    │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
