@@ -41,8 +41,8 @@ convey on its own.
 
 `IGGY_TOPIC_<OPTION>` (e.g. `IGGY_TOPIC_DURABILITY=persisted`) sets one
 per-topic option of the default topic, with the names and values of the
-`options` object on `POST /streams/{s}/topics`. Topic options are fixed at
-creation, so these apply only when the gateway creates the topic; for an
+`options` object on `POST /streams/{s}/topics`. The gateway sets topic
+options only when it creates a topic, so these apply only then; for an
 existing topic `ensure_topic` logs each differing option as a warning and
 changes nothing.
 
@@ -173,8 +173,9 @@ The fuzz tests verify that validation functions never panic on any input.
 ## Per-Topic Options
 
 Since server 0.9, durability, segment, flush and retention settings belong to
-each topic and are fixed at creation (ADR-0001 PR 2, on SDK 0.12 per
-ADR-0002). `src/models/topic_options.rs` holds the whole contract:
+each topic (ADR-0001 PR 2, on SDK 0.12 per ADR-0002). Most are fixed at
+creation; Iggy can later update only `message_expiry` and `max_topic_size`
+(SDK 0.12 `TopicUpdateOptions`), which this gateway does not offer. `src/models/topic_options.rs` holds the whole contract:
 
 - `TopicOptionsInput` is the raw form, from the request body's `options`
   object or from `IGGY_TOPIC_*`. `validate()` checks each option against the

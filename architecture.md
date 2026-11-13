@@ -183,8 +183,9 @@ request, while those clients bind to one topic at build time.
   rerun a lane-refused call once. The gateway never resends an unknown
   outcome itself.
 - **Per-topic options** (`models/topic_options.rs`): durability, segment,
-  flush, retention and replication settings belong to each topic and are
-  fixed at creation. `POST /streams/{s}/topics` takes them as `options`
+  flush, retention and replication settings belong to each topic. The gateway
+  sets them only at creation (Iggy can later change `message_expiry` and
+  `max_topic_size`, which the gateway does not offer). `POST /streams/{s}/topics` takes them as `options`
   (unknown fields are refused with 422), topic reads report each option with
   its `source`, and `IGGY_TOPIC_<OPTION>` sets them for the default topic.
 

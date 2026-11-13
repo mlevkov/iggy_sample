@@ -245,7 +245,10 @@ their checksums and partition identity whatever this setting says.
 
 ## Data Retention Policies
 
-Retention is per topic, set at creation, and deletes whole sealed segments.
+Retention is per topic and deletes whole sealed segments. This gateway sets
+it at creation; Iggy can update a topic's `message_expiry` and
+`max_topic_size` later (SDK 0.12 `TopicUpdateOptions`), but the gateway does
+not offer updates.
 The active segment is never touched.
 
 ### Time-Based Retention (Message Expiry)
