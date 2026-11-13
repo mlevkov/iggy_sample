@@ -148,10 +148,19 @@ new leader: node 1, 5s after the kill
 iggy-node-0 back in sync on every partition 4s after starting
 == Summary
 leader:        node 0 killed, node 1 elected after 5s
+sends resumed: a send started after the kill succeeded ...s after it
 sends:         44 ok, 0 failed
 slowest send:  0.0s before the kill, 4.3s around and after it
+failed sends by status:
 PASS
 ```
+
+(`...` marks lines and values left out.) The script's budgets and settings
+are environment variables, listed at the top of
+`scripts/cluster-failover-demo.sh`: `RESUME_BUDGET` (30 s for a new leader
+and a successful send), `REJOIN_BUDGET` (60 s for the killed node to rejoin),
+`SEND_INTERVAL` (0.2 s), `WARMUP` (5 s of traffic before the kill),
+`GATEWAY_URL` (`http://localhost:8001`) and `API_KEY` (sent as `X-API-Key`).
 
 What happens, and why:
 

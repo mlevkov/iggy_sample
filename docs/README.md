@@ -13,6 +13,11 @@ This directory contains comprehensive guides for understanding and working with 
 | [Connectors Demo](connectors-demo.md) | Iggy's connector runtime with the HTTP source and sink: signed webhooks into a `persisted` topic, events back to the gateway's `/sink/inbound`, what each direction guarantees, the secrets and what is exposed, and issues found in the pinned releases |
 | [Structured Concurrency](structured-concurrency.md) | Task lifecycle management, cancellation tokens, and graceful shutdown patterns |
 | [Architecture Decision Records](adr/README.md) | Significant design decisions and their reasoning, starting with the Iggy upgrade plan (0.9, then 0.10) |
+| [Tech Debt Registry](tech-debt/README.md) | Deferred review findings, each with the trigger that forces its resolution |
+| [Session State](SESSION-STATE.md) | Rolling handoff between working sessions, newest block first |
+
+The gateway's own architecture is in [architecture.md](../architecture.md) at the
+repository root; `code-reviews/` holds the records of past reviews.
 
 ## Quick Navigation
 
@@ -41,7 +46,12 @@ This directory contains comprehensive guides for understanding and working with 
 - [Outbox Pattern](guide.md#pattern-outbox-for-reliable-publishing) - Reliable event publishing
 - [Production Recommendations](durable-storage-guide.md#production-recommendations) - Config templates
 
+**Clustering and Connectors**
+- [Three-Node Cluster Demo](cluster-demo.md) - Failover, replication factors, seeds
+- [Connectors Demo](connectors-demo.md) - HTTP source and sink, delivery guarantees
+
 **Application Internals**
+- [Architecture](../architecture.md) - Components, request flow, SDK integration
 - [Structured Concurrency](structured-concurrency.md) - Background task management
 - [Graceful Shutdown](structured-concurrency.md) - Clean shutdown procedures
 
@@ -57,7 +67,3 @@ This directory contains comprehensive guides for understanding and working with 
 - [Event-Driven Architecture Patterns](https://martinfowler.com/articles/201701-event-driven.html) - Martin Fowler
 - [Designing Data-Intensive Applications](https://dataintensive.net/) - Martin Kleppmann
 - [Enterprise Integration Patterns](https://www.enterpriseintegrationpatterns.com/)
-
----
-
-*Last updated: December 2025*
